@@ -32,10 +32,11 @@ The module is split into focused internal packages. Each layer depends only on t
 |  internal/tools           (tool definitions + handlers) |
 +---------------------------------------------------------+
 |  internal/mailbox         (Backend interface)           |
-|  internal/imapclient      (IMAP Backend implementation) |
-|  internal/smtpclient      (SMTP submission)             |
-|  internal/mailmime        (MIME parse/compose)          |
-|  internal/attachments     (filesystem confinement)      |
+|  internal/mailbox/memory  (in-memory Backend)           |
+|  internal/imapclient      (IMAP Backend — read slice)   |
+|  internal/smtpclient      (SMTP submission — future)    |
+|  internal/mailmime        (MIME parse/compose — future) |
+|  internal/attachments     (os.Root confinement)         |
 +---------------------------------------------------------+
 |  internal/accounts        (Account registry, conns.)    |
 |  internal/permissions     (caps, enforcement)           |
@@ -80,21 +81,38 @@ type Backend interface {
 }
 ```
 
-Two implementations will exist:
+Three implementations exist or are planned:
 
-1. `internal/imapclient.Backend` — Phase 2.
-2. `mailbox/memmap` (test-only, in `internal/tools` test package) — for unit tests.
+1. `internal/mailbox/memory` — loads `.eml` files from a directory. Used
+   for development and tests. Rejects symlink entries.
+2. `internal/imapclient` — the production IMAP4rev1 implementation.
+   **Read-only** in this slice. Sends, modifications and deletions land
+   in subsequent slices.
+3. SMTP and an `os.Root`-confined attachment source — future work.
 
-This keeps tools testable without a live IMAP server.
+A new test fixture in `internal/imapclient` runs the production client
+against an in-process go-imap server over TLS, exercising the full
+real-protocol path. The end-to-end test in `internal/tools` exercises
+the same backend through the MCP tool layer.
 
 ### 2.4 IMAP and SMTP (`internal/imapclient`, `internal/smtpclient`)
 
-Phase 2 work. Will use the emersion libraries:
+**Status (this slice):** `internal/imapclient` ships the read-only
+IMAP4rev1 backend. It uses `github.com/emersion/go-imap` v1
+(v1.2.1) and supports:
 
-- `github.com/emersion/go-imap/v1` — IMAP4rev1 client.
-- `github.com/emersion/go-smtp` — SMTP submission client.
+- Implicit TLS on 993 and STARTTLS on 143.
+- `LIST *` for mailboxes, with sorted output.
+- `UID SEARCH` and `UID FETCH` for listings and searches.
+- `UID FETCH BODY[]` for full message bodies.
+- Single shared connection per account under a mutex.
+- Automatic reconnect on connection drop or server error.
+- Refusal to dial without TLS or STARTTLS — plain IMAP is never
+  accepted.
 
-Both are mature, well-maintained, used in production by many projects, and have no extra abstractions beyond the protocol.
+SMTP submission and MIME composition are deliberately not in this
+slice. They are documented in `docs/PHASE2_DESIGN.md` and will land in
+subsequent PRs.
 
 ### 2.5 MIME (`internal/mailmime`)
 
