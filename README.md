@@ -27,8 +27,15 @@ and `SMTP`. It is designed to be:
   development.
 
 **Phase 2 (Mail functionality)** is in progress. **Phase 2.1**
-(read-only IMAP correctness + MIME reading) is implemented in this
-branch:
+(read-only IMAP correctness + MIME reading) is implemented and
+merged on `main` (PR #3). It is a **development milestone**, not
+a production-hardened release: the IMAP literal pre-allocation
+is unbounded by the application cap and the
+[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §10
+pre-production security requirement is mandatory before any
+production deployment that fetches from untrusted IMAP servers.
+
+Phase 2.1 ships:
 
 - IMAP4rev1 read-only backend with TLS, EXAMINE-based read-only
   selection, and `BODY.PEEK[]` body fetches (no implicit `\Seen`).
@@ -44,9 +51,13 @@ branch:
 - Reconnect safety: a fresh EXAMINE re-validates UIDVALIDITY; no
   mutating operation is silently retried.
 
-The remaining Phase 2 slices (SMTP submission, MIME composition,
-replies, forwards, attachments, protected modifications) are
-documented in [`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md).
+**Phase 2.2** is the next development slice. The plan is in
+[`docs/PHASE2.2.md`](docs/PHASE2.2.md); the design is in
+[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §11. The
+priorities are: (1) protocol-level IMAP literal-size enforcement
+(the §10 requirement), (2) IMAP search correctness defects, (3)
+secure attachment retrieval. SMTP, outbound attachments, and
+mutating mailbox operations remain out of scope.
 
 **Phase 3 (Hardening)** will add race tests, fuzz tests,
 installation docs, and a cross-platform release.

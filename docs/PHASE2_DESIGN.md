@@ -466,3 +466,29 @@ runs as a long-lived process handling untrusted mail.
 **Out of scope (deferred, not a blocker):** Outbound IMAP
 operations (`APPEND`, `COPY`) are not in scope for Phase 2.1
 and do not affect this requirement.
+## 11. Phase 2.2 plan
+
+The next development slice is `phase-2.2/imap-literal-cap`
+(branched from `main` at the squash-merge of PR #3). The full
+plan, including priorities, acceptance criteria, deliverables,
+and out-of-scope items, is in `docs/PHASE2.2.md`. The three
+priorities are, in order:
+
+1. **Protocol-level IMAP literal-size enforcement** —
+   resolves the mandatory pre-production security requirement
+   (§10). Preferred implementation: narrowly scoped fork of
+   `github.com/emersion/go-imap` to expose
+   `Reader.MaxLiteralSize` as a `client.Options` field.
+2. **IMAP search correctness defects** — `Flagged`, `Unseen`,
+   `Subject + From + To` OR semantics, `SentSince` /
+   `SentBefore` semantics (§7).
+3. **Secure attachment retrieval** — new `read_attachment` tool
+   with stable MIME-part references and strict resource
+   limits.
+
+SMTP, outbound attachments, and mutating mailbox operations
+remain out of scope. Phase 2.2 does not yet mark the
+implementation as production-hardened: the
+`docs/PHASE2_DESIGN.md` §10 requirement must be closed
+before any production deployment that fetches from
+untrusted IMAP servers.
