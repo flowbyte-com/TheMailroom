@@ -26,8 +26,27 @@ and `SMTP`. It is designed to be:
 - An in-memory backend (loads `.eml` files) for tests and local
   development.
 
-**Phase 2 (Mail functionality)** will add IMAP/SMTP wiring, MIME
-composition, replies, attachments, and protected modifications.
+**Phase 2 (Mail functionality)** is in progress. **Phase 2.1**
+(read-only IMAP correctness + MIME reading) is implemented in this
+branch:
+
+- IMAP4rev1 read-only backend with TLS, EXAMINE-based read-only
+  selection, and `BODY.PEEK[]` body fetches (no implicit `\Seen`).
+- Strict UIDVALIDITY handling: `uid_validity` is mandatory on
+  `read_message`; a stale or missing value is rejected before any
+  body is read.
+- MIME parsing via `go-message`: plain text, HTML, multipart,
+  nested multipart, character encodings, attachment metadata,
+  inline attachments, malformed-input handling.
+- Per-account safety limits: max message bytes, max attachment
+  bytes, max total attachment bytes, max MIME nesting, max MIME
+  parts, max attachments.
+- Reconnect safety: a fresh EXAMINE re-validates UIDVALIDITY; no
+  mutating operation is silently retried.
+
+The remaining Phase 2 slices (SMTP submission, MIME composition,
+replies, forwards, attachments, protected modifications) are
+documented in [`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md).
 
 **Phase 3 (Hardening)** will add race tests, fuzz tests,
 installation docs, and a cross-platform release.

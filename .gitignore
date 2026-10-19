@@ -29,4 +29,4 @@ secrets.json
 /go.work.sum
 
 # Dependency caches (outside this module) — keep tidy
-/vendor/
+/vendor/bin/

@@ -1,0 +1,59 @@
+From: "Sender, The" <sender@example.test>
+To: "Alice & Bob" <a@example.test>, "Carol" <c@example.test>
+Cc: "Manager" <mgr@example.test>
+Subject: Multi-part: alternative + related + mixed
+Date: Wed, 17 Jan 2024 09:30:00 +0000
+Message-Id: <multipart@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="OUTER"
+
+--OUTER
+Content-Type: multipart/related; boundary="RELATED"
+
+--RELATED
+Content-Type: multipart/alternative; boundary="ALT"
+
+--ALT
+Content-Type: text/plain; charset=utf-8
+
+Plain text version.
+
+--ALT
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>HTML version with <img src="cid:logo@example.test"/> inline.</p></body></html>
+
+--ALT--
+
+--RELATED
+Content-Type: image/png
+Content-ID: <logo@example.test>
+Content-Disposition: inline; filename="logo.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEUAAACnej3aAAAAAXRS
+TBMAAAEjw8z5AAAAFklEQVQI12NgYGD4DwQMVAUMVTPMAAAAAElFTkSuQmCC
+
+--RELATED--
+
+--OUTER
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJcKlwrHDqwoKMSAwIG9iag0KPDwKL0NyZWF0b3IgKEFkb2JlIFBERikNCi9D
+cmVhdG9yRGF0ZSAoMjAyNDAxMTcpDQo+Pg0KZW5kb2JqDQoyIDAgb2JqDQo8PA0KL1R5cGUg
+L1BhZ2UNCi9NZWRpYUJveCBbMCAwIDU5NSA4NDJdDQo+Pg0KZW5kb2JqDQozIDAgb2JqDQo8
+PA0KL1R5cGUgL0ZvbnQNCi9TdWJ0eXBlIC9UeXBlMQ0KL0Jhc2VGb250IC9IZWx2ZXRpY2EN
+Cj4+DQplbmRvYmoNCnhyZWYNCjEgNA0KdHJhaWxlcg0KPDwKL1NpemUgNA0KL1Jvb3QgMSAw
+Ug0KPj4NCnN0YXJ0eHJlZgozNjEKJSVFT0Y=
+
+--OUTER
+Content-Type: text/csv
+Content-Disposition: attachment; filename="data.csv"
+
+name,count
+a,1
+b,2
+
+--OUTER--

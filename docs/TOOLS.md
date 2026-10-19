@@ -31,7 +31,13 @@ All tools take `account_id` as a required string field. There is no implicit "cu
 - `BackendError` — IMAP/SMTP operation failed; details are redacted.
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
-- `NotImplemented` — capability exists in the schema but is not yet wired (Phase 1 stubs).
+- `NotImplemented` — capability exists in the schema but is not yet wired (Phase 1 stubs). Also returned when a search filter (`Flagged` or `Unseen`) is set; the filter is accepted by the schema but not yet implemented in the IMAP / memory backends.
+- `MessageTooLarge` — the message exceeds `max_message_bytes`.
+- `NestingTooDeep` — the MIME nesting exceeds `max_mime_nesting`.
+- `TooManyParts` — the MIME part count exceeds `max_mime_parts`.
+- `TooManyAttachments` — the attachment count exceeds `max_attachments`.
+- `AttachmentTooLarge` — an attachment exceeds `max_attachment_bytes`.
+- `Malformed` — the message could not be parsed.
 
 ## Read-only tools (Phase 1)
 
@@ -126,9 +132,14 @@ Lists messages in a mailbox.
 }
 ```
 
+`uid_validity` is the live UIDVALIDITY of the selected mailbox. The
+IMAP backend issues a read-only `EXAMINE` for the call, so the value
+is authoritative even after reconnects.
+
 ### `read_message`
 
-Reads a single message, returning headers, text and HTML bodies, and a list of attachments. Bodies are truncated by `max_message_bytes`.
+Reads a single message, returning headers, text and HTML bodies, and
+a list of attachments. Bodies are truncated by `max_message_bytes`.
 
 **Input.**
 
@@ -141,7 +152,11 @@ Reads a single message, returning headers, text and HTML bodies, and a list of a
 }
 ```
 
-`uid_validity` is required in Phase 2 to prevent silent targeting of the wrong message after a mailbox re-creation. In Phase 1 the value is accepted and validated against the schema but not yet cross-checked.
+`uid_validity` is **required** in Phase 2.1. Omitting it returns
+`InvalidInput`; passing a stale value (e.g. one observed before the
+mailbox was re-created) returns `UidMismatch` without reading any
+body. This prevents silent targeting of recycled UIDs after a
+mailbox UIDVALIDITY rollover.
 
 **Output.**
 
@@ -151,6 +166,7 @@ Reads a single message, returning headers, text and HTML bodies, and a list of a
   "mailbox": "INBOX",
   "uid": 1024,
   "uid_validity": 1234567890,
+  "flags": ["\\Seen"],
   "headers": {
     "message_id": "<abc@example.test>",
     "from": "Sender <sender@example.test>",
@@ -164,12 +180,74 @@ Reads a single message, returning headers, text and HTML bodies, and a list of a
   "text": "Plain text body...",
   "html": "<p>HTML body...</p>",
   "attachments": [
-    { "index": 0, "filename": "report.pdf", "mime_type": "application/pdf", "size": 123456 }
-  ]
+    {
+      "index": 0,
+      "part": "2",
+      "filename": "report.pdf",
+      "mime_type": "application/pdf",
+      "size": 123456,
+      "content_id": null,
+      "disposition": "attachment"
+    }
+  ],
+  "warnings": [],
+  "truncated": false
 }
 ```
 
-Bodies are returned as separate fields. The agent is responsible for any rendering. The server never concatenates bodies into a "natural language" string that could be confused with instructions.
+Bodies are returned as separate fields. The agent is responsible for
+any rendering. The server never concatenates bodies into a
+"natural language" string that could be confused with instructions.
+
+**Attachment metadata.** Each attachment entry is metadata only.
+`part` is the IMAP-style 1-indexed path (e.g. `"1.2"` for the
+second part of a `multipart/related` nested inside the root).
+`content_id` is the value of the `Content-ID` header for inline
+references. `disposition` is `attachment` or `inline`. Decoded
+bodies are never materialised inline; a follow-up `read_attachment`
+tool (Phase 2) returns the bytes through a confined stream.
+
+**Read-only IMAP guarantees.**
+
+- The IMAP backend issues `EXAMINE` (read-only `SELECT`) for every
+  read. The server-side state cannot accept `STORE` or `APPEND`.
+- The body is fetched with `UID FETCH BODY.PEEK[]`, which never
+  implicitly sets `\Seen`. A message that the server reports as
+  `\Unseen` remains `\Unseen` after `read_message`.
+- On connection error the client reconnects; the next call
+  re-`EXAMINE`s and re-validates UIDVALIDITY before acting. A
+  mutating operation is never silently retried.
+
+**IMAP literal memory: known UNBOUNDED risk (pre-Phase-2.2).**
+
+The `max_message_bytes` cap on the IMAP body is an
+application-level backstop, **not** a pre-allocation guard.
+The underlying IMAP client (go-imap v1.2.1) allocates a
+buffer of the server-announced literal size and reads the
+literal body into it *before* the application sees the
+data. A server (including a hostile or buggy one) that
+announces a literal larger than `max_message_bytes` will
+cause that allocation *before* the application rejects the
+body. The default 25 MiB cap does not bound this
+allocation.
+
+Production deployments that fetch from untrusted IMAP
+servers must mitigate this at the network layer
+(firewall, reverse proxy with a body-size filter) until
+the protocol-level cap is implemented in Phase 2.2. The
+tracked security requirement with acceptance criteria is
+in `docs/PHASE2_DESIGN.md` §10.
+
+**MIME safety limits** (per account):
+
+- `max_message_bytes` — caps the raw RFC 5322 size (default 25 MiB).
+- `max_attachment_bytes` — caps a single attachment (default 6 MiB).
+- `max_total_attachment_bytes` — caps the sum of attachments (default 25 MiB).
+- `max_mime_nesting` — caps multipart depth (default 16).
+- `max_mime_parts` — caps the total number of parts visited (default 500).
+
+Violations return a typed error (`MessageTooLarge`, `AttachmentTooLarge`,
+`NestingTooDeep`, `TooManyParts`) without reading the rest of the message.
 
 ### `search_messages`
 

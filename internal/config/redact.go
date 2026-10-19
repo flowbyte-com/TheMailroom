@@ -59,9 +59,13 @@ func (s SMTPConfig) redacted() string {
 
 func (l LimitsConfig) redacted() string {
 	return "{max_message_bytes=" + itoa(l.MaxMessageBytes) +
+		", max_attachment_bytes=" + itoa(l.MaxAttachmentBytes) +
+		", max_total_attachment_bytes=" + itoa(l.MaxTotalAttachmentBytes) +
 		", max_attachments=" + itoa(l.MaxAttachments) +
 		", max_search_results=" + itoa(l.MaxSearchResults) +
 		", max_batch_operations=" + itoa(l.MaxBatchOperations) +
+		", max_mime_nesting=" + itoa(l.MaxMIMENesting) +
+		", max_mime_parts=" + itoa(l.MaxMIMEParts) +
 		"}"
 }
 

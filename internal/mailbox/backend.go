@@ -20,14 +20,26 @@ type Backend interface {
 	// ListMessages returns message summaries in a mailbox, ordered by
 	// descending internal date (newest first). Implementations MUST
 	// honour opts.Limit by returning no more than that many entries.
-	ListMessages(ctx context.Context, accountID, mailbox string, opts ListOptions) ([]MessageSummary, error)
+	// UIDValidity is the live UIDVALIDITY of the mailbox observed
+	// during the same EXAMINE that produced the UIDs in Messages;
+	// tools must not combine UIDs from one ListResult with a
+	// UIDVALIDITY obtained from a later selection.
+	ListMessages(ctx context.Context, accountID, mailbox string, opts ListOptions) (ListResult, error)
 
 	// FetchMessage returns a full message body. Implementations MUST
 	// enforce the per-account max_message_bytes limit when decoding.
-	FetchMessage(ctx context.Context, accountID, mailbox string, uid uint32) (*Message, error)
+	//
+	// uidValidity is the UIDVALIDITY the caller last observed for
+	// the mailbox. Implementations MUST validate it against the
+	// current mailbox UIDVALIDITY and return ErrUIDMismatch if it
+	// does not match, or ErrUIDMissing if the server does not
+	// report a UIDVALIDITY (some broken servers return 0).
+	FetchMessage(ctx context.Context, accountID, mailbox string, uid uint32, uidValidity uint32) (*Message, error)
 
-	// SearchMessages returns matching message summaries.
-	SearchMessages(ctx context.Context, accountID, mailbox string, q SearchQuery) ([]MessageSummary, error)
+	// SearchMessages returns matching message summaries. The
+	// returned UIDValidity is the live value observed during the
+	// same EXAMINE that produced the search results.
+	SearchMessages(ctx context.Context, accountID, mailbox string, q SearchQuery) (ListResult, error)
 }
 
 // Mailbox describes one folder on the server.
@@ -37,6 +49,16 @@ type Mailbox struct {
 	Delimiter   string   `json:"delimiter,omitempty"`
 	UIDValidity uint32   `json:"uid_validity,omitempty"`
 	UIDNext     uint32   `json:"uid_next,omitempty"`
+}
+
+// ListResult is the return value of ListMessages and
+// SearchMessages. It binds a set of message summaries to a
+// UIDVALIDITY observed during the same IMAP EXAMINE; the
+// caller MUST use this UIDVALIDITY for any subsequent
+// FetchMessage call.
+type ListResult struct {
+	UIDValidity uint32
+	Messages    []MessageSummary
 }
 
 // ListOptions controls how ListMessages returns data.
@@ -88,10 +110,25 @@ type MessageSummary struct {
 type Message struct {
 	UID         uint32         `json:"uid"`
 	UIDValidity uint32         `json:"uid_validity"`
+	Flags       []string       `json:"flags,omitempty"`
 	Headers     MessageHeaders `json:"headers"`
 	Text        string         `json:"text,omitempty"`
 	HTML        string         `json:"html,omitempty"`
 	Attachments []Attachment   `json:"attachments,omitempty"`
+	Warnings    []string       `json:"warnings,omitempty"`
+	Truncated   bool           `json:"truncated,omitempty"`
+}
+
+// FlagsSlice returns the message's flags as a fresh slice, or an
+// empty slice if the message has none. Callers should not mutate
+// the returned slice.
+func (m *Message) FlagsSlice() []string {
+	if len(m.Flags) == 0 {
+		return []string{}
+	}
+	out := make([]string, len(m.Flags))
+	copy(out, m.Flags)
+	return out
 }
 
 // MessageHeaders are the structured headers used by tools.
@@ -108,11 +145,14 @@ type MessageHeaders struct {
 
 // Attachment describes one MIME attachment.
 type Attachment struct {
-	Index     int    `json:"index"`
-	Filename  string `json:"filename"`
-	MimeType  string `json:"mime_type"`
-	Size      int64  `json:"size"`
-	ContentID string `json:"content_id,omitempty"`
+	Index       int    `json:"index"`
+	Part        string `json:"part,omitempty"`
+	Filename    string `json:"filename"`
+	MimeType    string `json:"mime_type"`
+	Size        int64  `json:"size"`
+	ContentID   string `json:"content_id,omitempty"`
+	Inline      bool   `json:"inline,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
 }
 
 // Size returns an approximate total size of the message body used for
@@ -132,10 +172,18 @@ func (m *Message) Subject() string { return m.Headers.Subject }
 // Common errors. Wrapping these lets tools map backend errors onto the
 // typed error codes in docs/TOOLS.md.
 var (
-	ErrBackendNotConfigured = errors.New("mailbox: backend not configured")
-	ErrAccountNotFound      = errors.New("mailbox: account not found")
-	ErrMailboxNotFound      = errors.New("mailbox: mailbox not found")
-	ErrMessageNotFound      = errors.New("mailbox: message not found")
-	ErrUIDMismatch          = errors.New("mailbox: uid/uid_validity mismatch")
-	ErrLimitExceeded        = errors.New("mailbox: limit exceeded")
+	ErrBackendNotConfigured    = errors.New("mailbox: backend not configured")
+	ErrAccountNotFound         = errors.New("mailbox: account not found")
+	ErrMailboxNotFound         = errors.New("mailbox: mailbox not found")
+	ErrMessageNotFound         = errors.New("mailbox: message not found")
+	ErrUIDMismatch             = errors.New("mailbox: uid/uid_validity mismatch")
+	ErrUIDMissing              = errors.New("mailbox: server did not report uid_validity")
+	ErrLimitExceeded           = errors.New("mailbox: limit exceeded")
+	ErrMessageTooLarge         = errors.New("mailbox: message too large")
+	ErrNestingTooDeep          = errors.New("mailbox: mime nesting too deep")
+	ErrTooManyParts            = errors.New("mailbox: too many mime parts")
+	ErrAttachmentTooLarge      = errors.New("mailbox: attachment too large")
+	ErrTotalAttachmentTooLarge = errors.New("mailbox: total attachment size too large")
+	ErrTooManyAttachments      = errors.New("mailbox: too many attachments")
+	ErrMalformed               = errors.New("mailbox: malformed message")
 )

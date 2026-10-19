@@ -94,7 +94,7 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 			if limit <= 0 || limit > max {
 				limit = max
 			}
-			msgs, berr := acc.Backend().ListMessages(ctx, args.AccountID, args.Mailbox, mailbox.ListOptions{
+			listResult, berr := acc.Backend().ListMessages(ctx, args.AccountID, args.Mailbox, mailbox.ListOptions{
 				Limit:  limit,
 				Offset: args.Offset,
 				Since:  args.Since,
@@ -104,21 +104,14 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = mapError(berr)
 				return
 			}
-			summaries := make([]messageSummaryV, len(msgs))
-			for i, m := range msgs {
+			summaries := make([]messageSummaryV, len(listResult.Messages))
+			for i, m := range listResult.Messages {
 				summaries[i] = messageSummaryFrom(m)
-			}
-			uidValidity := uint32(0)
-			for _, m := range mailboxList(ctx, acc, args.Mailbox) {
-				if m.Name == args.Mailbox {
-					uidValidity = m.UIDValidity
-					break
-				}
 			}
 			output = &ListMessagesResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
-				UIDValidity: uidValidity,
+				UIDValidity: listResult.UIDValidity,
 				Messages:    summaries,
 			}
 			return
@@ -135,6 +128,14 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = invalidInput("mailbox is required")
 				return
 			}
+			if args.UID == 0 {
+				err = invalidInput("uid is required")
+				return
+			}
+			if args.UIDValidity == 0 {
+				err = invalidInput("uid_validity is required; obtain it from list_messages or search_messages before calling read_message")
+				return
+			}
 			acc, gerr := registry.Get(args.AccountID)
 			if gerr != nil {
 				err = mapError(gerr)
@@ -144,37 +145,36 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = mapError(&permissions.ErrPermissionDenied{Account: acc.ID, Capability: permissions.CapRead})
 				return
 			}
-			msg, berr := acc.Backend().FetchMessage(ctx, args.AccountID, args.Mailbox, args.UID)
+			msg, berr := acc.Backend().FetchMessage(ctx, args.AccountID, args.Mailbox, args.UID, args.UIDValidity)
 			if berr != nil {
 				err = mapError(berr)
 				return
 			}
-			truncated := false
+			truncated := msg.Truncated
 			if msg.Size() > acc.Limits.MaxMessageBytes {
 				msg.Text = truncateRunes(msg.Text, acc.Limits.MaxMessageBytes)
 				msg.HTML = truncateRunes(msg.HTML, acc.Limits.MaxMessageBytes)
 				truncated = true
 			}
-			if args.UIDValidity != 0 && msg.UIDValidity != 0 && msg.UIDValidity != args.UIDValidity {
-				err = typed(codeUidMismatch, "uid/uid_validity mismatch", map[string]any{
-					"expected": msg.UIDValidity,
-					"got":      args.UIDValidity,
-				})
-				return
-			}
 			atts := make([]attachmentView, len(msg.Attachments))
 			for i, a := range msg.Attachments {
 				atts[i] = attachmentFrom(a)
+			}
+			flags := msg.FlagsSlice()
+			if flags == nil {
+				flags = []string{}
 			}
 			output = &ReadMessageResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
 				UID:         msg.UID,
 				UIDValidity: msg.UIDValidity,
+				Flags:       flags,
 				Headers:     headersFrom(msg.Headers),
 				Text:        msg.Text,
 				HTML:        msg.HTML,
 				Attachments: atts,
+				Warnings:    msg.Warnings,
 				Truncated:   truncated,
 			}
 			return
@@ -200,6 +200,20 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = mapError(&permissions.ErrPermissionDenied{Account: acc.ID, Capability: permissions.CapRead})
 				return
 			}
+			// Phase 2.1: the IMAP and memory backends do not
+			// honour Flagged or Unseen. Reject these fields
+			// explicitly so the caller is not silently
+			// misled by a filter that is ignored. The fix
+			// is tracked in PHASE2_DESIGN.md and lands in
+			// Phase 2.2.
+			if args.Query.Flagged {
+				err = typed(codeNotImplemented, "Flagged filter is not yet supported; tracked for Phase 2.2", nil)
+				return
+			}
+			if args.Query.Unseen {
+				err = typed(codeNotImplemented, "Unseen filter is not yet supported; tracked for Phase 2.2", nil)
+				return
+			}
 			q := mailbox.SearchQuery{
 				Subject: args.Query.Subject,
 				From:    args.Query.From,
@@ -209,44 +223,35 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				Before:  args.Query.Before,
 				Flagged: args.Query.Flagged,
 				Unseen:  args.Query.Unseen,
+				Limit:   args.Query.Limit,
 			}
 			max := acc.Limits.MaxSearchResults
 			if q.Limit <= 0 || q.Limit > max {
 				q.Limit = max
 			}
-			msgs, berr := acc.Backend().SearchMessages(ctx, args.AccountID, args.Mailbox, q)
+			listResult, berr := acc.Backend().SearchMessages(ctx, args.AccountID, args.Mailbox, q)
 			if berr != nil {
 				err = mapError(berr)
 				return
 			}
-			summaries := make([]messageSummaryV, len(msgs))
-			for i, m := range msgs {
+			summaries := make([]messageSummaryV, len(listResult.Messages))
+			for i, m := range listResult.Messages {
 				summaries[i] = messageSummaryFrom(m)
-			}
-			uidValidity := uint32(0)
-			for _, m := range mailboxList(ctx, acc, args.Mailbox) {
-				if m.Name == args.Mailbox {
-					uidValidity = m.UIDValidity
-					break
-				}
 			}
 			output = &SearchMessagesResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
-				UIDValidity: uidValidity,
+				UIDValidity: listResult.UIDValidity,
 				Matches:     summaries,
 			}
 			return
 		})
 }
 
-// mailboxList returns the mailboxes for an account; used to surface
-// UIDVALIDITY in list/search outputs without exposing an extra field in
-// the tool schema.
-func mailboxList(ctx context.Context, acc *accounts.Account, name string) []mailbox.Mailbox {
-	out, _ := acc.Backend().Mailboxes(ctx, acc.ID)
-	return out
-}
+// truncateRunes is the only remaining helper; the previous
+// uidValidityOf helper was removed because the Backend's
+// ListMessages / SearchMessages now return a ListResult that
+// binds the UIDs and the UIDVALIDITY together at the source.
 
 func truncateRunes(s string, max int) string {
 	if max <= 0 {

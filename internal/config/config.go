@@ -22,10 +22,14 @@ const (
 	DefaultSMTPPort         = 587
 	DefaultSMTPPortImplicit = 465
 
-	DefaultMaxMessageBytes    = 25 * 1024 * 1024 // 25 MiB
-	DefaultMaxAttachments     = 50
-	DefaultMaxSearchResults   = 500
-	DefaultMaxBatchOperations = 50
+	DefaultMaxMessageBytes         = 25 * 1024 * 1024 // 25 MiB
+	DefaultMaxAttachmentBytes      = 6 * 1024 * 1024  // 6 MiB
+	DefaultMaxTotalAttachmentBytes = 25 * 1024 * 1024 // 25 MiB
+	DefaultMaxAttachments          = 50
+	DefaultMaxSearchResults        = 500
+	DefaultMaxBatchOperations      = 50
+	DefaultMaxMIMENesting          = 16
+	DefaultMaxMIMEParts            = 500
 
 	DefaultLogLevel = "info"
 )
@@ -118,10 +122,14 @@ type SMTPConfig struct {
 // LimitsConfig enforces per-account safety limits. Zero values are replaced
 // with defaults during validation.
 type LimitsConfig struct {
-	MaxMessageBytes    int `yaml:"max_message_bytes,omitempty"`
-	MaxAttachments     int `yaml:"max_attachments,omitempty"`
-	MaxSearchResults   int `yaml:"max_search_results,omitempty"`
-	MaxBatchOperations int `yaml:"max_batch_operations,omitempty"`
+	MaxMessageBytes         int `yaml:"max_message_bytes,omitempty"`
+	MaxAttachmentBytes      int `yaml:"max_attachment_bytes,omitempty"`
+	MaxTotalAttachmentBytes int `yaml:"max_total_attachment_bytes,omitempty"`
+	MaxAttachments          int `yaml:"max_attachments,omitempty"`
+	MaxSearchResults        int `yaml:"max_search_results,omitempty"`
+	MaxBatchOperations      int `yaml:"max_batch_operations,omitempty"`
+	MaxMIMENesting          int `yaml:"max_mime_nesting,omitempty"`
+	MaxMIMEParts            int `yaml:"max_mime_parts,omitempty"`
 }
 
 // WithDefaults returns a copy of c with zero-valued fields filled in.
@@ -159,6 +167,12 @@ func (c AccountConfig) WithDefaults() AccountConfig {
 	if c.Limits.MaxMessageBytes == 0 {
 		c.Limits.MaxMessageBytes = DefaultMaxMessageBytes
 	}
+	if c.Limits.MaxAttachmentBytes == 0 {
+		c.Limits.MaxAttachmentBytes = DefaultMaxAttachmentBytes
+	}
+	if c.Limits.MaxTotalAttachmentBytes == 0 {
+		c.Limits.MaxTotalAttachmentBytes = DefaultMaxTotalAttachmentBytes
+	}
 	if c.Limits.MaxAttachments == 0 {
 		c.Limits.MaxAttachments = DefaultMaxAttachments
 	}
@@ -167,6 +181,12 @@ func (c AccountConfig) WithDefaults() AccountConfig {
 	}
 	if c.Limits.MaxBatchOperations == 0 {
 		c.Limits.MaxBatchOperations = DefaultMaxBatchOperations
+	}
+	if c.Limits.MaxMIMENesting == 0 {
+		c.Limits.MaxMIMENesting = DefaultMaxMIMENesting
+	}
+	if c.Limits.MaxMIMEParts == 0 {
+		c.Limits.MaxMIMEParts = DefaultMaxMIMEParts
 	}
 	return c
 }
@@ -294,6 +314,18 @@ func validateLimits(l LimitsConfig) error {
 	}
 	if l.MaxBatchOperations < 0 {
 		return fmt.Errorf("limits.max_batch_operations must be non-negative")
+	}
+	if l.MaxAttachmentBytes < 0 {
+		return fmt.Errorf("limits.max_attachment_bytes must be non-negative")
+	}
+	if l.MaxTotalAttachmentBytes < 0 {
+		return fmt.Errorf("limits.max_total_attachment_bytes must be non-negative")
+	}
+	if l.MaxMIMENesting < 0 {
+		return fmt.Errorf("limits.max_mime_nesting must be non-negative")
+	}
+	if l.MaxMIMEParts < 0 {
+		return fmt.Errorf("limits.max_mime_parts must be non-negative")
 	}
 	return nil
 }

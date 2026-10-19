@@ -234,10 +234,15 @@ func TestIMAPEndToEnd(t *testing.T) {
 	}
 
 	// read_message
+	uv, _ := got["uid_validity"].(float64)
+	if uv == 0 {
+		t.Fatal("list_messages did not surface a live UIDVALIDITY")
+	}
 	got, err = env.call(t, "read_message", map[string]any{
-		"account_id": "imap",
-		"mailbox":    "INBOX",
-		"uid":        uid,
+		"account_id":   "imap",
+		"mailbox":      "INBOX",
+		"uid":          uid,
+		"uid_validity": uv,
 	})
 	if err != nil {
 		t.Fatalf("read_message: %v", err)

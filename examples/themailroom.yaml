@@ -39,10 +39,14 @@ accounts:
       - read
 
     limits:
-      max_message_bytes: 26214400    # 25 MiB
+      max_message_bytes: 26214400          # 25 MiB
+      max_attachment_bytes: 6291456        # 6 MiB per attachment
+      max_total_attachment_bytes: 26214400 # 25 MiB total
       max_attachments: 50
       max_search_results: 500
       max_batch_operations: 50
+      max_mime_nesting: 16
+      max_mime_parts: 500
 
     attachment_send_paths: []        # empty = attachments cannot be sent
 
@@ -66,3 +70,6 @@ accounts:
       - /home/alice/Documents/Outbound   # absolute; symlinks rejected at read
     limits:
       max_message_bytes: 10485760       # 10 MiB
+      max_attachment_bytes: 2621440      # 2.5 MiB per attachment
+      max_mime_nesting: 8
+      max_mime_parts: 200

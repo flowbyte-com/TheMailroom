@@ -1,0 +1,12 @@
+From: a@example.test
+To: b@example.test
+Subject: =?iso-8859-1?Q?caf=E9?=
+Date: Thu, 18 Jan 2024 11:00:00 +0000
+Message-Id: <iso@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+Bonjour caf=E9, =e0 bient=F4t!
+
+Voici un message en ISO-8859-1 avec des caract=E8res accentu=E9s.

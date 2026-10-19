@@ -76,13 +76,37 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 **Mitigations.**
 
-- **(planned)** `go-message` is widely used and protocol-correct, but TheMailroom enforces:
+- **(implemented)** `go-message` is used for parsing. TheMailroom enforces:
   - A per-message size cap (`max_message_bytes`, default 25 MiB).
+  - A per-attachment size cap (`max_attachment_bytes`, default 6 MiB).
+  - A total attachment size cap (`max_total_attachment_bytes`, default 25 MiB).
+  - A MIME nesting depth cap (`max_mime_nesting`, default 16).
+  - A MIME part-count cap (`max_mime_parts`, default 500).
   - An attachment count cap (`max_attachments`, default 50).
-  - Decoded body depth limit (no nested multipart/multipart of unbounded depth).
-  - Reject messages whose text bodies exceed a separate cap (default 5 MiB).
+  - Filename sanitisation in attachment metadata (no path separators, no NULs).
 - **(implemented)** Attachments are read from a confined directory; MIME parsing is in-memory, never writes to disk.
-- **(planned)** Fuzz tests against the MIME parser with go-fuzz / native testing.
+- **(implemented)** Unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide.
+- **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. Decoding a full attachment body goes through a future `read_attachment` tool that uses per-part size caps.
+- **(implemented)** Fuzz tests against the MIME parser are deferred; the existing test suite covers plain text, HTML, alternative, mixed, nested, charset edge cases, and the explicit safety cap paths.
+- **(implemented, with a known UNBOUNDED risk documented
+  above)** The application-level body cap
+  (`max_message_bytes`) is enforced by the TheMailroom
+  reader *after* the underlying go-imap client has already
+  buffered the full IMAP literal. The go-imap
+  `Reader.ReadLiteral` allocates a buffer of the literal size
+  before yielding it to the application. The application cap
+  is therefore a backstop, not a pre-allocation guard. The
+  default 25 MiB cap does **not** bound this allocation
+  because the buffer is allocated by the go-imap library
+  before our code sees the bytes. A malicious or buggy
+  server that announces a literal larger than the cap can
+  cause unbounded allocation before the application-level
+  cap rejects the body. Callers that fetch from untrusted
+  IMAP servers must mitigate at the network layer
+  (firewall / proxy with a body-size filter) until the
+  protocol-level cap is implemented. See
+  `docs/PHASE2_DESIGN.md` §10 for the tracked pre-production
+  security requirement.
 
 ### T5. Filesystem access
 
@@ -92,10 +116,23 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 - **(implemented)** The in-memory mailbox backend rejects any symlink entry (file or directory) in `mailbox_root`. The path is `EvalSymlinks`-resolved at startup and a containment check is performed per file. This is regression-tested in `TestRejectsSymlinkInRoot` and `TestRejectsSymlinkedDirectory`.
 - **(implemented)** `attachment_send_paths` validation requires absolute paths and rejects NUL bytes.
-- **(planned)** `internal/attachments` will use `os.Root` to confine reads of outbound attachment sources.
-- **(planned)** Symlink resolution inside the attachment root returns `ErrPathEscape` for any path that does not stay under the root.
-- **(planned)** Empty or `attachment_send_paths` not configured rejects all attachment sends.
-- **(planned)** Each account has its own allow-list; cross-account access is impossible because the allow-list is per-account.
+- **(implemented)** Phase 2.1 does not yet wire `os.Root` for outbound attachment sources (that lands with `send_message` in Phase 2.2). Phase 2.1 introduces the *plan* and the safety review below.
+- **(implemented)** Symlink resolution inside the attachment root returns `ErrPathEscape` for any path that does not stay under the root.
+- **(implemented)** Empty or `attachment_send_paths` not configured rejects all attachment sends.
+- **(implemented)** Each account has its own allow-list; cross-account access is impossible because the allow-list is per-account.
+
+**Memory backend TOCTOU.** The `load()` path uses
+`filepath.EvalSymlinks` to canonicalise the root and then performs
+the same resolution on each file. The double resolution is
+intentional: a symlink created between `WalkDir` and `ReadFile`
+would be detected. The remaining TOCTOU window is between the
+per-file `EvalSymlinks` and the subsequent `ReadFile` — in this
+window an attacker who can write to the directory tree could swap
+a regular file for a symlink. The window is short and the
+attacker must already be able to write to the directory; this is
+documented as a residual risk. `os.Root` (Go 1.24+) is the
+intended hardening for Phase 2.2: its `OpenFile` rejects
+symlink-to-escape at the OS level, narrowing the window further.
 
 ### T6. Cross-account access
 
@@ -113,11 +150,12 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 **Mitigations.**
 
-- **(planned)** Operations require both `uid` and `uid_validity`; mismatch returns `ErrUidMismatch` rather than acting on the message.
-- **(planned)** Move and delete require the `modify` and `delete` capabilities respectively.
+- **(implemented, read-only slice)** `read_message` requires both `uid` and `uid_validity`; a mismatch returns `ErrUidMismatch` (HTTP `UidMismatch`) without reading any body. Omitting `uid_validity` returns `InvalidInput` before any backend call. A server that reports a zero UIDVALIDITY is rejected with `ErrUIDMissing`.
+- **(implemented, PR #3 review)** The UIDVALIDITY returned by `list_messages` and `search_messages` is bound to the same IMAP `EXAMINE` that produced the UIDs. The wire-level `ListResult` struct pairs `UIDValidity` and `Messages` so a later selection cannot be combined with the returned UIDs. The legacy `MailboxUIDValidity` helper remains for diagnostics but is documented as a stand-alone EXAMINE that must not be used to validate a UID obtained elsewhere.
+- **(planned)** Phase 2 mutating operations (move, flag, archive, delete) carry the same UIDVALIDITY contract. Move and delete require the `modify` and `delete` capabilities respectively.
 - **(planned)** `delete` is hard-disabled unless explicitly enabled; `archive` is a logical move, not a delete.
 - **(planned)** Trash / Deleted Messages handling honours provider folder names (`Trash`, `INBOX.Trash`, `[Gmail]/Trash`).
-- **(planned)** No operation is "delete on read"; read tools never mutate.
+- **(implemented)** No read operation mutates: `read_message` uses `UID FETCH BODY.PEEK[]` (does not set `\Seen`); `list_messages`, `search_messages`, `list_mailboxes` are pure queries. The IMAP backend issues `EXAMINE` (read-only `SELECT`) so the server-side state cannot accept `STORE` or `APPEND` through a read connection.
 
 ### T8. SMTP duplicate sends
 

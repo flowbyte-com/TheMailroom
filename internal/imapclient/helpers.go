@@ -1,8 +1,6 @@
 package imapclient
 
 import (
-	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,7 +8,9 @@ import (
 	"time"
 
 	"github.com/emersion/go-imap"
+
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
+	"github.com/flowbyte-com/themailroom/internal/mimeparse"
 )
 
 // mailboxFromInfo converts a server-reported MailboxInfo into the
@@ -97,31 +97,13 @@ func envelopeSubject(env *imap.Envelope) string {
 	return env.Subject
 }
 
-// splitHeaders returns the header block as text plus the body
-// bytes. The Mailbox.Message.Headers path expects pre-parsed values
-// from the IMAP envelope where possible, so the raw headers are
-// only used for fields the envelope does not provide (Message-ID,
-// In-Reply-To, References).
-func splitHeaders(raw []byte) (headersText string, body []byte) {
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	var b bytes.Buffer
-	for scanner.Scan() {
-		line := scanner.Text()
-		b.WriteString(line)
-		b.WriteString("\r\n")
-		if line == "" {
-			// End of headers.
-			break
-		}
-	}
-	return b.String(), raw[b.Len():]
-}
-
 // headersFromEnvelope fills MessageHeaders from an IMAP envelope and
-// the raw header text. Fields the envelope does not provide are
-// extracted by simple line scanning.
-func headersFromEnvelope(env *imap.Envelope, headersText string) mailbox.MessageHeaders {
+// the raw message bytes. The envelope is the primary source for
+// From / To / Cc / Subject / Date; the raw bytes are scanned for
+// fields the envelope does not provide (Message-ID, In-Reply-To,
+// References). The decoded MIME headers, if available from a prior
+// parse, take precedence over both.
+func headersFromEnvelope(env *imap.Envelope, raw []byte) mailbox.MessageHeaders {
 	out := mailbox.MessageHeaders{}
 	if env != nil {
 		out.From = envelopeFrom(env)
@@ -134,8 +116,13 @@ func headersFromEnvelope(env *imap.Envelope, headersText string) mailbox.Message
 			out.Date = time.Now().UTC()
 		}
 	}
-	// Extract Message-ID, In-Reply-To, References from raw headers.
-	for _, line := range strings.Split(headersText, "\r\n") {
+	// Fall back to scanning the raw header block. The first blank
+	// line ends the header section; we only look at the headers
+	// here, not the body.
+	for _, line := range strings.Split(string(raw), "\r\n") {
+		if line == "" {
+			break
+		}
 		k, v, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
@@ -144,11 +131,42 @@ func headersFromEnvelope(env *imap.Envelope, headersText string) mailbox.Message
 		val := strings.TrimSpace(v)
 		switch key {
 		case "message-id":
-			out.MessageID = val
+			if out.MessageID == "" {
+				out.MessageID = val
+			}
 		case "in-reply-to":
-			out.InReplyTo = val
+			if out.InReplyTo == "" {
+				out.InReplyTo = val
+			}
 		case "references":
-			out.References = strings.Fields(val)
+			if len(out.References) == 0 {
+				out.References = strings.Fields(val)
+			}
+		}
+	}
+	return out
+}
+
+// convertAttachments maps the mimeparse attachment view onto the
+// internal mailbox.Attachment representation. The wire field set
+// is the union of the two; consumers that only need the basics
+// (Filename, MimeType, Size) can ignore the new Part / ContentID
+// / Inline fields.
+func convertAttachments(in []mimeparse.Attachment) []mailbox.Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]mailbox.Attachment, len(in))
+	for i, a := range in {
+		out[i] = mailbox.Attachment{
+			Index:       i,
+			Part:        a.Part,
+			Filename:    a.Filename,
+			MimeType:    a.MimeType,
+			Size:        a.Size,
+			ContentID:   a.ContentID,
+			Inline:      a.IsInline,
+			Disposition: a.Disposition,
 		}
 	}
 	return out
@@ -175,8 +193,48 @@ func mapErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	// go-imap returns these as errors.New with a specific prefix.
+	// mimeparse errors are wrapped through; unwrap to the typed
+	// public errors so the tool layer can map them.
+	if errors.Is(err, mimeparse.ErrMessageTooLarge) {
+		return mailbox.ErrMessageTooLarge
+	}
+	if errors.Is(err, mimeparse.ErrNestingTooDeep) {
+		return mailbox.ErrNestingTooDeep
+	}
+	if errors.Is(err, mimeparse.ErrTooManyParts) {
+		return mailbox.ErrTooManyParts
+	}
+	if errors.Is(err, mimeparse.ErrTooManyAttachments) {
+		return mailbox.ErrTooManyAttachments
+	}
+	if errors.Is(err, mimeparse.ErrAttachmentTooLarge) {
+		return mailbox.ErrAttachmentTooLarge
+	}
+	if errors.Is(err, mimeparse.ErrTotalAttachmentTooLarge) {
+		return mailbox.ErrTotalAttachmentTooLarge
+	}
+	if errors.Is(err, mimeparse.ErrMalformed) {
+		return mailbox.ErrMalformed
+	}
+	// The IMAP literal-size evidence is concrete. The only
+	// string go-imap produces for an over-cap literal is
+	// "literal exceeding maximum size" from its own
+	// MaxLiteralSize check (which is not currently set on
+	// the client; see the package doc for the security
+	// limitation). We translate that single, specific
+	// string to ErrMessageTooLarge. Generic parse errors
+	// such as "expected a space" or "error reading response"
+	// are NOT evidence of an oversized literal; they are
+	// surfaced as ErrMalformed so a tool-layer caller can
+	// distinguish a real protocol error from a size-cap
+	// control that succeeded.
 	msg := err.Error()
+	if strings.Contains(msg, "literal exceeding maximum size") {
+		return mailbox.ErrMessageTooLarge
+	}
+	if imap.IsParseError(err) {
+		return mailbox.ErrMalformed
+	}
 	switch {
 	case strings.HasPrefix(msg, "imap: connection closed"):
 		return fmt.Errorf("imap: connection closed: %w", err)
@@ -185,8 +243,3 @@ func mapErr(err error) error {
 	}
 	return err
 }
-
-// Unused but kept available for the SMTP and MIME slices that will
-// follow; this prevents import drift if the file is later split.
-var _ = errors.New
-var _ = bytes.NewReader
