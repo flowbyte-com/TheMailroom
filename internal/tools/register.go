@@ -94,7 +94,7 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 			if limit <= 0 || limit > max {
 				limit = max
 			}
-			msgs, berr := acc.Backend().ListMessages(ctx, args.AccountID, args.Mailbox, mailbox.ListOptions{
+			listResult, berr := acc.Backend().ListMessages(ctx, args.AccountID, args.Mailbox, mailbox.ListOptions{
 				Limit:  limit,
 				Offset: args.Offset,
 				Since:  args.Since,
@@ -104,15 +104,14 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = mapError(berr)
 				return
 			}
-			summaries := make([]messageSummaryV, len(msgs))
-			for i, m := range msgs {
+			summaries := make([]messageSummaryV, len(listResult.Messages))
+			for i, m := range listResult.Messages {
 				summaries[i] = messageSummaryFrom(m)
 			}
-			uidValidity := uidValidityOf(ctx, acc, args.Mailbox)
 			output = &ListMessagesResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
-				UIDValidity: uidValidity,
+				UIDValidity: listResult.UIDValidity,
 				Messages:    summaries,
 			}
 			return
@@ -215,56 +214,29 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 			if q.Limit <= 0 || q.Limit > max {
 				q.Limit = max
 			}
-			msgs, berr := acc.Backend().SearchMessages(ctx, args.AccountID, args.Mailbox, q)
+			listResult, berr := acc.Backend().SearchMessages(ctx, args.AccountID, args.Mailbox, q)
 			if berr != nil {
 				err = mapError(berr)
 				return
 			}
-			summaries := make([]messageSummaryV, len(msgs))
-			for i, m := range msgs {
+			summaries := make([]messageSummaryV, len(listResult.Messages))
+			for i, m := range listResult.Messages {
 				summaries[i] = messageSummaryFrom(m)
 			}
-			uidValidity := uidValidityOf(ctx, acc, args.Mailbox)
 			output = &SearchMessagesResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
-				UIDValidity: uidValidity,
+				UIDValidity: listResult.UIDValidity,
 				Matches:     summaries,
 			}
 			return
 		})
 }
 
-// uidValidityOf asks the backend for the current UIDVALIDITY of
-// the mailbox. IMAP backends may need to issue an EXAMINE; memory
-// backends return the cached value without a round-trip. Errors
-// are swallowed: a failure to read UIDVALIDITY is non-fatal for
-// listing and search, so the result returns 0 and the caller can
-// re-EXAMINE on a subsequent read.
-func uidValidityOf(ctx context.Context, acc *accounts.Account, name string) uint32 {
-	type validityBackend interface {
-		MailboxUIDValidity(ctx context.Context, accountID, mbx string) (uint32, error)
-	}
-	if v, ok := acc.Backend().(validityBackend); ok {
-		uv, err := v.MailboxUIDValidity(ctx, acc.ID, name)
-		if err == nil {
-			return uv
-		}
-	}
-	// Fall back to the list path: the memory backend does not
-	// implement MailboxUIDValidity but reports UIDVALIDITY=1 in
-	// Mailboxes.
-	out, _ := acc.Backend().Mailboxes(ctx, acc.ID)
-	for _, m := range out {
-		if m.Name == name {
-			return m.UIDValidity
-		}
-	}
-	return 0
-}
-
-// mailboxList is no longer used; uidValidityOf asks the backend
-// directly for the live UIDVALIDITY.
+// truncateRunes is the only remaining helper; the previous
+// uidValidityOf helper was removed because the Backend's
+// ListMessages / SearchMessages now return a ListResult that
+// binds the UIDs and the UIDVALIDITY together at the source.
 
 func truncateRunes(s string, max int) string {
 	if max <= 0 {

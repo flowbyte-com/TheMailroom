@@ -2,6 +2,7 @@ package mimeparse
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -291,6 +292,297 @@ func TestSanitizeFilename(t *testing.T) {
 		if got := SanitizeFilename(in); got != want {
 			t.Errorf("SanitizeFilename(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestCountingReaderBoundary exercises the boundary semantics of
+// countingReader at exactly the cap, one below, and one above.
+// The contract is:
+//
+//   - Reading exactly n bytes in total is the LAST successful
+//     read; exceeded remains false.
+//   - The next Read after reading exactly n bytes must return
+//     io.EOF with exceeded = true.
+//   - Reading n+1 bytes from the underlying reader with cap n
+//     returns n bytes; the next Read returns 0, io.EOF with
+//     exceeded = true.
+func TestCountingReaderBoundary(t *testing.T) {
+	const capN = 10
+	source := strings.NewReader(strings.Repeat("A", 100))
+	cr := &countingReader{r: source, n: capN}
+
+	// First read returns 5 bytes (well below the cap).
+	buf := make([]byte, 5)
+	n, err := cr.Read(buf)
+	if err != nil {
+		t.Fatalf("first read err = %v", err)
+	}
+	if n != 5 {
+		t.Errorf("first read n = %d, want 5", n)
+	}
+	if cr.exceeded {
+		t.Errorf("exceeded = true after under-cap read")
+	}
+
+	// Second read takes us to exactly the cap boundary.
+	n, err = cr.Read(buf)
+	if err != nil {
+		t.Fatalf("second read err = %v", err)
+	}
+	if n != capN-5 {
+		t.Errorf("second read n = %d, want %d", n, capN-5)
+	}
+	if cr.exceeded {
+		t.Errorf("exceeded = true after reading exactly cap bytes")
+	}
+
+	// The next read must report EOF and set exceeded.
+	n, err = cr.Read(buf)
+	if n != 0 || err != io.EOF {
+		t.Errorf("over-cap read returned n=%d, err=%v; want 0, EOF", n, err)
+	}
+	if !cr.exceeded {
+		t.Errorf("exceeded = false after refusing over-cap read")
+	}
+}
+
+// TestCountingReaderUnderCap reads strictly below the cap and
+// must never set exceeded.
+func TestCountingReaderUnderCap(t *testing.T) {
+	cr := &countingReader{r: strings.NewReader("hello"), n: 100}
+	buf := make([]byte, 10)
+	n, err := cr.Read(buf)
+	if err != nil || n != 5 {
+		t.Errorf("read n=%d err=%v, want 5, nil", n, err)
+	}
+	if cr.exceeded {
+		t.Errorf("exceeded = true on a clean under-cap read")
+	}
+}
+
+// TestCountingReaderAboveCap reads strictly above the cap; the
+// reader returns cap bytes and the next read sets exceeded.
+func TestCountingReaderAboveCap(t *testing.T) {
+	cr := &countingReader{r: strings.NewReader(strings.Repeat("X", 1000)), n: 50}
+	all, err := io.ReadAll(cr)
+	if err != nil {
+		t.Fatalf("ReadAll err = %v", err)
+	}
+	if len(all) != 50 {
+		t.Errorf("read %d bytes, want exactly 50 (the cap)", len(all))
+	}
+	if !cr.exceeded {
+		t.Errorf("exceeded = false after the cap was hit")
+	}
+}
+
+// TestParseAttachmentTooLargeReturnsPartial verifies that a hard
+// failure during Parse returns BOTH the partial decode (the parts
+// we already parsed before hitting the cap) AND the typed error.
+// The Truncated flag is set so callers cannot mistake the
+// partial decode for a complete read.
+func TestParseAttachmentTooLargeReturnsPartial(t *testing.T) {
+	// Build a multipart/mixed with two attachments: a small
+	// one (ok) and a large one (rejected by the cap).
+	big := strings.Repeat("A", 4096)
+	raw := "From: a@example.test\r\nSubject: T\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"small.bin\"\r\n\r\n" +
+		"small\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"big.bin\"\r\n\r\n" +
+		big + "\r\n" +
+		"--B--\r\n"
+	d, err := Parse([]byte(raw), Limits{
+		MaxMessageBytes:    1 << 20,
+		MaxAttachmentBytes: 256,
+	})
+	if !errors.Is(err, ErrAttachmentTooLarge) {
+		t.Fatalf("err = %v, want ErrAttachmentTooLarge", err)
+	}
+	if d == nil {
+		t.Fatal("Parse returned nil decode on hard failure; want partial")
+	}
+	if !d.Truncated {
+		t.Error("Truncated = false on partial decode; want true")
+	}
+	// The first attachment was captured; the second was the
+	// point of failure.
+	if len(d.Attachments) != 1 {
+		t.Errorf("len(Attachments) = %d, want 1 (partial)", len(d.Attachments))
+	}
+	if len(d.Attachments) >= 1 && d.Attachments[0].Filename != "small.bin" {
+		t.Errorf("partial Filename = %q, want small.bin", d.Attachments[0].Filename)
+	}
+}
+
+// TestParseTooManyAttachmentsReturnsPartial is the count-cap
+// counterpart: the parser stops at MaxAttachments and returns
+// the partial decode with a typed error.
+func TestParseTooManyAttachmentsReturnsPartial(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("From: a@example.test\r\nSubject: A\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n")
+	for i := 0; i < 5; i++ {
+		b.WriteString("--B\r\nContent-Type: application/octet-stream\r\n" +
+			"Content-Disposition: attachment; filename=\"x.bin\"\r\n\r\nx\r\n")
+	}
+	b.WriteString("--B--\r\n")
+	d, err := Parse([]byte(b.String()), Limits{
+		MaxMessageBytes: 1 << 20,
+		MaxAttachments:  2,
+	})
+	if !errors.Is(err, ErrTooManyAttachments) {
+		t.Fatalf("err = %v, want ErrTooManyAttachments", err)
+	}
+	if d == nil {
+		t.Fatal("nil partial decode")
+	}
+	if !d.Truncated {
+		t.Error("Truncated = false; want true")
+	}
+	if len(d.Attachments) != 2 {
+		t.Errorf("len(Attachments) = %d, want 2 (partial)", len(d.Attachments))
+	}
+}
+
+// TestParseNestingTooDeepReturnsPartial verifies the partial
+// behaviour for the nesting cap.
+func TestParseNestingTooDeepReturnsPartial(t *testing.T) {
+	// Build a 20-level nested multipart. We then set
+	// MaxMIMENesting to 2; the first 2 levels will be walked,
+	// the third returns ErrNestingTooDeep. The result must be
+	// a partial decode with Truncated.
+	inner := "From: a@example.test\r\nSubject: D\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n"
+	for i := 0; i < 5; i++ {
+		boundary := "B" + strings.Repeat("x", i+1)
+		inner = "From: a@example.test\r\nSubject: D\r\n" +
+			"Content-Type: multipart/mixed; boundary=" + boundary + "\r\n\r\n" +
+			"--" + boundary + "\r\n" + inner + "\r\n--" + boundary + "--\r\n"
+	}
+	d, err := Parse([]byte(inner), Limits{
+		MaxMessageBytes: 1 << 20,
+		MaxMIMENesting:  2,
+	})
+	if !errors.Is(err, ErrNestingTooDeep) {
+		t.Fatalf("err = %v, want ErrNestingTooDeep", err)
+	}
+	if d == nil {
+		t.Fatal("nil partial decode")
+	}
+	if !d.Truncated {
+		t.Error("Truncated = false; want true")
+	}
+}
+
+// TestParseInlineContentIDWithoutFilename is a classification
+// regression: a multipart/related part with Content-Disposition:
+// inline but no filename and a Content-ID must be retained as
+// an inline attachment so the agent can resolve cid: references
+// in the HTML body. Before the fix, such parts were silently
+// dropped.
+func TestParseInlineContentIDWithoutFilename(t *testing.T) {
+	raw := "From: a@example.test\r\nSubject: CID\r\n" +
+		"Content-Type: multipart/related; boundary=R\r\n\r\n" +
+		"--R\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
+		"<p>see <img src=\"cid:logo\"/></p>\r\n" +
+		"--R\r\nContent-Type: image/png\r\n" +
+		"Content-ID: <logo>\r\n" +
+		"Content-Disposition: inline\r\n\r\nPNG-DATA\r\n" +
+		"--R--\r\n"
+	d, err := Parse([]byte(raw), Limits{MaxMessageBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(d.Attachments) != 1 {
+		t.Fatalf("len(Attachments) = %d, want 1", len(d.Attachments))
+	}
+	a := d.Attachments[0]
+	if !a.IsInline {
+		t.Errorf("IsInline = false; want true")
+	}
+	if a.ContentID != "logo" {
+		t.Errorf("ContentID = %q, want %q", a.ContentID, "logo")
+	}
+	if a.Filename != "" {
+		t.Errorf("Filename = %q, want empty (the part has no filename)", a.Filename)
+	}
+	if a.MimeType != "image/png" {
+		t.Errorf("MimeType = %q", a.MimeType)
+	}
+}
+
+// TestParseTextPlainAttachment is a classification regression:
+// text/plain with Content-Disposition: attachment and a filename
+// must be classified as an attachment, not the message body.
+// Before the fix, such parts landed in the Text field.
+func TestParseTextPlainAttachment(t *testing.T) {
+	raw := "From: a@example.test\r\nSubject: ATT\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nreal body\r\n" +
+		"--B\r\nContent-Type: text/plain; charset=utf-8\r\n" +
+		"Content-Disposition: attachment; filename=\"note.txt\"\r\n\r\nattached note\r\n" +
+		"--B--\r\n"
+	d, err := Parse([]byte(raw), Limits{MaxMessageBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !strings.Contains(d.Text, "real body") {
+		t.Errorf("Text = %q, want it to contain %q", d.Text, "real body")
+	}
+	if strings.Contains(d.Text, "attached note") {
+		t.Errorf("Text leaked attached content: %q", d.Text)
+	}
+	if len(d.Attachments) != 1 {
+		t.Fatalf("len(Attachments) = %d, want 1", len(d.Attachments))
+	}
+	if d.Attachments[0].Filename != "note.txt" {
+		t.Errorf("Filename = %q", d.Attachments[0].Filename)
+	}
+	if d.Attachments[0].MimeType != "text/plain" {
+		t.Errorf("MimeType = %q", d.Attachments[0].MimeType)
+	}
+	if !d.Attachments[0].IsText {
+		t.Errorf("IsText = false; want true for text/plain attachment")
+	}
+}
+
+// TestParseHTMLAttachment is the HTML counterpart of
+// TestParseTextPlainAttachment.
+func TestParseHTMLAttachment(t *testing.T) {
+	raw := "From: a@example.test\r\nSubject: HTMLATT\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>real body</p>\r\n" +
+		"--B\r\nContent-Type: text/html; charset=utf-8\r\n" +
+		"Content-Disposition: attachment; filename=\"page.html\"\r\n\r\n<p>attached</p>\r\n" +
+		"--B--\r\n"
+	d, err := Parse([]byte(raw), Limits{MaxMessageBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !strings.Contains(d.HTML, "real body") {
+		t.Errorf("HTML = %q, want it to contain %q", d.HTML, "real body")
+	}
+	if len(d.Attachments) != 1 || d.Attachments[0].Filename != "page.html" {
+		t.Errorf("Attachments = %+v, want one entry with Filename=page.html", d.Attachments)
+	}
+}
+
+// The cap is "applied" only when c.n > 0; a cap of 0 must
+// behave like an unlimited read.
+func TestCountingReaderZeroCap(t *testing.T) {
+	cr := &countingReader{r: strings.NewReader("xyz"), n: 0}
+	all, err := io.ReadAll(cr)
+	if err != nil {
+		t.Fatalf("ReadAll err = %v", err)
+	}
+	if string(all) != "xyz" {
+		t.Errorf("read %q, want %q", string(all), "xyz")
+	}
+	if cr.exceeded {
+		t.Errorf("exceeded = true with cap 0")
 	}
 }
 

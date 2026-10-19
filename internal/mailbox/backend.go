@@ -20,7 +20,11 @@ type Backend interface {
 	// ListMessages returns message summaries in a mailbox, ordered by
 	// descending internal date (newest first). Implementations MUST
 	// honour opts.Limit by returning no more than that many entries.
-	ListMessages(ctx context.Context, accountID, mailbox string, opts ListOptions) ([]MessageSummary, error)
+	// UIDValidity is the live UIDVALIDITY of the mailbox observed
+	// during the same EXAMINE that produced the UIDs in Messages;
+	// tools must not combine UIDs from one ListResult with a
+	// UIDVALIDITY obtained from a later selection.
+	ListMessages(ctx context.Context, accountID, mailbox string, opts ListOptions) (ListResult, error)
 
 	// FetchMessage returns a full message body. Implementations MUST
 	// enforce the per-account max_message_bytes limit when decoding.
@@ -32,8 +36,10 @@ type Backend interface {
 	// report a UIDVALIDITY (some broken servers return 0).
 	FetchMessage(ctx context.Context, accountID, mailbox string, uid uint32, uidValidity uint32) (*Message, error)
 
-	// SearchMessages returns matching message summaries.
-	SearchMessages(ctx context.Context, accountID, mailbox string, q SearchQuery) ([]MessageSummary, error)
+	// SearchMessages returns matching message summaries. The
+	// returned UIDValidity is the live value observed during the
+	// same EXAMINE that produced the search results.
+	SearchMessages(ctx context.Context, accountID, mailbox string, q SearchQuery) (ListResult, error)
 }
 
 // Mailbox describes one folder on the server.
@@ -43,6 +49,16 @@ type Mailbox struct {
 	Delimiter   string   `json:"delimiter,omitempty"`
 	UIDValidity uint32   `json:"uid_validity,omitempty"`
 	UIDNext     uint32   `json:"uid_next,omitempty"`
+}
+
+// ListResult is the return value of ListMessages and
+// SearchMessages. It binds a set of message summaries to a
+// UIDVALIDITY observed during the same IMAP EXAMINE; the
+// caller MUST use this UIDVALIDITY for any subsequent
+// FetchMessage call.
+type ListResult struct {
+	UIDValidity uint32
+	Messages    []MessageSummary
 }
 
 // ListOptions controls how ListMessages returns data.

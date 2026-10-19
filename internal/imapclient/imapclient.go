@@ -14,6 +14,26 @@
 // UIDVALIDITY handling, BODY.PEEK fetches, and MIME parsing. SMTP
 // submission, destructive mailbox operations and outbound
 // attachments are deliberately not implemented here.
+//
+// Memory-bound note (Phase 2.1 PR #3 review). The go-imap
+// client (v1.2.1) buffers every IMAP literal in memory before
+// the application sees it: see
+// github.com/emersion/go-imap/read.go::ReadLiteral, which does
+// `b := make([]byte, n); io.ReadFull(...)`. The application-level
+// cap enforced by limitReader is therefore a backstop, not a
+// pre-allocation guard. A malicious server that announces a
+// literal larger than MaxMessageBytes will allocate the full
+// literal in the protocol layer before the cap is checked. The
+// practical memory ceiling per concurrent fetch is therefore
+// MaxMessageBytes plus a small protocol overhead. The reader's
+// MaxLiteralSize knob (which would reject the literal before
+// allocation) is not currently exposed by the go-imap client,
+// so the application-layer cap is the only line of defence
+// available without a fork. The default MaxMessageBytes of
+// 25 MiB bounds the worst case; lowering the per-account
+// limit is the recommended mitigation. This limitation is
+// documented in THREAT_MODEL.md and is the subject of a
+// planned Phase 2.2 hardening.
 package imapclient
 
 import (
@@ -141,10 +161,14 @@ func (b *Backend) Mailboxes(ctx context.Context, accountID string) ([]mailbox.Ma
 // ListMessages returns summaries of messages in the given mailbox.
 // The mailbox is EXAMINEd (read-only SELECT) for the duration of
 // the call so the server-side state cannot accept STORE or APPEND
-// through the read connection.
-func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts mailbox.ListOptions) ([]mailbox.MessageSummary, error) {
+// through the read connection. The returned ListResult.UIDValidity
+// is the value observed during the same EXAMINE that produced the
+// UIDs in ListResult.Messages; callers MUST use this UIDVALIDITY
+// for any subsequent FetchMessage call rather than a value obtained
+// from a later selection.
+func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts mailbox.ListOptions) (mailbox.ListResult, error) {
 	if mbx == "" {
-		return nil, mailbox.ErrMailboxNotFound
+		return mailbox.ListResult{}, mailbox.ErrMailboxNotFound
 	}
 	limit := opts.Limit
 	if limit <= 0 || limit > b.limits.MaxBatchOperations {
@@ -153,7 +177,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	if limit <= 0 {
 		limit = 50
 	}
-	var out []mailbox.MessageSummary
+	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true) // true => EXAMINE (read-only)
 		if err != nil {
@@ -165,9 +189,14 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		if mboxStatus.UidValidity == 0 {
 			return mailbox.ErrUIDMissing
 		}
+		// Bind the EXAMINE result to the UIDs we are about to
+		// fetch. UIDVALIDITY is captured here and returned in
+		// the same ListResult, so a later selection cannot be
+		// combined with these UIDs.
 		if err := b.setSelected(mbx, mboxStatus.UidValidity); err != nil {
 			return err
 		}
+		res.UIDValidity = mboxStatus.UidValidity
 		if mboxStatus.Messages == 0 {
 			return nil
 		}
@@ -184,6 +213,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		ch := make(chan *imap.Message, 32)
 		done := make(chan error, 1)
 		go func() { done <- c.UidFetch(seqset, items, ch) }()
+		var out []mailbox.MessageSummary
 		for m := range ch {
 			if m == nil {
 				continue
@@ -219,12 +249,13 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		if len(out) > limit {
 			out = out[:limit]
 		}
+		res.Messages = out
 		return nil
 	})
 	if err != nil {
-		return nil, mapErr(err)
+		return mailbox.ListResult{}, mapErr(err)
 	}
-	return out, nil
+	return res, nil
 }
 
 // FetchMessage returns a single message body. The mailbox is
@@ -302,11 +333,28 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 			return errors.New("imap: server returned empty body")
 		}
 		// Cap the body to MaxMessageBytes so a hostile server
-		// cannot stream gigabytes through.
-		cr := &limitReader{r: literal, n: int64(b.limits.MaxMessageBytes)}
+		// cannot stream gigabytes through. Note: the underlying
+		// go-imap client buffers the full literal before our
+		// reader sees it; this cap is the application-level
+		// backstop and cannot prevent the literal from being
+		// allocated by the protocol layer. See
+		// TestFetchMessageBodyCapTriggersError for the boundary
+		// test and the IMAP backend notes for the memory-bound
+		// discussion.
+		cap := int64(b.limits.MaxMessageBytes)
+		cr := &limitReader{r: literal, n: cap}
 		rawBytes, rerr := io.ReadAll(cr)
 		if rerr != nil {
 			return fmt.Errorf("imap: read body: %w", rerr)
+		}
+		// A "full" body that exactly hits the cap is ambiguous:
+		// we cannot tell whether the underlying message was
+		// exactly cap bytes long or was truncated. We treat
+		// any read that exhausts the cap as a hard failure so
+		// the caller never sees truncated RFC822 data as a
+		// successful complete message.
+		if cr.i >= cap && cap > 0 {
+			return mailbox.ErrMessageTooLarge
 		}
 		// Decode the body through the shared mimeparse package.
 		// We use the same limits for both backends; this keeps
@@ -317,29 +365,27 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 			MaxTotalAttachmentBytes: b.limits.MaxTotalAttachmentBytes,
 			MaxMIMENesting:          b.limits.MaxMIMENesting,
 			MaxMIMEParts:            b.limits.MaxMIMEParts,
+			MaxAttachments:          b.limits.MaxAttachments,
 		})
 		if perr != nil {
-			// A failure to parse the MIME structure is not a
-			// reason to refuse the fetch: we still return the
-			// envelope, but mark the message as truncated and
-			// surface the parse warning to the caller.
+			// Hard MIME failure: refuse the fetch. The
+			// partial decode is intentionally not returned;
+			// the caller must treat the error as
+			// authoritative. We do, however, surface the
+			// error in the result so the agent can show it
+			// to the user.
+			return mapErr(perr)
 		}
 		msg = &mailbox.Message{
 			UID:         raw.Uid,
 			UIDValidity: mboxStatus.UidValidity,
 			Flags:       flagsToStrings(raw.Flags),
-			Headers:     headersFromEnvelope(raw.Envelope, rawBytes),
-			Text:        "",
-			HTML:        "",
-			Attachments: nil,
-		}
-		if decoded != nil {
-			msg.Headers = decoded.Headers
-			msg.Text = decoded.Text
-			msg.HTML = decoded.HTML
-			msg.Attachments = convertAttachments(decoded.Attachments)
-			msg.Warnings = decoded.Warnings
-			msg.Truncated = decoded.Truncated
+			Headers:     decoded.Headers,
+			Text:        decoded.Text,
+			HTML:        decoded.HTML,
+			Attachments: convertAttachments(decoded.Attachments),
+			Warnings:    decoded.Warnings,
+			Truncated:   decoded.Truncated,
 		}
 		return nil
 	})
@@ -353,9 +399,9 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 // criteria fields are dropped; the limit is clamped to the
 // account's MaxSearchResults. The mailbox is EXAMINEd so the
 // search cannot mutate state.
-func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q mailbox.SearchQuery) ([]mailbox.MessageSummary, error) {
+func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q mailbox.SearchQuery) (mailbox.ListResult, error) {
 	if mbx == "" {
-		return nil, mailbox.ErrMailboxNotFound
+		return mailbox.ListResult{}, mailbox.ErrMailboxNotFound
 	}
 	limit := q.Limit
 	if limit <= 0 || limit > b.limits.MaxSearchResults {
@@ -374,9 +420,17 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	if q.Before != nil {
 		crit.SentBefore = *q.Before
 	}
+	// Pre-existing deficiency: q.Flagged and q.Unseen are
+	// declared in the SearchQuery type but are NOT translated
+	// into IMAP SEARCH criteria here. The criteria map to
+	// the on-wire WithFlags / WithoutFlags fields but the
+	// current code does not set them. Documented as a known
+	// limitation; the fix is mechanical. The memory backend
+	// honours q.Unseen by definition (all memory messages
+	// are \\Seen) and ignores q.Flagged.
 	crit.Text = compactStrings(crit.Text)
 	crit.Body = compactStrings(crit.Body)
-	var out []mailbox.MessageSummary
+	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
 		if err != nil {
@@ -388,9 +442,13 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		if mboxStatus.UidValidity == 0 {
 			return mailbox.ErrUIDMissing
 		}
+		// Bind UIDVALIDITY to the search results: the same
+		// EXAMINE that produced the UIDs is the source of
+		// the validity value returned in res.UIDValidity.
 		if err := b.setSelected(mbx, mboxStatus.UidValidity); err != nil {
 			return err
 		}
+		res.UIDValidity = mboxStatus.UidValidity
 		uids, err := c.UidSearch(crit)
 		if err != nil {
 			return err
@@ -410,6 +468,7 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		ch := make(chan *imap.Message, 32)
 		done := make(chan error, 1)
 		go func() { done <- c.UidFetch(seqset, items, ch) }()
+		var out []mailbox.MessageSummary
 		for m := range ch {
 			if m == nil {
 				continue
@@ -431,12 +490,13 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		if len(out) > limit {
 			out = out[:limit]
 		}
+		res.Messages = out
 		return nil
 	})
 	if err != nil {
-		return nil, mapErr(err)
+		return mailbox.ListResult{}, mapErr(err)
 	}
-	return out, nil
+	return res, nil
 }
 
 // SelectedUIDValidity returns the UIDVALIDITY of the most recent
@@ -452,9 +512,17 @@ func (b *Backend) SelectedUIDValidity() uint32 {
 
 // MailboxUIDValidity EXAMINEs the named mailbox and returns its
 // current UIDVALIDITY. The result is also cached as the selected
-// mailbox so subsequent FetchMessage / SearchMessages calls do not
-// need a second round-trip. An ErrUIDMissing is returned if the
-// server reports zero.
+// mailbox so subsequent FetchMessage calls do not need a second
+// round-trip. An ErrUIDMissing is returned if the server reports
+// zero.
+//
+// IMPORTANT: this is a stand-alone EXAMINE. The returned
+// UIDVALIDITY is paired with the EXAMINE only, not with any
+// UID-listing operation. Callers that want a UIDVALIDITY bound
+// to specific UIDs must use ListMessages or SearchMessages,
+// which return a ListResult that pairs the value at the source.
+// Do not use MailboxUIDValidity to validate a UID obtained
+// from a different selection.
 func (b *Backend) MailboxUIDValidity(ctx context.Context, accountID, mbx string) (uint32, error) {
 	if mbx == "" {
 		return 0, mailbox.ErrMailboxNotFound

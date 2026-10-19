@@ -61,10 +61,14 @@ func TestNewAndMailboxes(t *testing.T) {
 
 func TestListMessages(t *testing.T) {
 	b := newBackend(t)
-	msgs, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 10})
+	res, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
+	if res.UIDValidity == 0 {
+		t.Error("ListResult.UIDValidity not surfaced")
+	}
+	msgs := res.Messages
 	// The testdata fixture now contains several messages
 	// (welcome, multipart, iso, oversize). The legacy
 	// regression looks for the welcome subject specifically
@@ -140,8 +144,11 @@ func TestSearchMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchMessages: %v", err)
 	}
-	if len(got) != 1 {
-		t.Errorf("len = %d, want 1", len(got))
+	if got.UIDValidity == 0 {
+		t.Error("ListResult.UIDValidity not surfaced by SearchMessages")
+	}
+	if len(got.Messages) != 1 {
+		t.Errorf("len = %d, want 1", len(got.Messages))
 	}
 }
 
@@ -150,12 +157,12 @@ func TestSearchMessages(t *testing.T) {
 // around mimeparse's charset handling.
 func TestFetchMessageISO(t *testing.T) {
 	b := newBackend(t)
-	msgs, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 10})
+	res, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
 	var uid uint32
-	for _, m := range msgs {
+	for _, m := range res.Messages {
 		if m.Subject == "café" {
 			uid = m.UID
 			break
@@ -164,7 +171,7 @@ func TestFetchMessageISO(t *testing.T) {
 	if uid == 0 {
 		t.Skip("iso message not loaded")
 	}
-	full, err := b.FetchMessage(context.Background(), "any", "INBOX", uid, 1)
+	full, err := b.FetchMessage(context.Background(), "any", "INBOX", uid, res.UIDValidity)
 	if err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
@@ -179,8 +186,8 @@ func TestSearchMessagesNoMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchMessages: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("len = %d, want 0", len(got))
+	if len(got.Messages) != 0 {
+		t.Errorf("len = %d, want 0", len(got.Messages))
 	}
 }
 
@@ -194,8 +201,8 @@ func TestListMessagesSince(t *testing.T) {
 	// The 16th is the cutoff: messages dated strictly after
 	// are not in the welcome set. The new fixtures are dated
 	// 17th, 18th and 19th, so we expect exactly 3.
-	if len(got) != 3 {
-		t.Errorf("len = %d, want 3", len(got))
+	if len(got.Messages) != 3 {
+		t.Errorf("len = %d, want 3", len(got.Messages))
 	}
 }
 

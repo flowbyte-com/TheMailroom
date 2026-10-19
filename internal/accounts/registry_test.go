@@ -51,12 +51,15 @@ accounts:
 	if a.Backend() == nil {
 		t.Fatal("backend nil")
 	}
-	msgs, err := a.Backend().ListMessages(context.Background(), "a", "INBOX", mailbox.ListOptions{Limit: 5})
+	listRes, err := a.Backend().ListMessages(context.Background(), "a", "INBOX", mailbox.ListOptions{Limit: 5})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
-	if len(msgs) != 1 {
-		t.Errorf("len(msgs) = %d, want 1", len(msgs))
+	if listRes.UIDValidity == 0 {
+		t.Error("UIDValidity not surfaced")
+	}
+	if len(listRes.Messages) != 1 {
+		t.Errorf("len(msgs) = %d, want 1", len(listRes.Messages))
 	}
 }
 

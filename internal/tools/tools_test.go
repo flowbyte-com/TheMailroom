@@ -11,6 +11,7 @@ import (
 
 	"github.com/flowbyte-com/themailroom/internal/accounts"
 	"github.com/flowbyte-com/themailroom/internal/config"
+	mem "github.com/flowbyte-com/themailroom/internal/mailbox/memory"
 	"github.com/flowbyte-com/themailroom/internal/permissions"
 )
 
@@ -316,6 +317,33 @@ func TestReadMessageUIDValidityRequired(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "uid_validity") {
 		t.Errorf("err = %v, want mention of uid_validity", err)
+	}
+}
+
+// TestReadMessageMIMEErrorPropagated is the tool-layer
+// counterpart of TestFetchMessagePropagatesMIMEError. The
+// memory backend's NewWithLimits is the only knob to inject
+// a tight cap, so we exercise it directly. The IMAP-side
+// counterpart covers the integration path.
+func TestReadMessageMIMEErrorPropagated(t *testing.T) {
+	dir := t.TempDir()
+	multiline := "From: a@example.test\r\nSubject: M\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n" +
+		"--B--\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "m.eml"), []byte(multiline), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// NewWithLimits is the memory-backend test knob.
+	_, err := mem.NewWithLimits(dir, config.LimitsConfig{
+		MaxMIMENesting:  1,
+		MaxMessageBytes: 1 << 20,
+	})
+	if err == nil {
+		t.Fatal("expected memory backend to reject a multipart fixture under a 1-level cap")
+	}
+	if !strings.Contains(err.Error(), "nesting") {
+		t.Errorf("err = %v, want 'nesting' in error", err)
 	}
 }
 

@@ -88,6 +88,20 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 - **(implemented)** Unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide.
 - **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. Decoding a full attachment body goes through a future `read_attachment` tool that uses per-part size caps.
 - **(implemented)** Fuzz tests against the MIME parser are deferred; the existing test suite covers plain text, HTML, alternative, mixed, nested, charset edge cases, and the explicit safety cap paths.
+- **(implemented, with a documented limitation)** The
+  application-level body cap (`max_message_bytes`) is enforced
+  by the TheMailroom reader *after* the underlying go-imap
+  client has already buffered the full IMAP literal. The
+  go-imap `Reader.ReadLiteral` allocates a buffer of the
+  literal size before yielding it to the application. The
+  application cap is therefore a backstop, not a
+  pre-allocation guard. The worst-case per-concurrent-fetch
+  memory consumption is `max_message_bytes` plus protocol
+  overhead; the default 25 MiB cap bounds this. The
+  go-imap `MaxLiteralSize` knob (which would reject the
+  literal before allocation) is not currently exposed by
+  the client; documenting and addressing this is part of
+  the Phase 2.2 hardening.
 
 ### T5. Filesystem access
 
@@ -132,6 +146,7 @@ symlink-to-escape at the OS level, narrowing the window further.
 **Mitigations.**
 
 - **(implemented, read-only slice)** `read_message` requires both `uid` and `uid_validity`; a mismatch returns `ErrUidMismatch` (HTTP `UidMismatch`) without reading any body. Omitting `uid_validity` returns `InvalidInput` before any backend call. A server that reports a zero UIDVALIDITY is rejected with `ErrUIDMissing`.
+- **(implemented, PR #3 review)** The UIDVALIDITY returned by `list_messages` and `search_messages` is bound to the same IMAP `EXAMINE` that produced the UIDs. The wire-level `ListResult` struct pairs `UIDValidity` and `Messages` so a later selection cannot be combined with the returned UIDs. The legacy `MailboxUIDValidity` helper remains for diagnostics but is documented as a stand-alone EXAMINE that must not be used to validate a UID obtained elsewhere.
 - **(planned)** Phase 2 mutating operations (move, flag, archive, delete) carry the same UIDVALIDITY contract. Move and delete require the `modify` and `delete` capabilities respectively.
 - **(planned)** `delete` is hard-disabled unless explicitly enabled; `archive` is a logical move, not a delete.
 - **(planned)** Trash / Deleted Messages handling honours provider folder names (`Trash`, `INBOX.Trash`, `[Gmail]/Trash`).

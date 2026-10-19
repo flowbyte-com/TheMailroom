@@ -222,7 +222,54 @@ and an `oauth2` sub-block containing `token_command` (analogous to
 `password_command`). The token is refreshed on 401 responses. The
 implementation is intentionally deferred to a separate slice.
 
-## 7. Test strategy
+## 7. Pre-existing deficiencies carried into Phase 2.1
+
+The following are pre-Phase-2.1 gaps documented during the PR #3
+review. They are reported here for visibility and are tracked
+separately from the Phase 2.1 corrections.
+
+- **IMAP SEARCH does not honour `Flagged` or `Unseen`.** The
+  `SearchQuery` struct exposes `Flagged` and `Unseen`; the IMAP
+  backend never translates them into `WithFlags` /
+  `WithoutFlags` on the search criteria. The memory backend
+  honours `Unseen` by definition (all memory messages are
+  `\\Seen`) and ignores `Flagged`. The wire schema marks both
+  fields `omitempty` so callers that do not set them see no
+  behaviour change. The fix is mechanical: map `q.Flagged` to
+  `crit.WithFlags = []string{"\\Flagged"}` and `q.Unseen` to
+  `crit.WithoutFlags = []string{"\\Seen"}` in
+  `internal/imapclient/imapclient.go::SearchMessages`. Tracked
+  for Phase 2.2.
+- **IMAP SEARCH `Text` field conflates Subject + From + To.**
+  The IMAP `TEXT` keyword matches *any* text in headers or
+  body; populating it with multiple terms makes them OR, not
+  AND. A query for `subject=foo, from=bar` returns messages
+  containing "foo" anywhere OR "bar" anywhere. The right fix
+  is server-dependent: either issue multiple searches and
+  intersect, or use provider extensions (`OR` chaining,
+  `X-GM-RAW` on Gmail). Tracked for Phase 2.2.
+- **`SentSince` / `SentBefore` use the RFC 5322 `Date:`
+  header.** The IMAP criteria maps to the date the message
+  was sent, not the internal date the server records. Some
+  servers only support the latter; behaviour on those
+  servers is unspecified. The right fix is to expose both
+  `since_date` and `since_internal` to the caller. Tracked
+  for Phase 2.2.
+
+## 8. Memory-bound note on the IMAP literal layer
+
+The go-imap `Reader.ReadLiteral` (v1.2.1) allocates a buffer
+of the announced literal size and reads the body into it
+*before* the application sees the data. The application-level
+`max_message_bytes` cap is therefore a backstop, not a
+pre-allocation guard. The practical per-concurrent-fetch memory
+ceiling is `max_message_bytes` plus protocol overhead; the
+default 25 MiB cap bounds this. The go-imap `MaxLiteralSize`
+knob (which would refuse the literal before allocation) is
+not exposed by the client. Phase 2.2 will either fork the
+client to expose the knob or use a different transport.
+
+## 9. Test strategy
 
 For each new tool and protocol path:
 

@@ -78,6 +78,10 @@ type Limits struct {
 	// MaxMIMEParts caps total parts visited. Zero defaults to 500.
 	MaxMIMEParts int
 
+	// MaxAttachments caps the number of attachments the parser
+	// will return. Zero defaults to 50.
+	MaxAttachments int
+
 	// MaxAttachmentBytes caps a single attachment. Zero defaults to
 	// 6 MiB.
 	MaxAttachmentBytes int
@@ -97,6 +101,9 @@ func (l Limits) withDefaults() Limits {
 	if l.MaxMIMEParts == 0 {
 		l.MaxMIMEParts = 500
 	}
+	if l.MaxAttachments == 0 {
+		l.MaxAttachments = 50
+	}
 	if l.MaxAttachmentBytes == 0 {
 		l.MaxAttachmentBytes = 6 * 1024 * 1024
 	}
@@ -111,6 +118,7 @@ var (
 	ErrMessageTooLarge         = errors.New("mime: message exceeds size limit")
 	ErrNestingTooDeep          = errors.New("mime: nesting exceeds limit")
 	ErrTooManyParts            = errors.New("mime: part count exceeds limit")
+	ErrTooManyAttachments      = errors.New("mime: attachment count exceeds limit")
 	ErrAttachmentTooLarge      = errors.New("mime: attachment exceeds size limit")
 	ErrTotalAttachmentTooLarge = errors.New("mime: total attachment size exceeds limit")
 	ErrMalformed               = errors.New("mime: malformed message")
@@ -173,6 +181,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 	d := &Decoded{Headers: mailbox.MessageHeaders{}}
 	partCount := 0
 	totalAttachmentBytes := int64(0)
+	attachmentCount := 0
 	var text, html string
 	var atts []Attachment
 	// attachmentLimit is the per-attachment cap (int64 for the
@@ -260,11 +269,12 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 		filename = SanitizeFilename(filename)
 
 		isAttachment := disp == "attachment"
-		isInline := disp == "inline" || (disp == "" && strings.HasPrefix(mediaType, "text/"))
-		// An explicit Content-Disposition: inline wins over a
-		// filename heuristic. We do not promote a part with
-		// filename= but no Content-Disposition to "attachment" if
-		// it explicitly declared itself inline.
+		isInline := disp == "inline"
+		// Heuristic for "looks like an attachment" when no
+		// Content-Disposition is set: a non-text part with a
+		// filename is treated as an attachment. We do not
+		// promote a part that explicitly declared itself
+		// inline to an attachment.
 		if !isAttachment && !isInline && filename != "" && !strings.HasPrefix(mediaType, "text/") {
 			isAttachment = true
 		}
@@ -301,7 +311,11 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 			if totalAttachmentBytes+int64(len(data)) > int64(limits.MaxTotalAttachmentBytes) {
 				return ErrTotalAttachmentTooLarge
 			}
+			if attachmentCount+1 > limits.MaxAttachments {
+				return ErrTooManyAttachments
+			}
 			totalAttachmentBytes += int64(len(data))
+			attachmentCount++
 			atts = append(atts, Attachment{
 				Part:        partPath(path),
 				Filename:    filename,
@@ -317,21 +331,78 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 
 		// Inline (text) part.
 		if isTextPlain(mediaType) {
+			// An explicit Content-Disposition: attachment with
+			// a filename on a text/plain part is an
+			// attachment (e.g. a .txt file attached to the
+			// message), not the rendered body.
+			if disp == "attachment" && filename != "" {
+				if attachmentCount+1 > limits.MaxAttachments {
+					return ErrTooManyAttachments
+				}
+				if totalAttachmentBytes+int64(len(data)) > int64(limits.MaxTotalAttachmentBytes) {
+					return ErrTotalAttachmentTooLarge
+				}
+				attachmentCount++
+				totalAttachmentBytes += int64(len(data))
+				atts = append(atts, Attachment{
+					Part:        partPath(path),
+					Filename:    filename,
+					MimeType:    mediaType,
+					Size:        int64(len(data)),
+					ContentID:   cid,
+					Disposition: "attachment",
+					IsText:      true,
+					IsInline:    false,
+				})
+				return nil
+			}
 			text = string(data)
 		} else if isTextHTML(mediaType) {
+			// Same as text/plain: explicit attachment
+			// disposition + filename is an attachment, not
+			// the rendered body.
+			if disp == "attachment" && filename != "" {
+				if attachmentCount+1 > limits.MaxAttachments {
+					return ErrTooManyAttachments
+				}
+				if totalAttachmentBytes+int64(len(data)) > int64(limits.MaxTotalAttachmentBytes) {
+					return ErrTotalAttachmentTooLarge
+				}
+				attachmentCount++
+				totalAttachmentBytes += int64(len(data))
+				atts = append(atts, Attachment{
+					Part:        partPath(path),
+					Filename:    filename,
+					MimeType:    mediaType,
+					Size:        int64(len(data)),
+					ContentID:   cid,
+					Disposition: "attachment",
+					IsText:      true,
+					IsInline:    false,
+				})
+				return nil
+			}
 			html = string(data)
-		} else if filename != "" && isInline {
-			// Inline attachment (e.g. image/png with Content-ID).
+		} else if isInline {
+			// Inline non-text part. We retain every inline
+			// part (including those without a filename) so
+			// the agent can render Content-ID references in
+			// the HTML body. The Content-ID is the stable
+			// wire identifier; filename is best-effort.
+			if attachmentCount+1 > limits.MaxAttachments {
+				return ErrTooManyAttachments
+			}
 			if totalAttachmentBytes+int64(len(data)) > int64(limits.MaxTotalAttachmentBytes) {
 				return ErrTotalAttachmentTooLarge
 			}
+			attachmentCount++
 			totalAttachmentBytes += int64(len(data))
 			atts = append(atts, Attachment{
 				Part:        partPath(path),
-				Filename:    filename,
+				Filename:    filename, // may be empty for unnamed inline parts
 				MimeType:    mediaType,
 				Size:        int64(len(data)),
-				ContentID:   cid,
+				ContentID:   cid, // may be empty
 				Disposition: "inline",
 				IsText:      isTextLike(mediaType),
 				IsInline:    true,
@@ -343,22 +414,21 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 		// not want to expose arbitrary bytes as "body".
 		return nil
 	})
-	if walkErr != nil {
-		switch {
-		case errors.Is(walkErr, ErrNestingTooDeep),
-			errors.Is(walkErr, ErrTooManyParts),
-			errors.Is(walkErr, ErrAttachmentTooLarge),
-			errors.Is(walkErr, ErrTotalAttachmentTooLarge):
-			return nil, walkErr
-		default:
-			return nil, fmt.Errorf("%w: %v", ErrMalformed, walkErr)
-		}
-	}
 
 	d.Text = text
 	d.HTML = html
 	d.Attachments = atts
 	d.Warnings = warnings
+	if walkErr != nil {
+		// Mark the partial decode as truncated so callers
+		// cannot mistake it for a complete read. The error
+		// is returned alongside the partial decode; callers
+		// that want a strict "no partial on failure"
+		// contract should discard the decode themselves.
+		d.Truncated = true
+		d.Warnings = append(d.Warnings, walkErr.Error())
+		return d, walkErr
+	}
 	return d, nil
 }
 
@@ -393,6 +463,13 @@ func ParseFromReader(r io.Reader, limits Limits) (*Decoded, error) {
 // `exceeded` flag distinguishes a normal EOF from a cap-exceeded
 // one so the caller can decide whether to treat it as truncation
 // or as a hard error.
+//
+// Boundary semantics: a read of *exactly* n bytes is the last
+// successful read and does not set `exceeded`. `exceeded` is set
+// only when a read attempt is refused because no capacity
+// remains. Callers can therefore interpret `exceeded == false` as
+// "we read what we asked for, up to the cap", which is the
+// valid case. This is verified by TestCountingReaderBoundary.
 type countingReader struct {
 	r        io.Reader
 	n        int64
@@ -404,6 +481,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	if c.n > 0 {
 		remaining := c.n - c.read
 		if remaining <= 0 {
+			// A previous Read returned exactly n bytes; this
+			// call would push us over the cap, so refuse.
 			c.exceeded = true
 			return 0, io.EOF
 		}
@@ -413,9 +492,11 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	}
 	n, err := c.r.Read(p)
 	c.read += int64(n)
-	if c.n > 0 && c.read >= c.n {
-		c.exceeded = true
-	}
+	// Note: c.read == c.n is the boundary case: the last
+	// successful read filled the cap exactly. Do not flag
+	// exceeded; the caller is expected to make at most one
+	// more Read call, which will see remaining == 0 and set
+	// exceeded.
 	return n, err
 }
 

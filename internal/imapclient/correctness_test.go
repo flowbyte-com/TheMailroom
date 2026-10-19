@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -19,6 +20,7 @@ import (
 	memuserpkg "github.com/emersion/go-imap/backend/memory"
 	imapsrv "github.com/emersion/go-imap/server"
 
+	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
 )
 
@@ -127,14 +129,14 @@ func TestUnreadMessageStaysUnreadAfterRead(t *testing.T) {
 		t.Fatalf("FetchMessage: %v", err)
 	}
 	// Re-list and check the flags. \Seen must be absent.
-	msgs, err := be.ListMessages(context.Background(), "test", "INBOX", mailbox.ListOptions{Limit: 50})
+	listRes, err := be.ListMessages(context.Background(), "test", "INBOX", mailbox.ListOptions{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
 	var unseen *mailbox.MessageSummary
-	for i, m := range msgs {
+	for i, m := range listRes.Messages {
 		if m.UID == 7 {
-			unseen = &msgs[i]
+			unseen = &listRes.Messages[i]
 			break
 		}
 	}
@@ -188,16 +190,17 @@ func TestReconnectPreservesUIDValidityCheck(t *testing.T) {
 	defer be.Close()
 
 	// Fetch at least one message first so we know the welcome
-	// message UID.
+	// message UID. The list's UIDVALIDITY is bound to the same
+	// EXAMINE that produced the UIDs; we use it directly.
 	list, err := be.ListMessages(context.Background(), "test", "INBOX", mailbox.ListOptions{Limit: 1})
-	if err != nil || len(list) == 0 {
-		t.Fatalf("ListMessages: %v / %d", err, len(list))
+	if err != nil || len(list.Messages) == 0 {
+		t.Fatalf("ListMessages: %v / %d", err, len(list.Messages))
 	}
-	uid := list[0].UID
+	uid := list.Messages[0].UID
+	uv := list.UIDValidity
 
-	uv, err := be.MailboxUIDValidity(context.Background(), "test", "INBOX")
-	if err != nil {
-		t.Fatalf("first MailboxUIDValidity: %v", err)
+	if _, err := be.MailboxUIDValidity(context.Background(), "test", "INBOX"); err != nil {
+		t.Fatalf("MailboxUIDValidity: %v", err)
 	}
 	// Force a reconnect.
 	be.mu.Lock()
@@ -244,6 +247,201 @@ func TestConnectionClosedOnBackendError(t *testing.T) {
 	}
 }
 
+// TestListMessagesUIDValidityBoundToUIDs is the central
+// pairing regression: the UIDVALIDITY in ListResult must come
+// from the same EXAMINE that produced the UIDs. Two separate
+// EXAMINEs (e.g. list then MailboxUIDValidity) can disagree if
+// the server re-issued UIDVALIDITY between them. The contract
+// here is enforced by the implementation: ListResult.UIDValidity
+// is captured at the same time as the UIDs, and a subsequent
+// MailboxUIDValidity can return a different value if the server
+// re-selected the mailbox.
+func TestListMessagesUIDValidityBoundToUIDs(t *testing.T) {
+	addr, cleanup := startCustomServer(t, nil)
+	defer cleanup()
+	be := testBackend(t, addr)
+	defer be.Close()
+
+	res, err := be.ListMessages(context.Background(), "test", "INBOX", mailbox.ListOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if res.UIDValidity == 0 {
+		t.Fatal("ListResult.UIDValidity is zero")
+	}
+	// A follow-up MailboxUIDValidity must return the same
+	// value because no EXAMINE has been issued in between; if
+	// it returns a different value, the contract is broken.
+	uv2, err := be.MailboxUIDValidity(context.Background(), "test", "INBOX")
+	if err != nil {
+		t.Fatalf("MailboxUIDValidity: %v", err)
+	}
+	if uv2 != res.UIDValidity {
+		t.Errorf("MailboxUIDValidity = %d, ListResult.UIDValidity = %d; they must agree when no EXAMINE has been issued in between", uv2, res.UIDValidity)
+	}
+}
+
+// TestSearchMessagesUIDValidityBoundToUIDs is the search-side
+// counterpart.
+func TestSearchMessagesUIDValidityBoundToUIDs(t *testing.T) {
+	addr, cleanup := startCustomServer(t, nil)
+	defer cleanup()
+	be := testBackend(t, addr)
+	defer be.Close()
+
+	res, err := be.SearchMessages(context.Background(), "test", "INBOX", mailbox.SearchQuery{
+		Subject: "little",
+		Limit:   5,
+	})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if res.UIDValidity == 0 {
+		t.Fatal("ListResult.UIDValidity is zero")
+	}
+	uv2, err := be.MailboxUIDValidity(context.Background(), "test", "INBOX")
+	if err != nil {
+		t.Fatalf("MailboxUIDValidity: %v", err)
+	}
+	if uv2 != res.UIDValidity {
+		t.Errorf("MailboxUIDValidity = %d, ListResult.UIDValidity = %d; they must agree", uv2, res.UIDValidity)
+	}
+}
+
+// TestFetchMessageBodyCapTriggersError verifies that a body
+// whose on-wire size reaches the configured MaxMessageBytes cap
+// is treated as a hard failure rather than as a successful
+// complete message. The contract is necessary because once
+// the read hits the cap we cannot tell whether the underlying
+// message was exactly cap bytes long or was truncated; we
+// choose the conservative interpretation.
+func TestFetchMessageBodyCapTriggersError(t *testing.T) {
+	addr, cleanup := startCustomServer(t, nil)
+	defer cleanup()
+
+	// Build a backend with a 256-byte MaxMessageBytes cap. The
+	// default welcome message in the in-process memory backend
+	// is well under 256 bytes, so the cap is not hit; we want
+	// the cap to be tight enough to bound the test.
+	host, port, _ := net.SplitHostPort(addr)
+	var p int
+	_, _ = fmt.Sscanf(port, "%d", &p)
+	cfg := config.AccountConfig{
+		ID: "x", Email: "x@y", Backend: "imap",
+		IMAP: config.IMAPConfig{Host: host, Port: p, Username: "username", Password: "password", TLS: true},
+		Limits: config.LimitsConfig{
+			MaxMessageBytes:         10, // 10 bytes: any real message will hit the cap
+			MaxAttachmentBytes:      1,
+			MaxSearchResults:        1,
+			MaxBatchOperations:      1,
+			MaxMIMENesting:          1,
+			MaxMIMEParts:            1,
+			MaxTotalAttachmentBytes: 1,
+		},
+	}
+	be, err := New(cfg, Options{
+		DialTimeout: 5 * time.Second,
+		TLSConfig:   &tls.Config{InsecureSkipVerify: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+
+	// Find the welcome message UID via ListMessages. The
+	// in-process memory backend assigns uid=6 to the welcome
+	// message, but reading the live value is more robust.
+	list, err := be.ListMessages(context.Background(), "x", "INBOX", mailbox.ListOptions{Limit: 1})
+	if err != nil || len(list.Messages) == 0 {
+		t.Fatalf("ListMessages: %v / %d", err, len(list.Messages))
+	}
+	uid := list.Messages[0].UID
+
+	_, err = be.FetchMessage(context.Background(), "x", "INBOX", uid, list.UIDValidity)
+	if !errors.Is(err, mailbox.ErrMessageTooLarge) {
+		t.Errorf("err = %v, want ErrMessageTooLarge", err)
+	}
+}
+
+// TestFetchMessagePropagatesMIMEError is the propagation
+// regression: a parse failure during the MIME stage is
+// surfaced as the typed error, not silently swallowed. We
+// install a body that parses partially and then trips the
+// MaxMIMENesting cap, and we verify the IMAP backend returns
+// the typed error rather than a truncated message.
+//
+// We achieve this by setting MaxMIMENesting to 1, which is
+// below the depth of any real multipart message. Since the
+// in-process memory backend only ships a single-part text/plain
+// message, this test uses a custom server that injects a
+// multipart message; the body's MIME structure trips the
+// cap.
+func TestFetchMessagePropagatesMIMEError(t *testing.T) {
+	multipart := "From: a@example.test\r\nSubject: M\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"a.bin\"\r\n\r\nBIN\r\n" +
+		"--B--\r\n"
+	addr, cleanup := startCustomServer(t, func(u *memuserpkg.User) {
+		mb, err := u.GetMailbox("INBOX")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mb.CreateMessage(nil, time.Now(), stringReader(multipart)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	defer cleanup()
+
+	host, port, _ := net.SplitHostPort(addr)
+	var p int
+	_, _ = fmt.Sscanf(port, "%d", &p)
+	cfg := config.AccountConfig{
+		ID: "x", Email: "x@y", Backend: "imap",
+		IMAP: config.IMAPConfig{Host: host, Port: p, Username: "username", Password: "password", TLS: true},
+		Limits: config.LimitsConfig{
+			MaxMessageBytes:         1 << 20,
+			MaxAttachmentBytes:      1 << 20,
+			MaxSearchResults:        1,
+			MaxBatchOperations:      1,
+			MaxMIMENesting:          1, // 1 < depth of multipart/mixed, so parse fails
+			MaxMIMEParts:            500,
+			MaxTotalAttachmentBytes: 1 << 20,
+		},
+	}
+	be, err := New(cfg, Options{
+		DialTimeout: 5 * time.Second,
+		TLSConfig:   &tls.Config{InsecureSkipVerify: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer be.Close()
+
+	// The injected message has uid=2 (uid=6 was the welcome
+	// message in the original memory backend). We read the
+	// live list to discover the UID.
+	list, err := be.ListMessages(context.Background(), "x", "INBOX", mailbox.ListOptions{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var uid uint32
+	for _, m := range list.Messages {
+		if m.Subject == "M" {
+			uid = m.UID
+			break
+		}
+	}
+	if uid == 0 {
+		t.Fatal("injected message not found")
+	}
+	_, err = be.FetchMessage(context.Background(), "x", "INBOX", uid, list.UIDValidity)
+	if !errors.Is(err, mailbox.ErrNestingTooDeep) {
+		t.Errorf("err = %v, want ErrNestingTooDeep", err)
+	}
+}
+
 // TestListMessagesReturnsReadOnlyUIDVALIDITY verifies that
 // ListMessages populates the selected-validity cache and that the
 // subsequent FetchMessage agrees.
@@ -257,14 +455,17 @@ func TestListMessagesReturnsReadOnlyUIDVALIDITY(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
-	if len(msgs) == 0 {
+	if len(msgs.Messages) == 0 {
 		t.Fatal("no messages")
 	}
 	uv := be.SelectedUIDValidity()
 	if uv == 0 {
 		t.Error("SelectedUIDValidity not populated by ListMessages")
 	}
-	_, err = be.FetchMessage(context.Background(), "test", "INBOX", msgs[0].UID, uv)
+	if uv != msgs.UIDValidity {
+		t.Errorf("SelectedUIDValidity = %d, ListResult.UIDValidity = %d; they must agree", uv, msgs.UIDValidity)
+	}
+	_, err = be.FetchMessage(context.Background(), "test", "INBOX", msgs.Messages[0].UID, uv)
 	if err != nil {
 		t.Errorf("FetchMessage with cached UIDVALIDITY: %v", err)
 	}

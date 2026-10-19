@@ -144,10 +144,14 @@ func TestListMessages(t *testing.T) {
 	be := testBackend(t, addr)
 	defer be.Close()
 
-	msgs, err := be.ListMessages(context.Background(), "test", "INBOX", mailbox.ListOptions{Limit: 10})
+	res, err := be.ListMessages(context.Background(), "test", "INBOX", mailbox.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
+	if res.UIDValidity == 0 {
+		t.Error("ListResult.UIDValidity not surfaced")
+	}
+	msgs := res.Messages
 	if len(msgs) == 0 {
 		t.Fatal("no messages")
 	}
@@ -169,15 +173,14 @@ func TestFetchMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
-	if len(list) == 0 {
+	if len(list.Messages) == 0 {
 		t.Fatal("no messages")
 	}
-	uid := list[0].UID
-	// Live UIDVALIDITY from the selected mailbox.
-	uv, err := be.MailboxUIDValidity(context.Background(), "test", "INBOX")
-	if err != nil {
-		t.Fatalf("MailboxUIDValidity: %v", err)
-	}
+	uid := list.Messages[0].UID
+	// Live UIDVALIDITY from the selected mailbox. We use the
+	// list's UIDVALIDITY because that value is bound to the
+	// same EXAMINE that produced the UIDs in list.Messages.
+	uv := list.UIDValidity
 	if uv == 0 {
 		t.Fatal("live UIDVALIDITY is zero; server bug or wrapper bug")
 	}
@@ -250,8 +253,11 @@ func TestSearchMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchMessages: %v", err)
 	}
-	if len(got) == 0 {
-		t.Errorf("search returned no matches; got %d", len(got))
+	if got.UIDValidity == 0 {
+		t.Error("SearchResult.UIDValidity not surfaced")
+	}
+	if len(got.Messages) == 0 {
+		t.Errorf("search returned no matches; got %d", len(got.Messages))
 	}
 }
 

@@ -243,13 +243,15 @@ func (b *Backend) Mailboxes(ctx context.Context, accountID string) ([]mailbox.Ma
 	return out, nil
 }
 
-// ListMessages returns summaries, newest first.
-func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts mailbox.ListOptions) ([]mailbox.MessageSummary, error) {
+// ListMessages returns summaries, newest first. The memory
+// backend always reports UIDVALIDITY=1; that value is returned
+// in ListResult so callers can pair it with the listed UIDs.
+func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts mailbox.ListOptions) (mailbox.ListResult, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	msgs, ok := b.loaded[mbx]
 	if !ok {
-		return nil, mailbox.ErrMailboxNotFound
+		return mailbox.ListResult{}, mailbox.ErrMailboxNotFound
 	}
 	limit := opts.Limit
 	if limit <= 0 {
@@ -280,7 +282,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 			HasAttachment: len(m.Attachments) > 0,
 		})
 	}
-	return out, nil
+	return mailbox.ListResult{UIDValidity: 1, Messages: out}, nil
 }
 
 // FetchMessage returns a deep copy of the message. The memory
@@ -312,12 +314,13 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 
 // SearchMessages does a simple substring match against the available
 // fields. It is intentionally naive — production search uses IMAP SEARCH.
-func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q mailbox.SearchQuery) ([]mailbox.MessageSummary, error) {
+// The memory backend always reports UIDVALIDITY=1.
+func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q mailbox.SearchQuery) (mailbox.ListResult, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	msgs, ok := b.loaded[mbx]
 	if !ok {
-		return nil, mailbox.ErrMailboxNotFound
+		return mailbox.ListResult{}, mailbox.ErrMailboxNotFound
 	}
 	limit := q.Limit
 	if limit <= 0 {
@@ -342,7 +345,7 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 			break
 		}
 	}
-	return out, nil
+	return mailbox.ListResult{UIDValidity: 1, Messages: out}, nil
 }
 
 func searchMatches(m *mailbox.Message, q mailbox.SearchQuery) bool {
@@ -365,8 +368,17 @@ func searchMatches(m *mailbox.Message, q mailbox.SearchQuery) bool {
 		return false
 	}
 	if q.Unseen {
+		// Memory backend semantics: all messages are treated
+		// as \\Seen. An Unseen filter therefore matches
+		// nothing, which is the only safe answer.
 		return false
 	}
+	// q.Flagged is a pre-existing gap: searchMatches does
+	// not consider q.Flagged. The field is accepted but
+	// ignored. The wire schema marks it omitempty so callers
+	// that do not set it see no behaviour change; callers
+	// that do set it get the same result as the unfiltered
+	// query.
 	return true
 }
 

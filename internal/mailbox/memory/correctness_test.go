@@ -52,16 +52,16 @@ func TestParseNestedMultipart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	msgs, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 100})
+	listRes, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
 	// Find the multipart message by subject.
 	var m *mailbox.Message
-	for _, msg := range msgs {
+	for _, msg := range listRes.Messages {
 		if strings.Contains(msg.Subject, "Multi-part") {
 			uid := msg.UID
-			full, err := b.FetchMessage(context.Background(), "any", "INBOX", uid, 1)
+			full, err := b.FetchMessage(context.Background(), "any", "INBOX", uid, listRes.UIDValidity)
 			if err != nil {
 				t.Fatalf("FetchMessage(%d): %v", uid, err)
 			}
@@ -107,15 +107,15 @@ func TestParseISO88591(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	msgs, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 100})
+	listRes, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
 	var m *mailbox.Message
-	for _, msg := range msgs {
+	for _, msg := range listRes.Messages {
 		if msg.Subject == "café" {
 			uid := msg.UID
-			full, err := b.FetchMessage(context.Background(), "any", "INBOX", uid, 1)
+			full, err := b.FetchMessage(context.Background(), "any", "INBOX", uid, listRes.UIDValidity)
 			if err != nil {
 				t.Fatalf("FetchMessage(%d): %v", uid, err)
 			}
@@ -161,6 +161,43 @@ func TestAttachmentSizeCap(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "attachment") {
 		t.Errorf("err = %v, want 'attachment' in error", err)
+	}
+}
+
+// TestPreExistingSearchFlagGap documents the known
+// limitation: q.Flagged and q.Unseen are accepted by the
+// SearchQuery type but the in-memory searchMatches function
+// does not honour them. Unseen always returns no matches
+// (memory messages are all \\Seen), and Flagged is silently
+// ignored. A future change should set q.Flagged to filter on
+// the \\Flagged flag in the MessageSummary. This test will
+// start failing when the gap is fixed; the fix author should
+// update the test to assert the new behaviour.
+func TestPreExistingSearchFlagGap(t *testing.T) {
+	b := newBackend(t)
+	// q.Unseen: with the current semantics, every Unseen
+	// query returns no matches.
+	res, err := b.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
+		Subject: "Welcome",
+		Unseen:  true,
+	})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(res.Messages) != 0 {
+		t.Errorf("Unseen filter should match no memory messages; got %d", len(res.Messages))
+	}
+	// q.Flagged is currently ignored; the unfiltered count
+	// for the same subject should be 1.
+	res2, err := b.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
+		Subject: "Welcome",
+		Flagged: true,
+	})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(res2.Messages) != 1 {
+		t.Errorf("Flagged filter is currently a no-op; expected 1 result, got %d", len(res2.Messages))
 	}
 }
 
