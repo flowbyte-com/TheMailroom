@@ -88,25 +88,61 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 - **(implemented)** Unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide.
 - **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. Decoding a full attachment body goes through a future `read_attachment` tool that uses per-part size caps.
 - **(implemented)** Fuzz tests against the MIME parser are deferred; the existing test suite covers plain text, HTML, alternative, mixed, nested, charset edge cases, and the explicit safety cap paths.
-- **(implemented, with a known UNBOUNDED risk documented
-  above)** The application-level body cap
-  (`max_message_bytes`) is enforced by the TheMailroom
-  reader *after* the underlying go-imap client has already
-  buffered the full IMAP literal. The go-imap
-  `Reader.ReadLiteral` allocates a buffer of the literal size
-  before yielding it to the application. The application cap
-  is therefore a backstop, not a pre-allocation guard. The
-  default 25 MiB cap does **not** bound this allocation
-  because the buffer is allocated by the go-imap library
-  before our code sees the bytes. A malicious or buggy
-  server that announces a literal larger than the cap can
-  cause unbounded allocation before the application-level
-  cap rejects the body. Callers that fetch from untrusted
-  IMAP servers must mitigate at the network layer
-  (firewall / proxy with a body-size filter) until the
-  protocol-level cap is implemented. See
-  `docs/PHASE2_DESIGN.md` §10 for the tracked pre-production
-  security requirement.
+- **(implemented, protocol-level enforcement)** The
+  per-account body cap (`max_message_bytes`) is enforced at
+  the **IMAP protocol layer**, before the literal buffer is
+  allocated. The go-imap fork
+  (`github.com/flowbyte-com/go-imap`, module version
+  `v1.2.1-themailroom.4`) adds a
+  `client.DialOptions.MaxLiteralSize` option; TheMailroom
+  sets it to `max_message_bytes` at dial time. The fork's
+  `ReadLiteral` checks the announced literal size against
+  the cap **before** the `make([]byte, n)` call, so a server
+  that announces a 1 GiB literal is rejected without any
+  1 GiB allocation. The cap is set on the IMAP `Reader`, not
+  on the transport, so it applies identically to the
+  implicit-TLS and STARTTLS paths (the Reader sees the
+  decrypted stream in both cases).
+- **(implemented, no pre-configuration window)** The cap is
+  assigned to the `*imap.Reader` **at construction time**,
+  before the server greeting is parsed and before the
+  background reader goroutine starts. An earlier cut of the
+  fork assigned the cap after `New(conn)` returned, which
+  left the reader goroutine live and uncapped for a window
+  (an unbounded-allocation window) and raced with the
+  goroutine's read of the cap. `Reader.MaxLiteralSize` is now
+  written in exactly one place, and only before any
+  goroutine that could read it exists. The structural
+  invariant is asserted by
+  `TestForkAppliesCapBeforeReaderStarts`; the behavioural
+  coverage is in the fork's `client/constructor_test.go`.
+- **(implemented, defence in depth)** The application-level
+  cap (`io.LimitReader` + length check on the literal body)
+  is retained. It guarantees that a literal is never silently
+  truncated: if the read returns more than the cap, the
+  backend returns `ErrMessageTooLarge` and the caller sees a
+  typed error rather than a complete-looking message with a
+  missing body.
+- **(implemented, distinguishable failures)** The fork
+  returns the exported sentinel `imap.ErrLiteralSizeExceeded`
+  for a cap violation. The go-imap executor wraps it in a
+  typed connection-closed error, so `errors.Is` finds it
+  through the `Unwrap` chain and TheMailroom maps it to
+  `mailbox.ErrMessageTooLarge`. Unrelated protocol parse
+  errors map to `mailbox.ErrMalformed` and connection
+  failures, authentication failures and panics remain
+  distinguishable from a size-limit violation.
+- **(implemented, connection hygiene)** A protocol-level
+  failure closes the affected connection. The backend
+  discards the client, so the next operation establishes a
+  clean connection and re-validates UIDVALIDITY.
+- **(implemented, binary safety)** The cap applies to the
+  *announced literal size*. The literal body is treated as
+  opaque bytes; the cap never inspects, classifies or
+  interprets the content. A message whose body contains
+  byte sequences that look like IMAP literal headers is read
+  normally (regression test
+  `TestBinaryContentWithLiteralHeaderBytes`).
 
 ### T5. Filesystem access
 

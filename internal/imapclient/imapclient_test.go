@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/emersion/go-imap"
-	memserver "github.com/emersion/go-imap/backend/memory"
-	imapsrv "github.com/emersion/go-imap/server"
+	"github.com/flowbyte-com/go-imap"
+	memserver "github.com/flowbyte-com/go-imap/backend/memory"
+	imapsrv "github.com/flowbyte-com/go-imap/server"
 
 	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
