@@ -1,0 +1,14 @@
+From: Sender <sender@example.test>
+To: Recipient <recipient@example.test>
+Subject: Welcome to TheMailroom
+Date: Mon, 15 Jan 2024 10:11:12 +0000
+Message-Id: <welcome@example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Hello,
+
+This is a plain-text test message used by the memory backend tests.
+
+Thanks,
+The Test Suite

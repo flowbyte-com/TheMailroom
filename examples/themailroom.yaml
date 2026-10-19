@@ -1,0 +1,68 @@
+# Example configuration for TheMailroom.
+#
+# Copy to /etc/themailroom/themailroom.yaml (or any path) and edit.
+# The server validates this file on startup; unknown fields are
+# tolerated but invalid values are rejected.
+
+server:
+  log_level: info            # debug, info, warn, error
+
+accounts:
+  # A read-only account that connects to a real IMAP server.
+  - id: personal
+    provider: purelymail     # informational label, no provider-specific code
+    email: alice@example.test
+
+    imap:
+      host: imap.example.test
+      port: 993              # 993 for implicit TLS, 143 for STARTTLS
+      tls: true              # implicit TLS; set false if port=143 + starttls
+      username: alice@example.test
+
+      # Recommended: ask an external secret manager for the password.
+      # This avoids putting the secret in the config file. The server
+      # waits for the command to exit and reads its stdout (trimmed).
+      password_command: ["pass", "email/imap/personal"]
+
+      # Alternatively, store the password directly. NEVER commit a file
+      # with this field set; chmod 600 the file.
+      # password: hunter2
+
+    smtp:
+      host: smtp.example.test
+      port: 587              # 587 for STARTTLS submission, 465 for implicit TLS
+      starttls: true         # upgrade plain TCP to TLS
+      username: alice@example.test
+      password_command: ["pass", "email/smtp/personal"]
+
+    permissions:
+      - read
+
+    limits:
+      max_message_bytes: 26214400    # 25 MiB
+      max_attachments: 50
+      max_search_results: 500
+      max_batch_operations: 50
+
+    attachment_send_paths: []        # empty = attachments cannot be sent
+
+  # A second account that can send (illustrative; not wired up in
+  # Phase 1 — Phase 2 lands SMTP submission).
+  - id: work
+    email: alice@work.example.test
+    imap:
+      host: imap.work.example.test
+      username: alice@work.example.test
+      password_command: ["secret-tool", "lookup", "imap/work"]
+    smtp:
+      host: smtp.work.example.test
+      username: alice@work.example.test
+      password_command: ["secret-tool", "lookup", "smtp/work"]
+    permissions:
+      - read
+      - send
+      - attachment_send
+    attachment_send_paths:
+      - /home/alice/Documents/Outbound   # absolute; symlinks rejected at read
+    limits:
+      max_message_bytes: 10485760       # 10 MiB

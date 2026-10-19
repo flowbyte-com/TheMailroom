@@ -1,0 +1,32 @@
+# Build artefacts
+/themailroom
+/themailroom-*
+/cmd/themailroom/themailroom
+
+# Test artefacts
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local config / secrets (never commit)
+/config.local.yaml
+/config.local.json
+/.env
+*.local.yaml
+*.local.json
+secrets.yaml
+secrets.json
+
+# Go workspace files (if any)
+/go.work
+/go.work.sum
+
+# Dependency caches (outside this module) — keep tidy
+/vendor/

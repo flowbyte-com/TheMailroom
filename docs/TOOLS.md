@@ -1,0 +1,231 @@
+# TheMailroom Tools
+
+> Status: Phase 1 implements the **read-only** tools below. Phase 2 adds sending, modification, deletion, and attachment tools.
+
+Every tool:
+
+- Validates input against a JSON Schema.
+- Returns a structured JSON result.
+- Enforces a permission capability server-side.
+- Returns typed errors (`PermissionDenied`, `AccountNotFound`, `InvalidInput`, `BackendError`, `NotImplemented`, etc.) without leaking credentials or wire details.
+
+All tools take `account_id` as a required string field. There is no implicit "current account".
+
+## Common error model
+
+```json
+{
+  "error": {
+    "code": "PermissionDenied",
+    "message": "account 'personal' lacks capability 'send'",
+    "details": { "account_id": "personal", "capability": "send" }
+  }
+}
+```
+
+`code` is one of:
+
+- `InvalidInput` — schema or business validation failed.
+- `AccountNotFound` — `account_id` not configured.
+- `PermissionDenied` — capability not granted.
+- `BackendError` — IMAP/SMTP operation failed; details are redacted.
+- `RateLimited` — limit exceeded.
+- `UidMismatch` — `uid_validity` does not match the current mailbox.
+- `NotImplemented` — capability exists in the schema but is not yet wired (Phase 1 stubs).
+
+## Read-only tools (Phase 1)
+
+### `list_accounts`
+
+Lists the IDs and metadata of configured accounts. **No credentials** are returned.
+
+**Input.**
+
+```json
+{ }
+```
+
+**Output.**
+
+```json
+{
+  "accounts": [
+    {
+      "id": "personal",
+      "email": "user@example.test",
+      "provider": "generic",
+      "permissions": ["read"],
+      "limits": { "max_message_bytes": 26214400, "max_attachments": 50, "max_search_results": 500, "max_batch_operations": 50 },
+      "attachment_send_paths": []
+    }
+  ]
+}
+```
+
+### `list_mailboxes`
+
+Lists mailboxes/folders for an account.
+
+**Input.**
+
+```json
+{ "account_id": "personal" }
+```
+
+**Output.**
+
+```json
+{
+  "account_id": "personal",
+  "mailboxes": [
+    { "name": "INBOX", "attributes": ["\\HasNoChildren"], "delimiter": "/" },
+    { "name": "Sent", "attributes": ["\\Sent"], "delimiter": "/" },
+    { "name": "Trash", "attributes": ["\\Trash"], "delimiter": "/" }
+  ]
+}
+```
+
+### `list_messages`
+
+Lists messages in a mailbox.
+
+**Input.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "limit": 50,
+  "offset": 0,
+  "since": "2024-01-01T00:00:00Z",
+  "before": "2024-12-31T23:59:59Z"
+}
+```
+
+`limit` is clamped to the per-account `max_batch_operations` (default 50). `offset` is validated non-negative. `since` / `before` are RFC 3339 timestamps.
+
+**Output.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "uid_validity": 1234567890,
+  "messages": [
+    {
+      "uid": 1024,
+      "flags": ["\\Seen"],
+      "internal_date": "2024-08-15T10:11:12Z",
+      "size": 12345,
+      "from": "Sender <sender@example.test>",
+      "to": ["user@example.test"],
+      "subject": "Quarterly report",
+      "has_attachments": true
+    }
+  ]
+}
+```
+
+### `read_message`
+
+Reads a single message, returning headers, text and HTML bodies, and a list of attachments. Bodies are truncated by `max_message_bytes`.
+
+**Input.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "uid": 1024,
+  "uid_validity": 1234567890
+}
+```
+
+`uid_validity` is required in Phase 2 to prevent silent targeting of the wrong message after a mailbox re-creation. In Phase 1 the value is accepted and validated against the schema but not yet cross-checked.
+
+**Output.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "uid": 1024,
+  "uid_validity": 1234567890,
+  "headers": {
+    "message_id": "<abc@example.test>",
+    "from": "Sender <sender@example.test>",
+    "to": ["user@example.test"],
+    "cc": [],
+    "subject": "Quarterly report",
+    "date": "2024-08-15T10:11:12Z",
+    "in_reply_to": null,
+    "references": []
+  },
+  "text": "Plain text body...",
+  "html": "<p>HTML body...</p>",
+  "attachments": [
+    { "index": 0, "filename": "report.pdf", "mime_type": "application/pdf", "size": 123456 }
+  ]
+}
+```
+
+Bodies are returned as separate fields. The agent is responsible for any rendering. The server never concatenates bodies into a "natural language" string that could be confused with instructions.
+
+### `search_messages`
+
+Searches a mailbox.
+
+**Input.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "query": {
+    "subject": "report",
+    "from": "sender@example.test",
+    "to": null,
+    "body": null,
+    "since": "2024-01-01T00:00:00Z",
+    "before": null,
+    "flagged": false,
+    "unseen": true,
+    "limit": 50
+  }
+}
+```
+
+Empty query fields are ignored. The `limit` is clamped per-account.
+
+**Output.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "uid_validity": 1234567890,
+  "matches": [
+    { "uid": 1024, "from": "...", "subject": "...", "internal_date": "...", "flags": ["\\Seen"] }
+  ]
+}
+```
+
+## Phase 2 tools (sketched)
+
+These names and shapes are stable contracts; only the implementation lands later.
+
+- `read_attachment` — fetch an attachment by `(mailbox, uid, attachment_index)`. Requires `read`.
+- `send_message` — compose and send a new message. Requires `send` and `attachment_send` if attachments are included.
+- `reply_message` — reply, optionally quoting the original. Requires `send`. Honours `reply_all`.
+- `forward_message` — forward an existing message including its attachments. Requires `send` and `attachment_send`.
+- `move_message` — move to another mailbox. Requires `modify`.
+- `archive_message` — move to the configured archive mailbox. Requires `modify`.
+- `flag_message` — set/clear flags. Requires `modify`.
+- `delete_message` — delete (move to Trash) or expunge. Requires `delete`.
+
+## What will never be exposed
+
+- Raw IMAP command pass-through (would defeat the abstraction and break the permission model).
+- Credential fields in any output.
+- Filesystem write paths outside the configured attachment roots.
+- Provider administration endpoints.
