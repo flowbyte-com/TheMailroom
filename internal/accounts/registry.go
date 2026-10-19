@@ -13,15 +13,17 @@ import (
 	"sync"
 
 	"github.com/flowbyte-com/themailroom/internal/config"
+	"github.com/flowbyte-com/themailroom/internal/imapclient"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
 	mem "github.com/flowbyte-com/themailroom/internal/mailbox/memory"
 	"github.com/flowbyte-com/themailroom/internal/permissions"
 )
 
-// ErrIMAPNotImplemented is returned by Backend when an account is
-// configured with backend=imap but the IMAP client has not been wired up
-// yet (Phase 2).
-var ErrIMAPNotImplemented = errors.New("accounts: imap backend not yet implemented (Phase 2)")
+// ErrIMAPNotImplemented is kept for backwards compatibility; the
+// IMAP backend is now wired up via imapclient. This variable is no
+// longer returned by New; the import remains to document the
+// migration in one place.
+var ErrIMAPNotImplemented = errors.New("accounts: imap backend not implemented")
 
 // Account is the runtime representation of one configured account.
 // Credentials are NEVER copied into this type; they remain in config and
@@ -38,6 +40,11 @@ type Account struct {
 
 // Backend returns the mailbox backend for this account.
 func (a *Account) Backend() mailbox.Backend { return a.backend }
+
+// SetBackendForTest replaces the backend. It is intended for tests
+// that need to inject an alternative configuration after the
+// registry has been built. Calling it from production code is a bug.
+func (a *Account) SetBackendForTest(b mailbox.Backend) { a.backend = b }
 
 // View is the redacted MCP-visible representation of an Account. It
 // never contains credentials.
@@ -99,7 +106,11 @@ func New(cfg config.Config) (*Registry, error) {
 			}
 			a.backend = be
 		case "imap":
-			return nil, fmt.Errorf("account %q: %w", acc.ID, ErrIMAPNotImplemented)
+			be, err := imapclient.New(acc, imapclient.Options{})
+			if err != nil {
+				return nil, fmt.Errorf("account %q: %w", acc.ID, err)
+			}
+			a.backend = be
 		default:
 			return nil, fmt.Errorf("account %q: unknown backend %q", acc.ID, acc.Backend)
 		}
