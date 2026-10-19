@@ -369,7 +369,7 @@ func forkReadGoSource(t *testing.T) (string, error) {
 	}
 	// Prefer the version we depend on.
 	for _, m := range matches {
-		if strings.Contains(m, "v1.2.1-themailroom.1") {
+		if strings.Contains(m, "v1.2.1-themailroom.2") {
 			return readFile(m)
 		}
 	}

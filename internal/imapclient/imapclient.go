@@ -32,7 +32,7 @@
 //
 // This backend uses a narrow fork of go-imap
 // (github.com/flowbyte-com/go-imap, module version
-// v1.2.1-themailroom.1) that adds:
+// v1.2.1-themailroom.2) that adds:
 //
 //   - client.DialOptions.MaxLiteralSize, which the backend sets
 //     to the per-account MaxMessageBytes. The fork's
