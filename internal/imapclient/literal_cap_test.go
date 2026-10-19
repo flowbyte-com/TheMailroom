@@ -196,6 +196,25 @@ func (s *rawIMAPServer) markClosed() {
 	s.mu.Unlock()
 }
 
+// waitForClientClose waits until the server has observed the
+// client closing the connection, or the deadline expires. The
+// close propagates asynchronously through the TCP stack, so the
+// observation is not synchronous with the client's error
+// return.
+func (s *rawIMAPServer) waitForClientClose(d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		closed := s.clientClosed
+		s.mu.Unlock()
+		if closed {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return false
+}
+
 // TestLiteralSizeCapEnforcedBeforeAllocation is the central
 // security regression. A server announces a literal far larger
 // than the cap and never sends the body. The client must:
@@ -229,21 +248,29 @@ func TestLiteralSizeCapEnforcedBeforeAllocation(t *testing.T) {
 	}
 
 	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	if !srv.sawLiteralHeader {
+	sawHeader := srv.sawLiteralHeader
+	srv.mu.Unlock()
+	if !sawHeader {
 		t.Fatal("server did not send the literal header; the test did not exercise the intended path")
 	}
-	if !srv.clientClosed {
+	// The server observes the client's close asynchronously (the
+	// close propagates through the TCP stack), so wait for it
+	// rather than racing on it.
+	if !srv.waitForClientClose(5 * time.Second) {
 		t.Error("client did not close the connection after the literal-size violation; the connection must be discarded")
 	}
-	if !srv.rejectedBeforeBody {
+	srv.mu.Lock()
+	rejectedBeforeBody := srv.rejectedBeforeBody
+	closeLatency := srv.closeLatency
+	srv.mu.Unlock()
+	if !rejectedBeforeBody {
 		t.Error("client did not reject the literal before the body")
 	}
 	// The rejection must be prompt. If the client had tried to
 	// read the 64 MiB body it would have blocked until the
 	// server timed out; the cap path returns immediately.
-	if srv.closeLatency > 5*time.Second {
-		t.Errorf("close latency = %v; want a prompt rejection (the cap must not wait for the body)", srv.closeLatency)
+	if closeLatency > 5*time.Second {
+		t.Errorf("close latency = %v; want a prompt rejection (the cap must not wait for the body)", closeLatency)
 	}
 }
 
