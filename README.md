@@ -27,13 +27,17 @@ and `SMTP`. It is designed to be:
   development.
 
 **Phase 2 (Mail functionality)** is in progress. **Phase 2.1**
-(read-only IMAP correctness + MIME reading) is implemented and
-merged on `main` (PR #3). It is a **development milestone**, not
-a production-hardened release: the IMAP literal pre-allocation
-is unbounded by the application cap and the
-[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §10
-pre-production security requirement is mandatory before any
-production deployment that fetches from untrusted IMAP servers.
+(read-only IMAP correctness + MIME reading) is merged on `main`
+(PR #3), and **Phase 2.2 Priority 1** (protocol-level IMAP
+literal-size enforcement) is merged on `main` (PR #5).
+
+TheMailroom is a **development milestone, not a
+production-hardened release**. The IMAP literal-size
+pre-allocation vulnerability is fixed, but the fix depends on a
+fork of go-imap that must still be upstreamed or replaced (see
+[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §8), and the
+IMAP search-correctness defects and the attachment-retrieval
+tool are still open.
 
 Phase 2.1 ships:
 
@@ -51,13 +55,18 @@ Phase 2.1 ships:
 - Reconnect safety: a fresh EXAMINE re-validates UIDVALIDITY; no
   mutating operation is silently retried.
 
-**Phase 2.2** is the next development slice. The plan is in
+**Phase 2.2** is in progress. The plan is in
 [`docs/PHASE2.2.md`](docs/PHASE2.2.md); the design is in
-[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §11. The
-priorities are: (1) protocol-level IMAP literal-size enforcement
-(the §10 requirement), (2) IMAP search correctness defects, (3)
-secure attachment retrieval. SMTP, outbound attachments, and
-mutating mailbox operations remain out of scope.
+[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §11.
+
+| Priority | Scope | Status |
+|---|---|---|
+| 1 | Protocol-level IMAP literal-size enforcement (the §10 requirement) | **DONE** (PR #5) |
+| 2 | IMAP search correctness defects | **NEXT** |
+| 3 | Secure attachment retrieval | Not started |
+
+SMTP, outbound attachments, and mutating mailbox operations
+remain out of scope.
 
 **Phase 3 (Hardening)** will add race tests, fuzz tests,
 installation docs, and a cross-platform release.
@@ -173,6 +182,19 @@ concatenated into a string that could be confused with instructions.
 
 The full threat catalogue and mitigations are in
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+
+**IMAP client dependency.** TheMailroom depends on
+`github.com/flowbyte-com/go-imap` `v1.2.1-themailroom.4`, a
+narrow fork of `github.com/emersion/go-imap` v1.2.1 that adds
+protocol-level IMAP literal-size enforcement (the cap is applied
+before the literal buffer is allocated). The fork is pinned by
+version; there is no \`replace\` directive. **Maintenance
+requirement:** the fork must be upstreamed to
+\`github.com/emersion/go-imap\` or replaced with a different IMAP
+client that exposes a literal-size cap natively. A long-term
+dependency on a personal fork is itself a maintenance risk. See
+[\`docs/PHASE2_DESIGN.md\`](docs/PHASE2_DESIGN.md) §8 and the
+fork's \`CHANGES.md\`.
 
 Reporting security issues: please open a private issue or email the
 maintainer before public disclosure.

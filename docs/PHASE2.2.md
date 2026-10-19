@@ -1,27 +1,34 @@
 # Phase 2.2 Plan
 
-> **Status:** development-only.
-> **Branch:** `phase-2.2/imap-literal-cap` (initial slice).
+> **Status:** development-only. TheMailroom is **not**
+> production-hardened.
 > **Prerequisite:** Phase 2.1 (PR #3) merged on `main` at
-> `0bfe07b`. The mandatory pre-production security requirement
-> for protocol-level IMAP literal-size enforcement (PHASE2_DESIGN.md
-> §10) is tracked here as the top priority.
+> `0bfe07b`.
+
+## Progress
+
+| Priority | Scope | Status |
+|---|---|---|
+| 1 | Protocol-level IMAP literal-size enforcement | **DONE** — merged in PR #5 (`d28dfa3`) |
+| 2 | IMAP search correctness defects | **NEXT** |
+| 3 | Secure attachment retrieval | Not started |
 
 ## Scope
 
-This slice resolves the three pre-production gaps that prevent
+Phase 2.2 resolves the three pre-production gaps that prevent
 Phase 2.1 from being production-hardened:
 
 1. **Protocol-level IMAP literal-size enforcement** (mandatory
    security requirement; PHASE2_DESIGN.md §10). The application-
    level cap does not bound go-imap's pre-allocation; oversized
    IMAP literals can cause unbounded allocation before the
-   application-level rejection.
+   application-level rejection. **DONE** — see "Priority 1"
+   below.
 2. **IMAP search correctness defects** (PHASE2_DESIGN.md §7).
    `Flagged` and `Unseen` filters are accepted by the schema but
    silently ignored. `Subject + From + To` are OR'd via the
    IMAP `TEXT` keyword. `SentSince` / `SentBefore` use the RFC
-   5322 `Date:` header, not the server's internal date.
+   5322 `Date:` header, not the server's internal date. **NEXT.**
 3. **Secure attachment retrieval** with stable MIME-part
    references and strict resource limits. The new `read_attachment`
    tool reads a single MIME part by stable part reference
@@ -44,117 +51,163 @@ Phase 2.1 from being production-hardened:
 
 ### Priority 1 — Protocol-level IMAP literal-size enforcement
 
-**Status:** mandatory before any production deployment.
+**Status:** **DONE**. Merged in PR #5 as `d28dfa3` on `main`.
 
-**Acceptance criteria** (from PHASE2_DESIGN.md §10; full text
-in that file):
+**Acceptance criteria:** the twelve criteria in PHASE2_DESIGN.md
+§10 are authoritative, with a per-criterion status table and
+evidence in that section. All twelve are met.
 
-1. Pre-allocation enforcement. The cap is enforced before
-   go-imap's `Reader.ReadLiteral` `make([]byte, n)`.
-2. Correct boundary. cap-1 accepted, cap accepted, cap+1
-   rejected.
-3. Decrypted-transport compatibility. Cap applies to both
-   implicit-TLS and STARTTLS.
-4. IMAP framing compatibility. Literal-header detector is
-   line-aware: only triggers on `{N}\r\n` or `{N+}\r\n`
-   on its own line, preceded by a known IMAP separator.
-5. Binary safety. Cap accepts any byte sequence in the body.
-6. Disconnection safety. When the cap fires, the underlying
-   conn is closed cleanly.
-7. Both transport modes. Criteria 3–6 hold for both
-   `cfg.IMAP.TLS == true` and `cfg.IMAP.StartTLS == true`.
-8. No silent success. Backend must not return a successful
-   `*mailbox.Message` with a truncated or omitted body.
-9. No panic-disguised-as-size-limit. Panic in go-imap surfaces
-   as a generic internal error.
-10. Tight error mapping. Only `literal exceeding maximum size`
-    maps to `ErrMessageTooLarge`; generic parse errors map to
-    `ErrMalformed`.
-11. Test coverage. Boundary tests at cap-1, cap, cap+1 for
-    both the protocol-level filter and the application-level
-    fallback.
-12. Documentation. Package doc and `THREAT_MODEL.md` T4
-    updated to remove any wording that suggests the application
-    cap bounds go-imap's pre-allocation.
+**Implementation chosen: option 1, a narrow fork of go-imap.**
 
-**Implementation preference (per PHASE2_DESIGN.md §10):**
+- Module: `github.com/flowbyte-com/go-imap`
+- Version: `v1.2.1-themailroom.4` (immutable tag, commit
+  `0fc6600`)
+- Upstream: `github.com/emersion/go-imap` v1.2.1
+- License: BSD-2-Clause, preserved verbatim
+- Pinned in `go.mod` by version, **no `replace` directive**; the
+  build resolves from the public module proxy exactly like any
+  other dependency.
 
-1. **Fork `github.com/emersion/go-imap` to expose
-   `Reader.MaxLiteralSize` as a constructor option on
-   `client.Options`.** This is the cleanest path: a one-line
-   constructor option that flows into the embedded
-   `*imap.Reader`. The fork is narrowly scoped (a single
-   field on `client.Options` and the corresponding wiring in
-   `client.New`); the rest of the library is unchanged.
-   Document the upstream tracking issue.
-2. **Line-state `net.Conn` filter.** If the fork is not
-   viable (e.g. upstream rejects the API), implement a filter
-   that scans the decrypted byte stream for IMAP literal
-   headers and closes the conn on oversized literals. The
-   filter must be line-aware (criterion 4).
-3. **Replace go-imap with a different library.** Last resort;
-   only if options 1 and 2 are not viable.
+The fork changes two upstream source files:
 
-**Deliverables for this slice:**
+1. `read.go` — exports `imap.ErrLiteralSizeExceeded`;
+   `ReadLiteral` returns it when the announced size exceeds
+   `Reader.MaxLiteralSize`. The check still runs **before** the
+   `make([]byte, n)` allocation, so an over-cap announcement is
+   rejected without allocating a buffer proportional to the
+   announced size. `IsParseError` is extended to match it.
 
-- `internal/imapclient/literal_cap.go` (or similar) with
-  the chosen implementation, unit-tested at cap-1, cap,
-  cap+1.
-- Integration tests in `internal/imapclient/correctness_test.go`
-  with both TLS modes.
-- Update to the package doc and `THREAT_MODEL.md` to remove
-  the "unbounded risk" wording now that the cap is enforced.
-- New `imap_lit_test.go` (or extension of existing tests)
-  using a server that announces a literal larger than the
-  cap, verifying the go-imap executor does not allocate
-  the announced size.
+2. `client/client.go` — adds `client.DialOptions{MaxLiteralSize}`
+   and `client.NewWithOptions`; closes the connection on a parse
+   error (upstream keeps a desynchronised connection alive, which
+   can block the executor indefinitely) and records the cause;
+   replaces `errClosed` with a typed `*connectionClosedError` that
+   `Unwrap`s the cause.
+
+**The constructor applies the cap before the reader is used.**
+This was a defect found in the PR #5 review: the first cut set the
+cap *after* `New(conn)` had already parsed the greeting and
+started the background reader goroutine, which was both a data
+race and a pre-configuration window in which the live reader
+could accept an over-cap literal with no cap at all. The cap is
+now assigned to the `*imap.Reader` at creation time, before the
+greeting is parsed and before the reader goroutine exists.
+`New(conn)` keeps its upstream signature and behaviour.
+
+TheMailroom sets `DialOptions.MaxLiteralSize` to the per-account
+`max_message_bytes` at dial time for both the implicit-TLS and
+the STARTTLS path. The cap is set on the IMAP `Reader`, not the
+transport, so it observes the *decrypted* stream in both modes;
+the `*imap.Reader` survives the STARTTLS upgrade.
+
+**Maintenance and upstreaming requirement (outstanding).**
+
+A long-term dependency on a personal fork is itself a
+maintenance risk. The fork must be either:
+
+- **upstreamed** to `github.com/emersion/go-imap` (the change set
+  is small and self-contained, and is suitable for a pull
+  request — see the fork's `CHANGES.md` for the route), or
+- **replaced** with a different IMAP client that exposes a
+  literal-size cap natively.
+
+Until one of those happens, TheMailroom depends on a fork
+maintained by one person. This is tracked as an open item and is
+one of the reasons TheMailroom is not described as
+production-hardened.
+
+**Deliverables (all landed in PR #5):**
+
+- The fork, pinned by version, with its own CI workflow.
+- `internal/imapclient/literal_cap_test.go`: source-level
+  ordering assertions (`TestForkEnforcesCapBeforeAllocation`,
+  `TestForkAppliesCapBeforeReaderStarts`) and behavioural tests
+  (boundary, unsolicited over-cap literal, binary content,
+  malformed announcements, reconnect, no silent success,
+  allocation scaling).
+- Fork-side `client/constructor_test.go`: the
+  constructor-ordering regressions, which report a data race
+  against the pre-fix constructor shape.
+- Updated package doc, `docs/THREAT_MODEL.md` T4,
+  `docs/ARCHITECTURE.md` and `docs/PHASE2_DESIGN.md` §8/§10.
 
 ### Priority 2 — IMAP search correctness defects
 
-**Status:** high-priority; affects user-visible behaviour.
+**Status:** **NEXT**. This is the next development slice after
+Priority 1. It must be a separate, narrowly scoped PR, and it
+must not weaken the `EXAMINE` / UIDVALIDITY pairing or the
+literal-size safety controls from Priority 1.
 
 **Defects to fix (PHASE2_DESIGN.md §7):**
 
-1. `q.Flagged` not honoured. Translate to IMAP
-   `WithFlags = []string{"\\Flagged"}` in
-   `internal/imapclient/imapclient.go::SearchMessages`.
-2. `q.Unseen` not honoured. Translate to IMAP
-   `WithoutFlags = []string{"\\Seen"}`.
-3. The tool layer currently rejects `Flagged` and `Unseen`
-   with a typed `NotImplemented` error (PR #3 follow-up).
-   The tool-layer rejection is removed once the backends
-   honour the filters; callers can then set the fields and
-   get the right results.
-4. `Subject + From + To` are OR'd via the IMAP `TEXT`
-   keyword. The right fix is server-dependent: issue multiple
-   searches (one per field) and intersect, or use provider
-   extensions (`OR` chaining, `X-GM-RAW` on Gmail). For
-   Phase 2.2, implement the multi-search intersection
-   approach as the default; document provider-specific
-   variants for a later slice.
-5. `SentSince` / `SentBefore` use the RFC 5322 `Date:`
-   header. Expose both `since_date` and `since_internal` to
-   the caller (the memory backend already has the data; the
-   IMAP backend needs the IMAP `SINCE` / `BEFORE` search
-   criteria with the right key). The default is `Date:` to
-   preserve existing behaviour; the new fields are opt-in.
+1. **`Subject`, `From` and `To` must use the corresponding IMAP
+   SEARCH fields with AND semantics.** Today all three are
+   passed in a single `Text` slice, which the IMAP `TEXT` keyword
+   ORs together (and which also matches the body). The fix maps
+   them to `Subject`, `From` and `To` respectively, and combines
+   the criteria with AND. Because a single IMAP SEARCH command
+   cannot express "Subject=x AND From=y" for arbitrary servers
+   without `OR` chaining, the implementation issues one SEARCH
+   per populated field and intersects the resulting UID sets.
+2. **`q.Flagged` must be honoured** — IMAP `WithFlags =
+   []string{"\\Flagged"}`.
+3. **`q.Unseen` must be honoured** — IMAP `WithoutFlags =
+   []string{"\\Seen"}`.
+4. **The tool layer must stop rejecting `Flagged` and
+   `Unseen`** once the backends honour them. The typed
+   `NotImplemented` rejection added in the PR #3 follow-up is
+   removed so callers can use the fields and get the right
+   results.
+5. **Date filtering must reflect the documented API semantics,
+   accounting for IMAP's day-granularity limitations.** IMAP
+   `SINCE` / `BEFORE` are **date** criteria: they compare the
+   message's `Date:` header at day granularity, so a
+   `since` of `2024-08-15T10:11:12Z` behaves as
+   "on or after 2024-08-15" and can include messages earlier
+   on that day. The API must document this, and the memory
+   backend (which has exact timestamps) must behave the same
+   way so the two backends agree on the public contract.
+6. **Search limits and empty-query behaviour must be
+   consistent.** An empty query currently returns every message
+   in the mailbox. That is a reasonable and documented
+   behaviour, but it must be explicit: the limit is applied,
+   and the result is bounded by the per-account
+   `max_search_results`.
+7. **The IMAP and memory backends must agree wherever their
+   public API contracts should.** Where the two backends
+   cannot agree (e.g. IMAP's day-granularity dates, or the
+   memory backend's exact substring matching versus IMAP's
+   server-side semantics), the difference must be documented
+   rather than papered over.
+
+**No silently ignored conditions.** If a requested condition
+cannot be honoured accurately, the implementation must either
+return an explicit error or document the limitation as a
+deliberate part of the API contract. Silently dropping a
+filter is not acceptable.
 
 **Deliverables for this slice:**
 
 - IMAP search criteria translation in
-  `internal/imapclient/imapclient.go::SearchMessages`.
-- Multi-search intersection logic in the IMAP backend (or a
-  helper in `internal/imapclient/search.go`).
-- Memory backend search support for `Flagged` and `Unseen`
-  (currently `Unseen` returns no matches; `Flagged` is
-  ignored).
-- Removal of the tool-layer rejection of `Flagged` /
-  `Unseen` in `internal/tools/register.go` once the backends
-  honour them.
-- New `SearchMessagesQuery` fields: `since_date`,
-  `since_internal`, `before_date`, `before_internal`.
-- Tests in `internal/imapclient/correctness_test.go` and
-  `internal/tools/tools_test.go`.
+  `internal/imapclient/imapclient.go::SearchMessages` (or a
+  new `internal/imapclient/search.go` helper).
+- Per-field SEARCH + UID-set intersection for the AND
+  semantics of `Subject` / `From` / `To`.
+- `WithFlags` / `WithoutFlags` for `Flagged` / `Unseen`.
+- Day-granularity date handling, documented, consistent
+  between the IMAP and memory backends.
+- Removal of the tool-layer rejection of `Flagged` / `Unseen`
+  in `internal/tools/register.go` once the backends honour
+  them.
+- Controlled in-process IMAP-server integration tests
+  covering combinations of search criteria, unread / flagged
+  states, date boundaries, empty searches, and result limits.
+- Tests in `internal/mailbox/memory/` for the same
+  contract, and in `internal/tools/tools_test.go` for the wire
+  behaviour.
+
+**Out of scope for this slice:** SMTP, mailbox modifications,
+attachment retrieval.
 
 ### Priority 3 — Secure attachment retrieval
 
