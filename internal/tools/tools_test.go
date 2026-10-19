@@ -330,3 +330,173 @@ func TestListAccountsHasNoSecrets(t *testing.T) {
 		_ = a.Permissions.Has(permissions.CapRead)
 	}
 }
+
+// TestEmptyPermissionsRejectsAllReads is a HAL-review regression: an
+// account with no permissions must reject every read tool.
+func TestEmptyPermissionsRejectsAllReads(t *testing.T) {
+	// Build a one-account registry with no permissions.
+	messages := filepath.Join(findRepoRoot(t), "testdata", "messages")
+	yaml := `
+server:
+  log_level: error
+accounts:
+  - id: locked
+    backend: memory
+    email: locked@example.test
+    mailbox_root: __MBX__
+    permissions: []
+`
+	yaml = strings.ReplaceAll(yaml, "__MBX__", messages)
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	reg, err := accounts.New(cfg)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	srv := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	Register(srv, reg)
+	serverT, clientT := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(context.Background(), serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "c"}, nil)
+	session, err := client.Connect(context.Background(), clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer session.Close()
+
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"list_mailboxes", map[string]any{"account_id": "locked"}},
+		{"list_messages", map[string]any{"account_id": "locked", "mailbox": "INBOX"}},
+		{"read_message", map[string]any{"account_id": "locked", "mailbox": "INBOX", "uid": float64(1)}},
+		{"search_messages", map[string]any{"account_id": "locked", "mailbox": "INBOX", "query": map[string]any{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      tc.name,
+				Arguments: tc.args,
+			})
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected tool error for %s; got success", tc.name)
+			}
+			// The error message must include the capability phrase so
+			// the agent can act on it.
+			var text string
+			for _, c := range res.Content {
+				if tc, ok := c.(*mcp.TextContent); ok {
+					text = tc.Text
+				}
+			}
+			if !strings.Contains(text, "lacks capability") {
+				t.Errorf("%s error = %q, want 'lacks capability'", tc.name, text)
+			}
+		})
+	}
+}
+
+// TestReadMessageUIDValidityStrict is a HAL-review regression: a stale
+// UIDVALIDITY must be rejected even if the UID is valid.
+func TestReadMessageUIDValidityStrict(t *testing.T) {
+	env := setupEnv(t, "full")
+	defer env.cleanup()
+
+	// UIDVALIDITY=1 is the value the memory backend assigns. Use 99999
+	// to force a mismatch.
+	_, err := env.call(t, "read_message", map[string]any{
+		"account_id":   "full",
+		"mailbox":      "Sent",
+		"uid":          float64(1),
+		"uid_validity": float64(99999),
+	})
+	if err == nil {
+		t.Fatal("expected uid mismatch")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// TestReadMessageUIDValidityAccepts is a HAL-review regression: a
+// matching UIDVALIDITY must be accepted.
+func TestReadMessageUIDValidityAccepts(t *testing.T) {
+	env := setupEnv(t, "full")
+	defer env.cleanup()
+
+	got, err := env.call(t, "read_message", map[string]any{
+		"account_id":   "full",
+		"mailbox":      "Sent",
+		"uid":          float64(1),
+		"uid_validity": float64(1),
+	})
+	if err != nil {
+		t.Fatalf("read_message: %v", err)
+	}
+	if got["text"] == nil {
+		t.Error("text body missing")
+	}
+}
+
+// TestReadMessageUIDValidityOmitted checks that omitting UIDVALIDITY
+// is allowed (the wire schema marks it omitempty).
+func TestReadMessageUIDValidityOmitted(t *testing.T) {
+	env := setupEnv(t, "full")
+	defer env.cleanup()
+
+	got, err := env.call(t, "read_message", map[string]any{
+		"account_id": "full",
+		"mailbox":    "Sent",
+		"uid":        float64(1),
+	})
+	if err != nil {
+		t.Fatalf("read_message: %v", err)
+	}
+	if got["text"] == nil {
+		t.Error("text body missing")
+	}
+}
+
+// TestListAccountsExposesExpectedFields is a HAL-review regression
+// that documents the deliberate fields list_accounts surfaces. If a
+// refactor adds a credential field to the wire view, this test fails.
+func TestListAccountsExposesExpectedFields(t *testing.T) {
+	env := setupEnv(t, "full")
+	defer env.cleanup()
+
+	got, err := env.call(t, "list_accounts", map[string]any{})
+	if err != nil {
+		t.Fatalf("list_accounts: %v", err)
+	}
+	arr := got["accounts"].([]any)
+	if len(arr) == 0 {
+		t.Fatal("no accounts returned")
+	}
+	first := arr[0].(map[string]any)
+
+	// Fields that MUST be present.
+	for _, want := range []string{"id", "email", "permissions", "limits", "attachment_send_paths"} {
+		if _, ok := first[want]; !ok {
+			t.Errorf("missing required field %q", want)
+		}
+	}
+	// Fields that MUST NOT be present. If any of these leak into the
+	// wire view, the agent could exfiltrate credentials or internal
+	// host structure beyond what is necessary.
+	for _, banned := range []string{
+		"password", "password_command", "imap", "smtp",
+		"backend", "mailbox_root", "insecure_skip_verify",
+	} {
+		if _, ok := first[banned]; ok {
+			t.Errorf("forbidden field %q is exposed by list_accounts", banned)
+		}
+	}
+}

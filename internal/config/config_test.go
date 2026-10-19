@@ -1,11 +1,15 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// jsonMarshal is a thin wrapper used by the redaction regression test.
+func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
 
 const validYAML = `
 server:
@@ -255,5 +259,160 @@ func TestLoadMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "/nonexistent/xyzzy.yaml") {
 		t.Errorf("err = %q, expected to mention path", err.Error())
+	}
+}
+
+// --- HAL review regressions ---
+
+func TestParseUnknownField(t *testing.T) {
+	// yaml.v3 with KnownFields(true) must reject typos.
+	yaml := `
+accounts:
+  - id: a
+    email: u@example.test
+    imap: {host: x.example.test, username: u, password: p}
+    smtp: {host: x.example.test, username: u, password: p}
+    permisions: [read]   # typo
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected error for unknown field")
+	}
+	if !strings.Contains(err.Error(), "permisions") {
+		t.Errorf("err = %q, want to mention 'permisions'", err.Error())
+	}
+}
+
+func TestParseDuplicateKey(t *testing.T) {
+	yaml := `
+server:
+  log_level: info
+  log_level: debug
+accounts:
+  - id: a
+    email: u@example.test
+    imap: {host: x.example.test, username: u, password: p}
+    smtp: {host: x.example.test, username: u, password: p}
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected error for duplicate key")
+	}
+	if !strings.Contains(err.Error(), "duplicate key") {
+		t.Errorf("err = %q, want 'duplicate key'", err.Error())
+	}
+}
+
+func TestParseMissingAuth(t *testing.T) {
+	yaml := `
+accounts:
+  - id: a
+    email: u@example.test
+    imap: {host: x.example.test, username: u}
+    smtp: {host: x.example.test, username: u, password: p}
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected error for missing auth")
+	}
+	if !strings.Contains(err.Error(), "password or password_command") {
+		t.Errorf("err = %q, want 'password or password_command'", err.Error())
+	}
+}
+
+func TestParseBothAuthMethods(t *testing.T) {
+	yaml := `
+accounts:
+  - id: a
+    email: u@example.test
+    imap:
+      host: x.example.test
+      username: u
+      password: hunter2
+      password_command: ["pass", "show"]
+    smtp: {host: x.example.test, username: u, password: p}
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected error for both auth methods")
+	}
+	if !strings.Contains(err.Error(), "only one") {
+		t.Errorf("err = %q, want 'only one'", err.Error())
+	}
+}
+
+func TestInsecureSkipVerifyRemoved(t *testing.T) {
+	// The field used to exist on IMAPConfig; this test asserts it is
+	// gone. If a future refactor re-introduces it, the field won't
+	// unmarshal anything, so the struct stays zero-valued.
+	yaml := `
+accounts:
+  - id: a
+    email: u@example.test
+    imap:
+      host: x.example.test
+      username: u
+      password: p
+      insecure_skip_verify: true
+    smtp: {host: x.example.test, username: u, password: p}
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected error: insecure_skip_verify is no longer a recognised field")
+	}
+	if !strings.Contains(err.Error(), "insecure_skip_verify") {
+		t.Errorf("err = %q, expected to mention insecure_skip_verify", err.Error())
+	}
+}
+
+func TestRedactedHasNoSecret(t *testing.T) {
+	yaml := `
+accounts:
+  - id: a
+    email: u@example.test
+    imap:
+      host: x.example.test
+      username: u
+      password: verysecretdontlogthis
+    smtp:
+      host: x.example.test
+      username: u
+      password: alsoverysecret
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	s := cfg.Redacted()
+	for _, sub := range []string{"verysecretdontlogthis", "alsoverysecret"} {
+		if strings.Contains(s, sub) {
+			t.Errorf("Redacted() leaked %q", sub)
+		}
+	}
+	if !strings.Contains(s, "***") {
+		t.Error("Redacted() did not include any '***' marker")
+	}
+}
+
+func TestConfigJSONOmitsPassword(t *testing.T) {
+	// Even if a future caller serialises the config to JSON, the
+	// password fields must be elided.
+	yaml := `
+accounts:
+  - id: a
+    email: u@example.test
+    imap: {host: x.example.test, username: u, password: topsecret}
+    smtp: {host: x.example.test, username: u, password: topsecret2}
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	b, err := jsonMarshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "topsecret") || strings.Contains(string(b), "topsecret2") {
+		t.Errorf("JSON leaked password: %s", b)
 	}
 }

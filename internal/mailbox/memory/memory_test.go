@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,5 +144,56 @@ func TestListMessagesSince(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+
+// TestRejectsSymlinkInRoot is a HAL-review regression: a symlink in
+// the mailbox root must never be followed.
+func TestRejectsSymlinkInRoot(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root user can follow symlinks to unreadable files; skipping")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideMsg := filepath.Join(outside, "secret.eml")
+	if err := os.WriteFile(outsideMsg, []byte("From: x@y\r\nSubject: secret\r\n\r\nbody\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideMsg, filepath.Join(root, "leak.eml")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(root)
+	if err == nil {
+		t.Fatal("expected New to fail when a symlink is in the mailbox root")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("err = %v, want 'symlink'", err)
+	}
+}
+
+// TestRejectsSymlinkedDirectory is a HAL-review regression.
+func TestRejectsSymlinkedDirectory(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root user can follow symlinks to unreadable files; skipping")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideDir := filepath.Join(outside, "inbox")
+	if err := os.Mkdir(outsideDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "msg.eml"),
+		[]byte("From: x@y\r\nSubject: leak\r\n\r\nbody\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(root, "inbox")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(root)
+	if err == nil {
+		t.Fatal("expected New to fail when a symlinked directory is in the mailbox root")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("err = %v, want 'symlink'", err)
 	}
 }
