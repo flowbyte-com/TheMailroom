@@ -52,11 +52,30 @@ func New(root string) (*Backend, error) {
 
 // load reads every *.eml file in root (recursively) and indexes it under
 // the relative directory name (or INBOX if at the top level).
+//
+// Symlink entries (both regular files and directories) are rejected.
+// filepath.WalkDir does not follow symlinks, so this prevents the
+// mailbox from accidentally exposing files outside the configured root.
 func (b *Backend) load() error {
+	// Resolve the root to its canonical absolute path so subsequent
+	// containment checks have a stable reference. We do this once
+	// rather than per-entry to avoid TOCTOU surprises during the walk.
+	canonicalRoot, err := filepath.EvalSymlinks(b.root)
+	if err != nil {
+		return fmt.Errorf("memory: resolve root symlinks: %w", err)
+	}
+	b.root = canonicalRoot
+
 	entries := []string{}
-	err := filepath.WalkDir(b.root, func(path string, d os.DirEntry, walkErr error) error {
+	walkErr := filepath.WalkDir(b.root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		// Reject any symlink entry, even if the symlink would not
+		// actually be followed by WalkDir. The user gets a clear
+		// error instead of a silently-skipped file.
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink entries are not allowed in mailbox_root: %s", path)
 		}
 		if d.IsDir() {
 			return nil
@@ -67,13 +86,23 @@ func (b *Backend) load() error {
 		entries = append(entries, path)
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("memory: walk: %w", err)
+	if walkErr != nil {
+		return fmt.Errorf("memory: walk: %w", walkErr)
 	}
 	sort.Strings(entries)
 
 	for _, path := range entries {
-		data, err := os.ReadFile(path)
+		// Defence in depth: verify the file is under the resolved
+		// root. EvalSymlinks on each file detects any race where a
+		// symlink was created between WalkDir and ReadFile.
+		real, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("memory: resolve %s: %w", path, err)
+		}
+		if !strings.HasPrefix(real, canonicalRoot+string(filepath.Separator)) && real != canonicalRoot {
+			return fmt.Errorf("memory: %s escapes mailbox root", path)
+		}
+		data, err := os.ReadFile(real)
 		if err != nil {
 			return fmt.Errorf("memory: read %s: %w", path, err)
 		}
@@ -81,10 +110,13 @@ func (b *Backend) load() error {
 		if err != nil {
 			return fmt.Errorf("memory: parse %s: %w", path, err)
 		}
-		mailboxName := mailboxNameFor(b.root, path)
+		mailboxName := mailboxNameFor(b.root, real)
 		b.loaded[mailboxName] = append(b.loaded[mailboxName], msg)
 	}
-	// Assign sequential UIDs per mailbox, newest first.
+	// Assign sequential UIDs per mailbox, newest first. UIDVALIDITY is
+	// a constant per process; real IMAP servers change it on mailbox
+	// re-creation. The memory backend has only one process lifetime so
+	// 1 is a stable value.
 	for name, msgs := range b.loaded {
 		sort.SliceStable(msgs, func(i, j int) bool {
 			return msgs[i].Headers.Date.After(msgs[j].Headers.Date)

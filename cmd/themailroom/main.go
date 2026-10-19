@@ -92,6 +92,10 @@ func loadAndServe(cfgPath string) error {
 	}
 	slog.SetDefault(logger)
 
+	// Log a redacted view of the config so operators can confirm what
+	// was loaded without leaking credentials.
+	logger.Info("config loaded", "path", cfgPath, "summary", cfg.Redacted())
+
 	registry, err := accounts.New(cfg)
 	if err != nil {
 		return err

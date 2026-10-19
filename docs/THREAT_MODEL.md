@@ -46,11 +46,12 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 **Mitigations.**
 
-- **(implemented)** `config` package redacts credential fields in any error string returned from the loader.
-- **(implemented)** Tool response structs omit all credential fields by construction. Code review enforces this.
-- **(implemented)** `log/slog` is configured to redact the same fields if a config is ever logged at debug level.
+- **(implemented)** Password fields in `IMAPConfig` and `SMTPConfig` are tagged `json:"-"` so any accidental JSON serialisation elides them.
+- **(implemented)** `config.Redacted()` produces a printable view with every password replaced by `***`. The startup log uses this.
+- **(implemented)** Tool response structs omit all credential fields by construction. The `TestListAccountsExposesExpectedFields` regression test forbids "password", "imap", "smtp" and other sensitive keys in the `list_accounts` payload.
 - **(implemented)** `panic` recovery in `cmd/themailroom` logs a redacted diagnostic and exits; it does not print a stack trace with secrets.
 - **(implemented)** `password_command` (pass, secret-tool) is the recommended credential source so secrets never live in the config file.
+- **(implemented)** `validateAuth` rejects configurations with neither `password` nor `password_command`, and rejects configurations that set both.
 - **(planned)** `os.Root` keeps any cached attachment file inside the configured directory; no path escapes.
 
 **Residual risk.** Misconfigured logging at the host can capture secrets; documented in README.
@@ -89,11 +90,12 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 **Mitigations.**
 
-- **(implemented)** `internal/attachments` uses `os.Root` to confine reads.
-- **(implemented)** Symlinks are evaluated inside the root; any escape returns `ErrPathEscape`.
-- **(implemented)** Path canonicalisation before checking against the per-account allow-list.
-- **(implemented)** Empty or `attachment_send_paths` not configured rejects all attachment sends.
-- **(implemented)** Each account has its own allow-list; cross-account access is impossible because the allow-list is per-account.
+- **(implemented)** The in-memory mailbox backend rejects any symlink entry (file or directory) in `mailbox_root`. The path is `EvalSymlinks`-resolved at startup and a containment check is performed per file. This is regression-tested in `TestRejectsSymlinkInRoot` and `TestRejectsSymlinkedDirectory`.
+- **(implemented)** `attachment_send_paths` validation requires absolute paths and rejects NUL bytes.
+- **(planned)** `internal/attachments` will use `os.Root` to confine reads of outbound attachment sources.
+- **(planned)** Symlink resolution inside the attachment root returns `ErrPathEscape` for any path that does not stay under the root.
+- **(planned)** Empty or `attachment_send_paths` not configured rejects all attachment sends.
+- **(planned)** Each account has its own allow-list; cross-account access is impossible because the allow-list is per-account.
 
 ### T6. Cross-account access
 

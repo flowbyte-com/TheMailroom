@@ -138,26 +138,46 @@ Each tool handler calls `permissions.Check(account, capability)` first. The chec
 
 ### 2.9 Configuration (`internal/config`)
 
-Loads YAML (and accepts JSON via stdin extension in future). Validated on load:
+Loads YAML. The loader is **strict**: unknown fields and duplicate
+keys are rejected at parse time, before validation. This prevents
+silent typos (e.g. `permisions` instead of `permissions`) and
+silent overrides that would otherwise mask a misconfiguration.
+
+Validation covers:
 
 - Account IDs unique.
-- IMAP/SMTP endpoints sane.
-- Limits are positive.
-- Permission flags consistent (e.g. `attachment_send_paths` non-empty implies `send` enabled).
-- No credentials in logs or error returns.
+- IMAP/SMTP endpoints sane (host required, port in 1..65535, no whitespace).
+- IMAP/SMTP credentials: exactly one of `password` or `password_command`
+  must be set.
+- Limits are non-negative.
+- Permission names are known capability names.
+- `attachment_send_paths` are absolute paths without NUL bytes.
+
+Password fields in `IMAPConfig` and `SMTPConfig` are tagged `json:"-"`
+so that an accidental JSON serialisation never leaks the resolved
+credential. The startup log uses `Config.Redacted()` to print a
+sanitised view.
 
 Two credential sources are supported:
 
 1. `password` field (warning: file-based secret).
-2. `password_command` field — external command whose stdout is the password. This is the recommended mechanism using a system keyring (e.g. `pass`, `secret-tool`).
+2. `password_command` field — external command whose stdout is the
+   password. This is the recommended mechanism using a system keyring
+   (e.g. `pass`, `secret-tool`).
+
+The legacy `insecure_skip_verify` field has been **removed** from
+production configuration. There is no way to disable TLS certificate
+verification through the configuration file. Tests against a
+self-signed server must use the system trust store (e.g. install the
+CA) or a `SSL_CERT_FILE` override at the host level.
 
 ## 3. Dependency choices
 
 | Concern              | Choice                                          | Rationale                                                       |
 |----------------------|-------------------------------------------------|-----------------------------------------------------------------|
 | MCP transport        | `github.com/modelcontextprotocol/go-sdk`       | Official Go SDK; stdio transport; schema-validated tools.       |
-| YAML config          | `gopkg.in/yaml.v3`                              | Mature, widely used, no transitive surprises.                  |
-| IMAP (Phase 2)       | `github.com/emersion/go-imap`                   | De facto standard; protocol-correct; no extra abstraction.      |
+| YAML config          | `gopkg.in/yaml.v3`                              | Mature, widely used; supports strict unknown-key rejection.    |
+| IMAP (Phase 2)       | `github.com/emersion/go-imap` (v1)              | De facto standard; protocol-correct; stable API.               |
 | SMTP (Phase 2)       | `github.com/emersion/go-smtp`                  | Pair with go-imap; covers submission, STARTTLS, AUTH.           |
 | MIME (Phase 2)       | `github.com/emersion/go-message`                | Parser + composer; charset-aware; handles RFC 2047.             |
 | Logging              | `log/slog` (stdlib)                             | Go 1.21+; structured logging; no extra dep.                    |
@@ -169,6 +189,15 @@ Avoided-over plugins:
 - No plugin framework, no Lua, no dynamic loading.
 - No general-purpose email "client" framework; we own the protocol calls.
 - No HTTP framework — stdio only.
+
+### 3.1 Why go-imap v1 (not v2)
+
+`github.com/emersion/go-imap` v1 (current `v1.2.1`) is the stable,
+production-tracked line; it has been used in many production systems
+for years and exposes the full IMAP4rev1 surface required for
+mailbox reading. v2 (`github.com/emersion/go-imap/v2`) is a parallel
+re-design that is not yet marked stable. TheMailroom will move to v2
+only when the upstream maintainer tags a stable release.
 
 ## 4. Data flow (read example)
 

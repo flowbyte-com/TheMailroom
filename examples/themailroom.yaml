@@ -1,8 +1,8 @@
 # Example configuration for TheMailroom.
 #
 # Copy to /etc/themailroom/themailroom.yaml (or any path) and edit.
-# The server validates this file on startup; unknown fields are
-# tolerated but invalid values are rejected.
+# The server validates this file on startup; unknown fields and
+# duplicate keys are rejected, and the schema is otherwise strict.
 
 server:
   log_level: info            # debug, info, warn, error

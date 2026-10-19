@@ -92,14 +92,12 @@ type IMAPConfig struct {
 	StartTLS bool   `yaml:"starttls,omitempty"`
 	Username string `yaml:"username,omitempty"`
 
-	// Exactly one of Password or PasswordCommand must be set.
-	Password        string   `yaml:"password,omitempty"`
-	PasswordCommand []string `yaml:"password_command,omitempty"`
-
-	// InsecureSkipVerify disables TLS certificate verification. It MUST
-	// remain false in production. The flag exists only for the rare
-	// self-signed test server and is logged loudly when true.
-	InsecureSkipVerify bool `yaml:"insecure_skip_verify,omitempty"`
+	// Exactly one of Password or PasswordCommand must be set. Both
+	// fields are tagged json:"-" so an accidental JSON serialisation
+	// never leaks the resolved credential to a log line, panic dump
+	// or test fixture.
+	Password        string   `yaml:"password,omitempty"        json:"-"`
+	PasswordCommand []string `yaml:"password_command,omitempty" json:"-"`
 }
 
 // SMTPConfig configures an SMTP submission connection.
@@ -110,11 +108,11 @@ type SMTPConfig struct {
 	StartTLS bool   `yaml:"starttls,omitempty"`
 	Username string `yaml:"username,omitempty"`
 
-	// Exactly one of Password or PasswordCommand must be set.
-	Password        string   `yaml:"password,omitempty"`
-	PasswordCommand []string `yaml:"password_command,omitempty"`
-
-	InsecureSkipVerify bool `yaml:"insecure_skip_verify,omitempty"`
+	// Exactly one of Password or PasswordCommand must be set. Both
+	// fields are tagged json:"-" so an accidental JSON serialisation
+	// never leaks the resolved credential.
+	Password        string   `yaml:"password,omitempty"        json:"-"`
+	PasswordCommand []string `yaml:"password_command,omitempty" json:"-"`
 }
 
 // LimitsConfig enforces per-account safety limits. Zero values are replaced
@@ -266,9 +264,20 @@ func validateEndpoint(proto, host string, port int) error {
 	return nil
 }
 
-func validateAuth(proto, user, _ string, cmd []string) error {
+func validateAuth(proto, user, password string, cmd []string) error {
 	if strings.TrimSpace(user) == "" {
 		return fmt.Errorf("%s.username is required", proto)
+	}
+	hasPassword := password != ""
+	hasCommand := len(cmd) > 0
+	if hasPassword && hasCommand {
+		return fmt.Errorf("%s: only one of password or password_command may be set", proto)
+	}
+	if !hasPassword && !hasCommand {
+		return fmt.Errorf("%s: either password or password_command is required", proto)
+	}
+	if hasCommand && len(cmd) == 0 {
+		return fmt.Errorf("%s.password_command must be a non-empty list", proto)
 	}
 	return nil
 }
