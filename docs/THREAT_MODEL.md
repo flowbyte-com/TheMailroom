@@ -97,11 +97,24 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   application cap is therefore a backstop, not a
   pre-allocation guard. The worst-case per-concurrent-fetch
   memory consumption is `max_message_bytes` plus protocol
-  overhead; the default 25 MiB cap bounds this. The
-  go-imap `MaxLiteralSize` knob (which would reject the
-  literal before allocation) is not currently exposed by
-  the client; documenting and addressing this is part of
-  the Phase 2.2 hardening.
+  overhead; the default 25 MiB cap bounds this.
+- **(implemented, partial; pre-allocation mechanism in
+  development)** The intended pre-allocation mechanism is
+  a `net.Conn` filter (`internal/imapclient/literal_filter.go`)
+  that scans the byte stream for IMAP literal headers
+  (`{N}\r\n` or `{N+}\r\n`) and closes the conn before the
+  literal is allocated. The filter is unit-tested
+  (TestLiteralLimitConnBoundary, TestParseLiteralHeader)
+  but is **not** currently wired into the implicit-TLS
+  dial path because its whole-lookahead scan produces
+  false positives on the TLS handshake (the binary
+  protocol contains byte sequences that match `{N}\r\n`
+  by accident). The pre-allocation guarantee is therefore
+  not enforced for the implicit-TLS path; only the
+  application cap is in effect. To re-enable, the filter
+  needs a line-aware parser that only triggers on
+  `{N}\r\n` patterns preceded by a known IMAP separator.
+  Tracked for Phase 2.2.
 
 ### T5. Filesystem access
 

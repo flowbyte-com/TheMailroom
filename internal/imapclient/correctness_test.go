@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,6 +279,107 @@ func TestListMessagesUIDValidityBoundToUIDs(t *testing.T) {
 	}
 	if uv2 != res.UIDValidity {
 		t.Errorf("MailboxUIDValidity = %d, ListResult.UIDValidity = %d; they must agree when no EXAMINE has been issued in between", uv2, res.UIDValidity)
+	}
+}
+
+// TestFetchMessageBoundaryAtBodySize is the IMAP-side
+// counterpart of the mimeparse boundary tests. We construct
+// a backend with a configurable per-account MaxMessageBytes
+// and a server that serves a message whose body is exactly
+// the cap, one byte below, or one byte above. A valid
+// message exactly at the cap must succeed; one over must
+// return ErrMessageTooLarge.
+func TestFetchMessageBoundaryAtBodySize(t *testing.T) {
+	// Build the seed body. The header is fixed; the body
+	// length is what we vary.
+	hdr := "From: a@example.test\r\nSubject: B\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+	const seedSize = 100
+
+	// We want a body of size N. Construct three
+	// configurations: a backend with cap=seedSize-1, a
+	// backend with cap=seedSize, a backend with
+	// cap=seedSize+1. The same message body of size
+	// seedSize is used for all three.
+	body := strings.Repeat("A", seedSize)
+	raw := hdr + body
+
+	for _, tc := range []struct {
+		name      string
+		cap       int
+		wantErr   bool
+		wantErrIs error
+	}{
+		{"limit-1", seedSize - 1, true, mailbox.ErrMessageTooLarge},
+		{"limit", seedSize, false, nil},
+		{"limit+1", seedSize + 1, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, cleanup := startCustomServer(t, func(u *memuserpkg.User) {
+				mb, err := u.GetMailbox("INBOX")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := mb.CreateMessage(nil, time.Now(), stringReader(raw)); err != nil {
+					t.Fatal(err)
+				}
+			})
+			defer cleanup()
+
+			host, port, _ := net.SplitHostPort(addr)
+			var p int
+			_, _ = fmt.Sscanf(port, "%d", &p)
+			cfg := config.AccountConfig{
+				ID: "x", Email: "x@y", Backend: "imap",
+				IMAP: config.IMAPConfig{Host: host, Port: p, Username: "username", Password: "password", TLS: true},
+				Limits: config.LimitsConfig{
+					MaxMessageBytes:         tc.cap + len(hdr),
+					MaxAttachmentBytes:      1 << 20,
+					MaxSearchResults:        1,
+					MaxBatchOperations:      1,
+					MaxMIMENesting:          16,
+					MaxMIMEParts:            500,
+					MaxTotalAttachmentBytes: 1 << 20,
+					MaxAttachments:          50,
+				},
+			}
+			be, err := New(cfg, Options{
+				DialTimeout: 5 * time.Second,
+				TLSConfig:   &tls.Config{InsecureSkipVerify: true},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer be.Close()
+
+			// Read the UID list to discover the injected
+			// message UID. The seed welcome message
+			// already exists at uid=6, so our injected
+			// message is uid=7. We use ListMessages to
+			// find it by subject.
+			list, err := be.ListMessages(context.Background(), "x", "INBOX", mailbox.ListOptions{Limit: 50})
+			if err != nil {
+				t.Fatalf("ListMessages: %v", err)
+			}
+			var uid uint32
+			for _, m := range list.Messages {
+				if m.Subject == "B" {
+					uid = m.UID
+					break
+				}
+			}
+			if uid == 0 {
+				t.Fatal("injected message not found")
+			}
+			_, err = be.FetchMessage(context.Background(), "x", "INBOX", uid, list.UIDValidity)
+			if tc.wantErr {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Errorf("err = %v, want %v", err, tc.wantErrIs)
+				}
+			} else if err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
 }
 

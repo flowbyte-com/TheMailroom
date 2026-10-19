@@ -31,7 +31,13 @@ All tools take `account_id` as a required string field. There is no implicit "cu
 - `BackendError` — IMAP/SMTP operation failed; details are redacted.
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
-- `NotImplemented` — capability exists in the schema but is not yet wired (Phase 1 stubs).
+- `NotImplemented` — capability exists in the schema but is not yet wired (Phase 1 stubs). Also returned when a search filter (`Flagged` or `Unseen`) is set; the filter is accepted by the schema but not yet implemented in the IMAP / memory backends.
+- `MessageTooLarge` — the message exceeds `max_message_bytes`.
+- `NestingTooDeep` — the MIME nesting exceeds `max_mime_nesting`.
+- `TooManyParts` — the MIME part count exceeds `max_mime_parts`.
+- `TooManyAttachments` — the attachment count exceeds `max_attachments`.
+- `AttachmentTooLarge` — an attachment exceeds `max_attachment_bytes`.
+- `Malformed` — the message could not be parsed.
 
 ## Read-only tools (Phase 1)
 

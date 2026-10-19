@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
+	"github.com/flowbyte-com/themailroom/internal/mimeparse"
 )
 
 // TestParseMultipartMixed exercises the canonical case: a message
@@ -198,6 +200,35 @@ func TestPreExistingSearchFlagGap(t *testing.T) {
 	}
 	if len(res2.Messages) != 1 {
 		t.Errorf("Flagged filter is currently a no-op; expected 1 result, got %d", len(res2.Messages))
+	}
+}
+
+// TestMaxAttachmentsLimit is the end-to-end regression for
+// the MaxAttachments cap on the memory backend. The backend
+// must propagate the limit into mimeparse.Parse; a file with
+// more than MaxAttachments attachments must fail to load
+// with ErrTooManyAttachments.
+func TestMaxAttachmentsLimit(t *testing.T) {
+	dir := t.TempDir()
+	// Build a multipart/mixed with 5 attachments.
+	var b strings.Builder
+	b.WriteString("From: a@example.test\r\nSubject: A\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n")
+	for i := 0; i < 5; i++ {
+		b.WriteString("--B\r\nContent-Type: application/octet-stream\r\n" +
+			"Content-Disposition: attachment; filename=\"a.bin\"\r\n\r\nx\r\n")
+	}
+	b.WriteString("--B--\r\n")
+	if err := os.WriteFile(filepath.Join(dir, "many.eml"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Cap at 3; the file has 5. The load must fail.
+	_, err := NewWithLimits(dir, config.LimitsConfig{
+		MaxAttachments:  3,
+		MaxMessageBytes: 1 << 20,
+	})
+	if !errors.Is(err, mimeparse.ErrTooManyAttachments) {
+		t.Errorf("err = %v, want mimeparse.ErrTooManyAttachments", err)
 	}
 }
 

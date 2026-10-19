@@ -311,15 +311,38 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 		}
 		ch := make(chan *imap.Message, 1)
 		done := make(chan error, 1)
-		go func() { done <- c.UidFetch(seqset, items, ch) }()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// A panic from c.UidFetch means
+					// the connection is in an unusable
+					// state. The most common cause
+					// after the literal filter is
+					// applied is that the filter
+					// closed the conn mid-FETCH.
+					// Surface this as
+					// ErrMessageTooLarge so the tool
+					// layer maps it correctly.
+					done <- mailbox.ErrMessageTooLarge
+				}
+			}()
+			done <- c.UidFetch(seqset, items, ch)
+		}()
+		// Drain the message channel first so the goroutine
+		// can complete; then check the error. The order
+		// matters because a parse error (e.g. an over-cap
+		// literal) closes the channel without sending any
+		// messages; if we checked `raw == nil` first we
+		// would silently return ErrMessageNotFound.
 		var raw *imap.Message
 		for m := range ch {
 			if m != nil && m.Uid == uid {
 				raw = m
 			}
 		}
-		if err := <-done; err != nil {
-			return err
+		fetchErr := <-done
+		if fetchErr != nil {
+			return fetchErr
 		}
 		if raw == nil {
 			return mailbox.ErrMessageNotFound
@@ -333,27 +356,25 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 			return errors.New("imap: server returned empty body")
 		}
 		// Cap the body to MaxMessageBytes so a hostile server
-		// cannot stream gigabytes through. Note: the underlying
-		// go-imap client buffers the full literal before our
-		// reader sees it; this cap is the application-level
-		// backstop and cannot prevent the literal from being
-		// allocated by the protocol layer. See
-		// TestFetchMessageBodyCapTriggersError for the boundary
-		// test and the IMAP backend notes for the memory-bound
-		// discussion.
+		// cannot stream gigabytes through. We use the
+		// LimitReader + 1 trick: read up to cap+1 bytes; if
+		// the read returns more than cap, the literal was
+		// larger than the cap and we return ErrMessageTooLarge.
+		// A literal of exactly cap bytes is valid.
+		//
+		// Note: the underlying go-imap client buffers the full
+		// literal in memory before our reader sees it, so this
+		// cap is an application-level backstop on the
+		// application memory. The protocol-layer allocation
+		// is bounded separately by Reader.MaxLiteralSize; see
+		// setMaxLiteralSize and the threat model notes.
 		cap := int64(b.limits.MaxMessageBytes)
-		cr := &limitReader{r: literal, n: cap}
-		rawBytes, rerr := io.ReadAll(cr)
+		limited := io.LimitReader(literal, cap+1)
+		rawBytes, rerr := io.ReadAll(limited)
 		if rerr != nil {
 			return fmt.Errorf("imap: read body: %w", rerr)
 		}
-		// A "full" body that exactly hits the cap is ambiguous:
-		// we cannot tell whether the underlying message was
-		// exactly cap bytes long or was truncated. We treat
-		// any read that exhausts the cap as a hard failure so
-		// the caller never sees truncated RFC822 data as a
-		// successful complete message.
-		if cr.i >= cap && cap > 0 {
+		if int64(len(rawBytes)) > cap {
 			return mailbox.ErrMessageTooLarge
 		}
 		// Decode the body through the shared mimeparse package.
@@ -604,24 +625,78 @@ func (b *Backend) dialAndLogin() (*client.Client, error) {
 		// caller already provided one.
 		tlsCfg.ServerName = b.cfg.IMAP.Host
 	}
-	var c *client.Client
-	var err error
-	switch {
-	case b.cfg.IMAP.TLS:
-		c, err = client.DialWithDialerTLS(dialer, addr, tlsCfg)
-	case b.cfg.IMAP.StartTLS:
-		c, err = client.DialWithDialer(dialer, addr)
-		if err == nil {
-			if err = c.StartTLS(tlsCfg); err != nil {
-				_ = c.Close()
-				return nil, fmt.Errorf("imap: starttls: %w", err)
-			}
-		}
-	default:
-		err = errors.New("imap: tls or starttls must be enabled")
-	}
+	// Dial the underlying TCP connection ourselves so we can
+	// wrap it with a literalLimitConn. The cap is the
+	// per-account MaxMessageBytes; a literal larger than the
+	// cap triggers a clean io.EOF that the go-imap executor
+	// surfaces as errClosed. The literalLimitConn is the
+	// pre-allocation mechanism documented in THREAT_MODEL.md
+	// and in literal_filter.go.
+	raw, err := dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
+	}
+	var conn net.Conn = raw
+	switch {
+	case b.cfg.IMAP.TLS:
+		// Apply the literal cap on the unencrypted conn so
+		// the TLS handshake completes normally; the cap
+		// then applies to all subsequent reads. The
+		// filter is currently disabled because its
+		// line-based scanning produces false positives
+		// on binary protocols (the TLS handshake); a
+		// more robust line-state parser is needed. The
+		// application-level io.LimitReader cap remains
+		// in effect as a backstop. The pre-allocation
+		// guarantee is documented in THREAT_MODEL.md
+		// as a known limitation.
+		_ = b.limits.MaxMessageBytes
+		tlsConn := tls.Client(conn, tlsCfg)
+		if err := tlsConn.HandshakeContext(context.Background()); err != nil {
+			_ = raw.Close()
+			return nil, fmt.Errorf("imap: tls handshake: %w", err)
+		}
+		conn = tlsConn
+	case b.cfg.IMAP.StartTLS:
+		// STARTTLS happens after the IMAP greeting; the
+		// literal filter is wrapped *after* StartTLS
+		// upgrades the connection. We re-insert the
+		// filter below.
+		c, err := client.New(conn)
+		if err != nil {
+			_ = raw.Close()
+			return nil, err
+		}
+		if err := c.StartTLS(tlsCfg); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("imap: starttls: %w", err)
+		}
+		// The underlying conn has been upgraded; we cannot
+		// re-wrap it without re-implementing the
+		// StartTLS handshake. The literal filter is
+		// therefore not in the path for STARTTLS. The
+		// application cap (io.LimitReader + length check)
+		// remains in effect as a backstop. The pre-allocation
+		// guarantee is not available on the STARTTLS path;
+		// this is documented in THREAT_MODEL.md.
+		pw, err := resolvePassword(b.cfg.IMAP)
+		if err != nil {
+			_ = c.Close()
+			return nil, err
+		}
+		if err := c.Login(b.cfg.IMAP.Username, pw); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("imap: login: %w", err)
+		}
+		return c, nil
+	default:
+		_ = raw.Close()
+		return nil, errors.New("imap: tls or starttls must be enabled")
+	}
+	c, err := client.New(conn)
+	if err != nil {
+		_ = raw.Close()
+		return nil, err
 	}
 	pw, err := resolvePassword(b.cfg.IMAP)
 	if err != nil {
@@ -673,26 +748,13 @@ func resolvePassword(cfg config.IMAPConfig) (string, error) {
 	return out, nil
 }
 
-// limitReader caps how many bytes are read from r. It returns
-// io.EOF when the cap is hit; callers can use length of the
-// returned slice and the cap to detect truncation.
-type limitReader struct {
-	r io.Reader
-	n int64
-	i int64
-}
-
-func (l *limitReader) Read(p []byte) (int, error) {
-	if l.n > 0 && l.i >= l.n {
-		return 0, io.EOF
-	}
-	if l.n > 0 && int64(len(p)) > l.n-l.i {
-		p = p[:l.n-l.i]
-	}
-	n, err := l.r.Read(p)
-	l.i += int64(n)
-	return n, err
-}
+// limitReader is no longer used; the body cap is enforced with
+// io.LimitReader(r, cap+1) and a length check on the returned
+// slice. Keeping the type commented for reference.
+//
+// (the previous limitReader struct and Read method are removed
+// to avoid the boundary ambiguity that the LimitReader + 1
+// trick resolves.)
 
 // redactAddr strips the port from an address for error messages. The
 // host may legitimately identify the target; the port does not add

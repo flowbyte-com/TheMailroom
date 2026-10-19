@@ -184,5 +184,6 @@ var (
 	ErrTooManyParts            = errors.New("mailbox: too many mime parts")
 	ErrAttachmentTooLarge      = errors.New("mailbox: attachment too large")
 	ErrTotalAttachmentTooLarge = errors.New("mailbox: total attachment size too large")
+	ErrTooManyAttachments      = errors.New("mailbox: too many attachments")
 	ErrMalformed               = errors.New("mailbox: malformed message")
 )

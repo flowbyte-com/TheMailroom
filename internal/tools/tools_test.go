@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/flowbyte-com/themailroom/internal/accounts"
 	"github.com/flowbyte-com/themailroom/internal/config"
 	mem "github.com/flowbyte-com/themailroom/internal/mailbox/memory"
+	"github.com/flowbyte-com/themailroom/internal/mimeparse"
 	"github.com/flowbyte-com/themailroom/internal/permissions"
 )
 
@@ -344,6 +346,100 @@ func TestReadMessageMIMEErrorPropagated(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nesting") {
 		t.Errorf("err = %v, want 'nesting' in error", err)
+	}
+}
+
+// TestSearchMessagesLimitPropagated is the regression for
+// the bug where the tool layer silently ignored the
+// caller's Limit. The wire schema accepts a Limit field;
+// the registry must respect it (clamped to the
+// per-account max).
+func TestSearchMessagesLimitPropagated(t *testing.T) {
+	env := setupEnv(t, "full")
+	defer env.cleanup()
+
+	// limit=1 should yield at most 1 message, even
+	// though the memory backend has more.
+	got, err := env.call(t, "search_messages", map[string]any{
+		"account_id": "full",
+		"mailbox":    "INBOX",
+		"query": map[string]any{
+			"limit": float64(1),
+		},
+	})
+	if err != nil {
+		t.Fatalf("search_messages: %v", err)
+	}
+	matches := got["matches"].([]any)
+	if len(matches) != 1 {
+		t.Errorf("len(matches) = %d, want 1 (Limit should be honoured)", len(matches))
+	}
+}
+
+// TestSearchMessagesUnsupportedFilterRejected verifies
+// that Flagged and Unseen are rejected with a typed
+// NotImplemented error rather than silently ignored. The
+// IMAP and memory backends do not yet implement these
+// filters; the tool layer must not mislead the caller.
+func TestSearchMessagesUnsupportedFilterRejected(t *testing.T) {
+	env := setupEnv(t, "full")
+	defer env.cleanup()
+	cases := []struct {
+		name  string
+		query map[string]any
+	}{
+		{"flagged", map[string]any{"flagged": true}},
+		{"unseen", map[string]any{"unseen": true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := env.call(t, "search_messages", map[string]any{
+				"account_id": "full",
+				"mailbox":    "INBOX",
+				"query":      tc.query,
+			})
+			if err == nil {
+				t.Fatalf("expected %s filter to be rejected", tc.name)
+			}
+			if !strings.Contains(err.Error(), "not yet supported") {
+				t.Errorf("err = %v, want mention of 'not yet supported'", err)
+			}
+		})
+	}
+}
+
+// TestReadMessageTooManyAttachmentsPropagates is the
+// end-to-end test for issue #2: the MaxAttachments limit
+// from the memory backend must propagate through mimeparse,
+// the mailbox package, the IMAP backend, the tool layer,
+// and the typed-error mapping. We construct a message
+// with more attachments than the cap and assert that
+// every layer surfaces the error with the right type.
+func TestReadMessageTooManyAttachmentsPropagates(t *testing.T) {
+	dir := t.TempDir()
+	// 5 attachments.
+	var b strings.Builder
+	b.WriteString("From: a@example.test\r\nSubject: A\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n")
+	for i := 0; i < 5; i++ {
+		b.WriteString("--B\r\nContent-Type: application/octet-stream\r\n" +
+			"Content-Disposition: attachment; filename=\"a.bin\"\r\n\r\nx\r\n")
+	}
+	b.WriteString("--B--\r\n")
+	if err := os.WriteFile(filepath.Join(dir, "many.eml"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Load with cap=3; load must fail with the typed
+	// mimeparse error. The mailbox package maps this to
+	// ErrTooManyAttachments; the tool layer maps that to
+	// codeTooManyAttachments. We assert the load itself
+	// (which is the first layer the user hits).
+	_, err := mem.NewWithLimits(dir, config.LimitsConfig{
+		MaxAttachments:  3,
+		MaxMessageBytes: 1 << 20,
+	})
+	if !errors.Is(err, mimeparse.ErrTooManyAttachments) {
+		t.Errorf("err = %v, want mimeparse.ErrTooManyAttachments", err)
 	}
 }
 

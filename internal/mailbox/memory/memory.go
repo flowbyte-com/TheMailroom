@@ -176,6 +176,7 @@ func (b *Backend) parse(data []byte) (*mailbox.Message, error) {
 		MaxTotalAttachmentBytes: b.limits.MaxTotalAttachmentBytes,
 		MaxMIMENesting:          b.limits.MaxMIMENesting,
 		MaxMIMEParts:            b.limits.MaxMIMEParts,
+		MaxAttachments:          b.limits.MaxAttachments,
 	})
 	if err != nil {
 		return nil, err

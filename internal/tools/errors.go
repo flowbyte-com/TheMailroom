@@ -20,16 +20,22 @@ import (
 
 // Tool error codes. These match the codes advertised in docs/TOOLS.md.
 const (
-	codeInvalidInput     = "InvalidInput"
-	codeAccountNotFound  = "AccountNotFound"
-	codePermissionDenied = "PermissionDenied"
-	codeBackendError     = "BackendError"
-	codeLimitExceeded    = "RateLimited"
-	codeUidMismatch      = "UidMismatch"
-	codeNotImplemented   = "NotImplemented"
-	codeMailboxNotFound  = "MailboxNotFound"
-	codeMessageNotFound  = "MessageNotFound"
-	codeInternalError    = "InternalError"
+	codeInvalidInput       = "InvalidInput"
+	codeAccountNotFound    = "AccountNotFound"
+	codePermissionDenied   = "PermissionDenied"
+	codeBackendError       = "BackendError"
+	codeLimitExceeded      = "RateLimited"
+	codeUidMismatch        = "UidMismatch"
+	codeNotImplemented     = "NotImplemented"
+	codeMailboxNotFound    = "MailboxNotFound"
+	codeMessageNotFound    = "MessageNotFound"
+	codeInternalError      = "InternalError"
+	codeMessageTooLarge    = "MessageTooLarge"
+	codeNestingTooDeep     = "NestingTooDeep"
+	codeTooManyParts       = "TooManyParts"
+	codeTooManyAttachments = "TooManyAttachments"
+	codeAttachmentTooLarge = "AttachmentTooLarge"
+	codeMalformed          = "Malformed"
 )
 
 // TypedError is returned by tool handlers. The MCP layer treats it as a
@@ -76,6 +82,18 @@ func mapError(err error) *TypedError {
 		return typed(codeUidMismatch, "uid/uid_validity mismatch", nil)
 	case errors.Is(err, mailbox.ErrLimitExceeded):
 		return typed(codeLimitExceeded, "limit exceeded", nil)
+	case errors.Is(err, mailbox.ErrMessageTooLarge):
+		return typed(codeMessageTooLarge, "message exceeds size limit", nil)
+	case errors.Is(err, mailbox.ErrNestingTooDeep):
+		return typed(codeNestingTooDeep, "mime nesting exceeds limit", nil)
+	case errors.Is(err, mailbox.ErrTooManyParts):
+		return typed(codeTooManyParts, "too many mime parts", nil)
+	case errors.Is(err, mailbox.ErrTooManyAttachments):
+		return typed(codeTooManyAttachments, "too many attachments", nil)
+	case errors.Is(err, mailbox.ErrAttachmentTooLarge):
+		return typed(codeAttachmentTooLarge, "attachment exceeds size limit", nil)
+	case errors.Is(err, mailbox.ErrMalformed):
+		return typed(codeMalformed, "malformed message", nil)
 	default:
 		// Avoid leaking internal details.
 		return typed(codeInternalError, "internal error", nil)

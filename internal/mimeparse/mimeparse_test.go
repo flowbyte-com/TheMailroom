@@ -2,7 +2,6 @@ package mimeparse
 
 import (
 	"errors"
-	"io"
 	"strings"
 	"testing"
 )
@@ -295,84 +294,158 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
-// TestCountingReaderBoundary exercises the boundary semantics of
-// countingReader at exactly the cap, one below, and one above.
-// The contract is:
-//
-//   - Reading exactly n bytes in total is the LAST successful
-//     read; exceeded remains false.
-//   - The next Read after reading exactly n bytes must return
-//     io.EOF with exceeded = true.
-//   - Reading n+1 bytes from the underlying reader with cap n
-//     returns n bytes; the next Read returns 0, io.EOF with
-//     exceeded = true.
-func TestCountingReaderBoundary(t *testing.T) {
-	const capN = 10
-	source := strings.NewReader(strings.Repeat("A", 100))
-	cr := &countingReader{r: source, n: capN}
-
-	// First read returns 5 bytes (well below the cap).
-	buf := make([]byte, 5)
-	n, err := cr.Read(buf)
-	if err != nil {
-		t.Fatalf("first read err = %v", err)
+// TestParseBoundaryAtMessageSize exercises the size cap on
+// Parse for messages at limit-1, limit, and limit+1 bytes. A
+// valid message at exactly the cap must succeed. The
+// message is a single text/plain part whose total size we
+// control by varying the body.
+func TestParseBoundaryAtMessageSize(t *testing.T) {
+	// Build a base message of a known size and then vary the
+	// body to hit each boundary.
+	hdr := func(body string) string {
+		return "From: a@example.test\r\n" +
+			"Subject: B\r\n" +
+			"Content-Type: text/plain; charset=utf-8\r\n" +
+			"\r\n" + body
 	}
-	if n != 5 {
-		t.Errorf("first read n = %d, want 5", n)
-	}
-	if cr.exceeded {
-		t.Errorf("exceeded = true after under-cap read")
-	}
-
-	// Second read takes us to exactly the cap boundary.
-	n, err = cr.Read(buf)
-	if err != nil {
-		t.Fatalf("second read err = %v", err)
-	}
-	if n != capN-5 {
-		t.Errorf("second read n = %d, want %d", n, capN-5)
-	}
-	if cr.exceeded {
-		t.Errorf("exceeded = true after reading exactly cap bytes")
-	}
-
-	// The next read must report EOF and set exceeded.
-	n, err = cr.Read(buf)
-	if n != 0 || err != io.EOF {
-		t.Errorf("over-cap read returned n=%d, err=%v; want 0, EOF", n, err)
-	}
-	if !cr.exceeded {
-		t.Errorf("exceeded = false after refusing over-cap read")
+	for _, tc := range []struct {
+		name      string
+		bodyLen   int
+		wantErr   bool
+		wantErrIs error
+	}{
+		{"limit-1", 99, false, nil},
+		{"limit", 100, false, nil},
+		{"limit+1", 101, true, ErrMessageTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := hdr(strings.Repeat("A", tc.bodyLen))
+			_, err := Parse([]byte(raw), Limits{
+				MaxMessageBytes:    100 + len("From: a@example.test\r\nSubject: B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"),
+				MaxAttachmentBytes: 1 << 20,
+			})
+			if tc.wantErr {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Errorf("err = %v, want %v", err, tc.wantErrIs)
+				}
+			} else if err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
 }
 
-// TestCountingReaderUnderCap reads strictly below the cap and
-// must never set exceeded.
-func TestCountingReaderUnderCap(t *testing.T) {
-	cr := &countingReader{r: strings.NewReader("hello"), n: 100}
-	buf := make([]byte, 10)
-	n, err := cr.Read(buf)
-	if err != nil || n != 5 {
-		t.Errorf("read n=%d err=%v, want 5, nil", n, err)
-	}
-	if cr.exceeded {
-		t.Errorf("exceeded = true on a clean under-cap read")
+// TestParseFromReaderBoundaryAtMessageSize exercises the size
+// cap on ParseFromReader for inputs at limit-1, limit, and
+// limit+1 bytes. A valid message at exactly the cap must
+// succeed; a message one byte over must fail.
+func TestParseFromReaderBoundaryAtMessageSize(t *testing.T) {
+	// The LimitReader + 1 trick in ParseFromReader means the
+	// input boundary is checked at len(raw) == cap vs
+	// len(raw) > cap. We test all three.
+	for _, tc := range []struct {
+		name    string
+		bodyLen int
+		wantErr bool
+	}{
+		{"limit-1", 99, false},
+		{"limit", 100, false},
+		{"limit+1", 101, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hdr := "From: a@example.test\r\nSubject: B\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+			raw := hdr + strings.Repeat("A", tc.bodyLen)
+			r := strings.NewReader(raw)
+			_, err := ParseFromReader(r, Limits{
+				MaxMessageBytes:    len(hdr) + 100,
+				MaxAttachmentBytes: 1 << 20,
+			})
+			if tc.wantErr {
+				if !errors.Is(err, ErrMessageTooLarge) {
+					t.Errorf("err = %v, want ErrMessageTooLarge", err)
+				}
+			} else if err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
 }
 
-// TestCountingReaderAboveCap reads strictly above the cap; the
-// reader returns cap bytes and the next read sets exceeded.
-func TestCountingReaderAboveCap(t *testing.T) {
-	cr := &countingReader{r: strings.NewReader(strings.Repeat("X", 1000)), n: 50}
-	all, err := io.ReadAll(cr)
-	if err != nil {
-		t.Fatalf("ReadAll err = %v", err)
+// TestParseAttachmentBoundaryAtAttachmentSize exercises the
+// per-attachment size cap for attachments at limit-1, limit,
+// and limit+1 bytes. An attachment of exactly the cap bytes
+// must be parsed successfully.
+func TestParseAttachmentBoundaryAtAttachmentSize(t *testing.T) {
+	// Build a multipart/mixed with a text part and one
+	// attachment of variable size. The attachment cap is
+	// the only knob that varies.
+	build := func(attSize int) string {
+		body := strings.Repeat("A", attSize)
+		return "From: a@example.test\r\nSubject: ATT\r\n" +
+			"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+			"--B\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nbody\r\n" +
+			"--B\r\nContent-Type: application/octet-stream\r\n" +
+			"Content-Disposition: attachment; filename=\"a.bin\"\r\n\r\n" +
+			body + "\r\n" +
+			"--B--\r\n"
 	}
-	if len(all) != 50 {
-		t.Errorf("read %d bytes, want exactly 50 (the cap)", len(all))
+	// The cap is 100 bytes; we test attachments of 99, 100,
+	// and 101 bytes.
+	for _, tc := range []struct {
+		name    string
+		attSize int
+		wantErr bool
+	}{
+		{"limit-1", 99, false},
+		{"limit", 100, false},
+		{"limit+1", 101, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(build(tc.attSize)), Limits{
+				MaxMessageBytes:    1 << 20,
+				MaxAttachmentBytes: 100,
+			})
+			if tc.wantErr {
+				if !errors.Is(err, ErrAttachmentTooLarge) {
+					t.Errorf("err = %v, want ErrAttachmentTooLarge", err)
+				}
+			} else if err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
 	}
-	if !cr.exceeded {
-		t.Errorf("exceeded = false after the cap was hit")
+}
+
+// TestParseTextBoundaryAtTextSize exercises the text body cap
+// for text/plain parts at the cap, one below, and one above.
+// A text part of exactly the cap is the body, not a
+// truncation.
+func TestParseTextBoundaryAtTextSize(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bodyLen   int
+		wantTrunc bool
+	}{
+		{"limit-1", 99, false},
+		{"limit", 100, false},
+		{"limit+1", 101, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "From: a@example.test\r\nSubject: T\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+				strings.Repeat("A", tc.bodyLen)
+			d, err := Parse([]byte(raw), Limits{
+				MaxMessageBytes:    1 << 20,
+				MaxAttachmentBytes: 100,
+			})
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if d.Truncated != tc.wantTrunc {
+				t.Errorf("Truncated = %v, want %v (bodyLen=%d)", d.Truncated, tc.wantTrunc, tc.bodyLen)
+			}
+		})
 	}
 }
 
@@ -567,22 +640,6 @@ func TestParseHTMLAttachment(t *testing.T) {
 	}
 	if len(d.Attachments) != 1 || d.Attachments[0].Filename != "page.html" {
 		t.Errorf("Attachments = %+v, want one entry with Filename=page.html", d.Attachments)
-	}
-}
-
-// The cap is "applied" only when c.n > 0; a cap of 0 must
-// behave like an unlimited read.
-func TestCountingReaderZeroCap(t *testing.T) {
-	cr := &countingReader{r: strings.NewReader("xyz"), n: 0}
-	all, err := io.ReadAll(cr)
-	if err != nil {
-		t.Fatalf("ReadAll err = %v", err)
-	}
-	if string(all) != "xyz" {
-		t.Errorf("read %q, want %q", string(all), "xyz")
-	}
-	if cr.exceeded {
-		t.Errorf("exceeded = true with cap 0")
 	}
 }
 

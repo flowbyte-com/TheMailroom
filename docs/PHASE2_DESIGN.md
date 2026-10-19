@@ -240,6 +240,12 @@ separately from the Phase 2.1 corrections.
   `crit.WithoutFlags = []string{"\\Seen"}` in
   `internal/imapclient/imapclient.go::SearchMessages`. Tracked
   for Phase 2.2.
+- **Tool layer: `Flagged` / `Unseen` are rejected, not silently
+  ignored.** As of PR #3 follow-up #2, the tool layer
+  rejects `Flagged` and `Unseen` with a typed `NotImplemented`
+  error rather than silently passing them through. The
+  caller must either omit the field or wait for Phase 2.2
+  to land the IMAP filter implementation.
 - **IMAP SEARCH `Text` field conflates Subject + From + To.**
   The IMAP `TEXT` keyword matches *any* text in headers or
   body; populating it with multiple terms makes them OR, not
@@ -255,6 +261,14 @@ separately from the Phase 2.1 corrections.
   servers is unspecified. The right fix is to expose both
   `since_date` and `since_internal` to the caller. Tracked
   for Phase 2.2.
+- **`Query.Limit` ignored at the tool layer (fixed in PR #3
+  follow-up).** The tool handler for `search_messages`
+  previously built a `mailbox.SearchQuery` without copying
+  `args.Query.Limit`, so the caller's `limit` was silently
+  dropped on the floor and replaced with the per-account
+  max. Fixed in the same follow-up; the tool handler now
+  propagates the value. The memory and IMAP backends
+  continue to honour `q.Limit` as before.
 
 ## 8. Memory-bound note on the IMAP literal layer
 

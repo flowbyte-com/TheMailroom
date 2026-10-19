@@ -280,22 +280,23 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 		}
 
 		// Read the body, respecting the per-attachment cap.
-		// We read into a buffer because the agent needs the
-		// text/html as a string, but the counting reader stops
-		// as soon as the cap is exceeded.
+		// We use the same LimitReader + 1 trick as
+		// ParseFromReader: read up to cap+1 bytes; if we
+		// got more than cap, the body exceeded the cap.
 		cap := attachmentCap
 		if !isAttachment {
 			cap = textCap
 		}
-		cr := &countingReader{r: entity.Body, n: cap}
-		data, rerr := io.ReadAll(cr)
-		exceeded := cr.exceeded
+		limited := io.LimitReader(entity.Body, cap+1)
+		data, rerr := io.ReadAll(limited)
 		if rerr != nil {
 			warnings = append(warnings, fmt.Sprintf("part read: %v", rerr))
 			return nil
 		}
-		if exceeded {
+		if int64(len(data)) > cap {
 			if !isAttachment {
+				// For text parts we still surface what we
+				// read (truncated) and set Truncated: true.
 				d.Truncated = true
 				if isTextPlain(mediaType) {
 					text = string(data)
@@ -435,69 +436,32 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 // ParseFromReader is like Parse but reads the body incrementally so
 // the caller can stream from a network source. The same Limits
 // apply; the overall size cap is enforced on the input via a
-// counting reader, so a hostile server cannot stream gigabytes
-// through.
+// LimitReader, so a hostile server cannot stream gigabytes
+// through. A message whose size is *exactly* the cap is valid
+// and is parsed successfully; a message that exceeds the cap is
+// rejected with ErrMessageTooLarge.
 func ParseFromReader(r io.Reader, limits Limits) (*Decoded, error) {
 	limits = limits.withDefaults()
 	cap := int64(limits.MaxMessageBytes)
 	if cap < 0 {
 		cap = 0
 	}
-	cr := &countingReader{r: r, n: cap}
-	raw, err := io.ReadAll(cr)
+	// io.LimitReader returns io.EOF after cap bytes. If the
+	// source is exactly cap bytes, ReadAll returns those
+	// bytes plus io.EOF (io.ReadAll treats io.EOF as
+	// success). To distinguish "source is exactly cap" from
+	// "source is larger than cap" we read one extra byte
+	// beyond the cap; if the extra byte is present the
+	// source was longer.
+	limited := io.LimitReader(r, cap+1)
+	raw, err := io.ReadAll(limited)
 	if err != nil {
-		if cr.exceeded {
-			return nil, ErrMessageTooLarge
-		}
 		return nil, fmt.Errorf("mime: read: %w", err)
 	}
-	if cr.exceeded {
+	if int64(len(raw)) > cap {
 		return nil, ErrMessageTooLarge
 	}
 	return Parse(raw, limits)
-}
-
-// --- helpers ---
-
-// countingReader returns io.EOF after n bytes have been read; the
-// `exceeded` flag distinguishes a normal EOF from a cap-exceeded
-// one so the caller can decide whether to treat it as truncation
-// or as a hard error.
-//
-// Boundary semantics: a read of *exactly* n bytes is the last
-// successful read and does not set `exceeded`. `exceeded` is set
-// only when a read attempt is refused because no capacity
-// remains. Callers can therefore interpret `exceeded == false` as
-// "we read what we asked for, up to the cap", which is the
-// valid case. This is verified by TestCountingReaderBoundary.
-type countingReader struct {
-	r        io.Reader
-	n        int64
-	read     int64
-	exceeded bool
-}
-
-func (c *countingReader) Read(p []byte) (int, error) {
-	if c.n > 0 {
-		remaining := c.n - c.read
-		if remaining <= 0 {
-			// A previous Read returned exactly n bytes; this
-			// call would push us over the cap, so refuse.
-			c.exceeded = true
-			return 0, io.EOF
-		}
-		if int64(len(p)) > remaining {
-			p = p[:remaining]
-		}
-	}
-	n, err := c.r.Read(p)
-	c.read += int64(n)
-	// Note: c.read == c.n is the boundary case: the last
-	// successful read filled the cap exactly. Do not flag
-	// exceeded; the caller is expected to make at most one
-	// more Read call, which will see remaining == 0 and set
-	// exceeded.
-	return n, err
 }
 
 func isTextPlain(mt string) bool { return strings.HasPrefix(mt, "text/plain") }
