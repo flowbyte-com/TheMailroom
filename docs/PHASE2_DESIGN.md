@@ -270,63 +270,106 @@ separately from the Phase 2.1 corrections.
   propagates the value. The memory and IMAP backends
   continue to honour `q.Limit` as before.
 
-## 8. IMAP literal memory allocation: UNBOUNDED by application cap
+## 8. IMAP literal memory allocation: enforced at the protocol layer
+
+### The upstream problem
 
 The go-imap v1.2.1 `Reader.ReadLiteral` allocates a buffer of
-the announced literal size and reads the literal body into
-it *before* the application sees the data:
+the announced literal size and reads the literal body into it
+*before* the application sees the data:
 
     b := make([]byte, n)
     if _, err := io.ReadFull(r, b); err != nil { ... }
 
-The application-level cap enforced by
-`io.LimitReader(r, cap+1)` + length check is applied
-*after* this allocation. It is an application-side backstop,
-not a pre-allocation guard.
+An application-level cap enforced by
+`io.LimitReader(r, cap+1)` + length check is therefore only an
+application-side backstop: it runs AFTER the protocol layer has
+allocated the buffer, so it does not bound the allocation. A
+server (including a malicious or buggy one) that announces a
+literal larger than `max_message_bytes` causes the go-imap
+client to allocate up to the announced size before the
+application rejects the body. The default 25 MiB cap did not
+bound this allocation.
 
-### Consequence
+### The implementation (Phase 2.2, Priority 1)
 
-A server (including a malicious or buggy one) that announces
-a literal larger than `max_message_bytes` causes the go-imap
-client to allocate up to the announced size *before* the
-application rejects the body. The default `max_message_bytes`
-of 25 MiB does **not** bound this allocation. A single
-`FETCH` of a `BODY[]` against a hostile server can therefore
-cause unbounded memory growth limited only by the host's
-physical RAM and the `net.Conn` read buffer.
+TheMailroom now uses a **narrow fork** of go-imap:
 
-### Evaluated mitigations (both rejected for Phase 2.1)
+- Module: `github.com/flowbyte-com/go-imap`
+- Version: `v1.2.1-themailroom.1`
+- Upstream: `github.com/emersion/go-imap` v1.2.1
+- License: BSD-2-Clause, preserved verbatim
+- Fork changelog: `CHANGES.md` in the fork repository
 
-1. **`go-imap.Reader.MaxLiteralSize` via reflection.** The
-   field exists on the embedded `*imap.Reader` inside
-   `*client.Client`, but `Client` does not expose a setter
-   and `conn` is unexported. Setting it via reflection was
-   prototyped in commit `bcc3cdc` and abandoned after
-   empirical testing showed that when the cap is hit, the
-   resulting parse error is silently swallowed by
-   `Message.Parse` (message.go:269 — the literal type
-   assertion drops the error), the executor returns success
-   with the message body missing, and the connection is left
-   in a broken state. Reproduced in testing.
-2. **A line-aware `net.Conn` filter.** A filter that scans
-   the byte stream for `{N}\r\n` and closes the conn on
-   oversized literals was prototyped in commit `bcc3cdc` and
-   removed in the merge-prep cleanup because its
-   whole-lookahead scan produced false positives on the TLS
-   handshake (the binary protocol contains byte sequences
-   that match `{N}\r\n` by accident). The intended Phase 2.2
-   shape is a **line-state** parser that only triggers on
-   literal headers preceded by a known IMAP separator (space,
-   `(`, etc.). See §10 for the acceptance criteria.
+The fork's change set is deliberately small (two upstream
+source files):
 
-### Current state
+1. **`read.go`**
+   - Exports `imap.ErrLiteralSizeExceeded`.
+   - `ReadLiteral` returns it when the announced size exceeds
+     `Reader.MaxLiteralSize`. **The check runs before the
+     `make([]byte, n)` call**, so an over-cap announcement is
+     rejected without allocating a buffer proportional to the
+     announced size.
+   - `IsParseError` also matches the new error, so the
+     executor's existing parse-failure detection keeps working.
 
-- The application cap is the only line of defence.
-- A single oversized literal can cause unbounded allocation
-  before rejection.
-- Callers that fetch from untrusted IMAP servers must
-  mitigate at the network layer (firewall / proxy with a
-  body-size filter) until Phase 2.2 lands.
+2. **`client/client.go`**
+   - Adds `client.DialOptions{MaxLiteralSize}` and
+     `client.NewWithOptions`.
+   - `readOnce` closes the connection on a parse error. A parse
+     error desynchronises the response stream; upstream keeps
+     the connection alive, which lets the executor block
+     forever waiting for a tagged response that will never
+     arrive.
+   - `errClosed` becomes a typed `*connectionClosedError` that
+     wraps the underlying cause, so the executor's
+     `loggedOut` case can return the specific error
+     (`imap.ErrLiteralSizeExceeded`) instead of a generic
+     transport failure.
+
+TheMailroom sets `DialOptions.MaxLiteralSize` to the
+per-account `max_message_bytes` at dial time, for both the
+implicit-TLS and the STARTTLS path. The cap is set on the IMAP
+*Reader*, not on the transport, so it applies identically to
+both: in both cases the Reader observes the *decrypted* IMAP byte
+stream.
+
+### Evidence that the allocation is prevented
+
+1. **Source-level.** `TestForkEnforcesCapBeforeAllocation` reads
+   the fork's `read.go` from the module cache and asserts that
+   the `MaxLiteralSize` check appears *before* the
+   `b := make([]byte, n)` allocation.
+2. **Behavioural.** `TestLiteralSizeCapEnforcedBeforeAllocation`
+   uses a raw IMAP server that announces a 64 MiB literal and
+   **never sends the body**. The client rejects the
+   announcement immediately (bounded latency, not a timeout),
+   closes the connection, and returns `ErrMessageTooLarge`. If
+   the client had allocated the announced size, the test would
+   have had to wait for the body.
+3. **Memory.** `TestAllocatedMemoryDoesNotScaleWithAnnouncedSize`
+   measures the process heap around a fetch that announces a
+   512 MiB literal and asserts the allocation stays under 8 MiB.
+4. **Boundary.** `TestLiteralSizeCapBoundary` exercises a real
+   message at cap-1, cap and cap+1. The IMAP `BODY[]` literal
+   contains the whole RFC 5322 message, so a message whose raw
+   size is exactly the cap is a literal exactly at the cap: it
+   is accepted; one byte over is rejected.
+
+### Remaining risks
+
+- The fork is a temporary measure. It must be upstreamed or
+  replaced with a maintained library. The route back to
+  upstream is documented in the fork's `CHANGES.md`.
+- The protocol-level cap bounds the *literal* size. It does not
+  bound the number of literals a server may stream in one
+  response, nor the total bytes across a long-lived connection.
+  The application-level cap and the per-account batch limits
+  remain the backstops.
+- A server that announces a valid but enormous literal is
+  rejected; a server that announces many *small* literals is
+  bounded by the MIME part-count and attachment-count limits.
 
 ## 9. Test strategy
 
@@ -345,10 +388,18 @@ For each new tool and protocol path:
 
 ## 10. Pre-production security requirement: protocol-level IMAP literal-size enforcement
 
-**Status:** Mandatory before any production deployment that
-fetches messages from a server whose literal announcements
-are not independently bounded by the network layer (e.g.
-firewall, proxy with body-size filter).
+**Status:** **SATISFIED** by the Phase 2.2 Priority 1
+implementation (see §8). The requirement remains open for the
+*fork* itself: the fork must be upstreamed or replaced before
+the project can claim a production-hardened posture, because a
+long-term dependency on a personal fork is itself a
+maintenance risk. The remaining production-readiness work is
+tracked in `docs/PHASE2.2.md`.
+
+**Verification:** all twelve acceptance criteria below are
+implemented and covered by the tests named against them. The
+per-criterion status is recorded in the "Status" column of the
+table that follows the list.
 
 **Why this is mandatory:** §8 documents that the
 application-level cap does not bound the go-imap client's
@@ -441,27 +492,81 @@ runs as a long-lived process handling untrusted mail.
     default 25 MiB cap does **not** bound go-imap's
     pre-allocation memory.
 
-**Implementation options (in order of preference):**
+**Acceptance criteria status.**
 
-1. **Fork `github.com/emersion/go-imap` to expose
-   `Reader.MaxLiteralSize` as a constructor option on
-   `client.Options`, with documented migration path back
-   to upstream when the library is fixed.** This is the
-   cleanest option: a one-line `client.Options.MaxLiteralSize`
-   that flows into the embedded `*imap.Reader`.
-2. **Implement a line-state `net.Conn` wrapper that wraps
-   the conn after the TLS upgrade, scans the decrypted
-   byte stream for IMAP literal headers, and closes the
-   conn on oversized literals.** The wrapper must
-   understand the IMAP response grammar to avoid false
-   positives on the TLS handshake or on binary body bytes.
-   This is the prototype evaluated in commit `bcc3cdc` and
-   removed in merge-prep because the initial version was
-   not line-aware.
-3. **Replace `github.com/emersion/go-imap` with a different
-   IMAP client library that exposes a literal-size cap
-   natively.** This is the largest scope and is only
-   justified if options 1 and 2 are not viable.
+| # | Criterion | Status | Evidence |
+|---|-----------|--------|----------|
+| 1 | Pre-allocation enforcement | Met | `TestForkEnforcesCapBeforeAllocation` (source-level ordering assertion); the fork's `ReadLiteral` checks the size before `make([]byte, n)`. |
+| 2 | Correct boundary (cap accepted, cap+1 rejected) | Met | `TestLiteralSizeCapBoundary` (cap-1 / cap / cap+1 against a real message); fork test `TestReader_MaxLiteralSize_Boundary`. |
+| 3 | Decrypted-transport compatibility (both TLS modes) | Met | The cap is set on the IMAP `Reader`, which observes the decrypted stream in both modes. `TestOversizedLiteralUnderImplicitTLS`, `TestOversizedLiteralUnderSTARTTLS`. |
+| 4 | IMAP framing compatibility | Met | The cap is enforced by the IMAP parser, not by a byte-pattern scan, so it cannot misfire on binary content. `TestBinaryContentWithLiteralHeaderBytes`. |
+| 5 | Binary safety (body is opaque) | Met | The cap inspects only the announced size; the body is never parsed or classified. `TestBinaryContentWithLiteralHeaderBytes`. |
+| 6 | Disconnection safety (conn closed, error typed, not a panic) | Met | The fork closes the conn on a parse error and returns a typed `*connectionClosedError`. `TestLiteralSizeCapEnforcedBeforeAllocation` (server observes the close), `TestNoSilentSuccessOnLiteralFailure`. |
+| 7 | Both transport modes | Met | `TestOversizedLiteralUnderImplicitTLS`, `TestOversizedLiteralUnderSTARTTLS`; the STARTTLS path sets the cap before the upgrade and the `*imap.Reader` survives the upgrade. |
+| 8 | No silent success | Met | The application-level `int64(len(rawBytes)) > cap` check is retained and returns `ErrMessageTooLarge`. `TestNoSilentSuccessOnLiteralFailure`. |
+| 9 | No panic disguised as a size limit | Met | The `recover()` in `FetchMessage` returns a generic `fmt.Errorf("imap: fetch panic: %v", r)`, which maps to `codeInternalError`, not `codeMessageTooLarge`. |
+| 10 | Tight error mapping | Met | `mapErr` translates only `imap.ErrLiteralSizeExceeded` to `ErrMessageTooLarge`; generic parse errors map to `ErrMalformed`. `TestMapErrLiteralSizeEvidence`. |
+| 11 | Test coverage | Met | Boundary tests for the protocol-level cap and the application-level fallback; integration tests for a server announcing a very large literal without sending its body. `TestLiteralSizeCapEnforcedBeforeAllocation`, `TestAllocatedMemoryDoesNotScaleWithAnnouncedSize`, `TestMalformedLiteralAnnouncement`. |
+| 12 | Documentation | Met | This section, `docs/THREAT_MODEL.md` T4, `docs/ARCHITECTURE.md` and the `internal/imapclient` package doc. The wording that implied the application cap bounded the protocol-layer allocation is removed. |
+
+**Implementation chosen: option 1 (the fork).**
+
+Option 1 was selected and implemented. The fork is
+`github.com/flowbyte-com/go-imap` at module version
+`v1.2.1-themailroom.1`, pinned to the immutable commit
+`bacd615`. Its full change set is documented in the fork's
+`CHANGES.md`.
+
+Why option 1 over option 2 (the `net.Conn` filter):
+
+- The filter has to re-implement enough of the IMAP response
+  grammar to avoid false positives. The prototype evaluated in
+  commit `bcc3cdc` scanned the whole lookahead and matched
+  `{N}\r\n` byte sequences inside TLS records; a correct
+  version needs a line-state machine that only fires on a
+  literal header in a legal position. That is more fragile
+  than letting the IMAP parser do the framing.
+- The fork approach puts the check exactly where the
+  allocation happens, so there is no possibility of a
+  mismatch between the filter's view of the stream and the
+  parser's.
+- The fork also fixes the executor hang that the upstream
+  library has on any parse error (upstream keeps a
+  desynchronised connection alive, which can block the
+  executor indefinitely). That fix is a prerequisite for
+  option 2 as well.
+
+Option 3 (replacing the library) remains the fallback if the
+fork cannot be upstreamed.
+
+### Dependency management
+
+- The dependency is pinned to an immutable tag
+  (`v1.2.1-themailroom.1`) in `go.mod`. No `replace` directive
+  is used, so the build is reproducible from the public
+  module proxy.
+- `go mod verify` verifies the module contents against
+  `go.sum`.
+- The fork preserves the upstream BSD-2-Clause license
+  verbatim and the upstream copyright notice.
+- The precise differences from upstream are documented in the
+  fork's `CHANGES.md`, which also describes the route back to
+  upstream.
+- Verification procedure:
+
+  ```sh
+  go mod verify                 # module contents match go.sum
+  go list -m github.com/flowbyte-com/go-imap   # pinned version
+  go test -race -count=1 ./...  # full suite, including the fork's
+                                # own upstream tests
+  ```
+
+  The fork's own test suite is preserved and runs as part of
+  the module's `go test ./...`; TheMailroom additionally
+  asserts the fork's source-level ordering
+  (`TestForkEnforcesCapBeforeAllocation`) so an upstream
+  upgrade that reintroduces the allocation would be caught
+  immediately.
 
 **Out of scope (deferred, not a blocker):** Outbound IMAP
 operations (`APPEND`, `COPY`) are not in scope for Phase 2.1

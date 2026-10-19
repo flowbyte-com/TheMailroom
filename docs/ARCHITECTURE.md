@@ -98,8 +98,10 @@ the same backend through the MCP tool layer.
 ### 2.4 IMAP and SMTP (`internal/imapclient`, `internal/smtpclient`)
 
 **Status (this slice):** `internal/imapclient` ships the read-only
-IMAP4rev1 backend. It uses `github.com/emersion/go-imap` v1
-(v1.2.1) and supports:
+IMAP4rev1 backend. It uses a narrow fork of
+`github.com/emersion/go-imap` v1.2.1 —
+`github.com/flowbyte-com/go-imap` at module version
+`v1.2.1-themailroom.1` — and supports:
 
 - Implicit TLS on 993 and STARTTLS on 143.
 - `LIST *` for mailboxes, with sorted output.
@@ -113,6 +115,16 @@ IMAP4rev1 backend. It uses `github.com/emersion/go-imap` v1
   in `list_messages` / `search_messages` results and is mandatory
   on `read_message`. A stale or zero UIDVALIDITY is rejected before
   any body is read.
+- **Protocol-level IMAP literal-size enforcement.** The backend
+  sets the fork's `client.DialOptions.MaxLiteralSize` to the
+  per-account `max_message_bytes`. The fork's `ReadLiteral`
+  rejects an over-cap announcement *before* it allocates the
+  literal buffer, so a server cannot cause an unbounded
+  allocation by announcing a huge literal. The cap is applied to
+  the decrypted stream, so it behaves identically under
+  implicit TLS and STARTTLS. See `docs/PHASE2_DESIGN.md` §8 and
+  §10 for the analysis, the fork's change set, and the route
+  back to upstream.
 - Single shared connection per account under a mutex.
 - Automatic reconnect on connection drop or server error; a
   reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating
@@ -214,7 +226,7 @@ CA) or a `SSL_CERT_FILE` override at the host level.
 |----------------------|-------------------------------------------------|-----------------------------------------------------------------|
 | MCP transport        | `github.com/modelcontextprotocol/go-sdk`       | Official Go SDK; stdio transport; schema-validated tools.       |
 | YAML config          | `gopkg.in/yaml.v3`                              | Mature, widely used; supports strict unknown-key rejection.    |
-| IMAP (Phase 2)       | `github.com/emersion/go-imap` (v1)              | De facto standard; protocol-correct; stable API.               |
+| IMAP (Phase 2)       | `github.com/flowbyte-com/go-imap` (fork of `github.com/emersion/go-imap` v1.2.1) | De facto standard; protocol-correct; stable API. The fork adds protocol-level IMAP literal-size enforcement; see `docs/PHASE2_DESIGN.md` §8/§10. |
 | SMTP (Phase 2)       | `github.com/emersion/go-smtp`                  | Pair with go-imap; covers submission, STARTTLS, AUTH.           |
 | MIME (Phase 2)       | `github.com/emersion/go-message`                | Parser + composer; charset-aware; handles RFC 2047.             |
 | Logging              | `log/slog` (stdlib)                             | Go 1.21+; structured logging; no extra dep.                    |

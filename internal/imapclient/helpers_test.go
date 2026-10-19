@@ -2,9 +2,10 @@ package imapclient
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
-	"github.com/emersion/go-imap"
+	"github.com/flowbyte-com/go-imap"
 
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
 	"github.com/flowbyte-com/themailroom/internal/mimeparse"
@@ -58,10 +59,26 @@ func TestMapErrLiteralSizeEvidence(t *testing.T) {
 		// The only string go-imap produces from its own
 		// MaxLiteralSize check. This is the concrete
 		// evidence of an oversized literal.
-		got := mapErr(errors.New("imap: literal exceeding maximum size"))
-		if !errors.Is(got, mailbox.ErrMessageTooLarge) {
-			t.Errorf("mapErr = %v, want ErrMessageTooLarge", got)
-		}
+		//
+		// The go-imap fork returns the typed
+		// imap.ErrLiteralSizeExceeded. The executor wraps
+		// it in a typed connection-closed error, so
+		// errors.Is finds it through the Unwrap chain.
+		// We test both the bare sentinel and the wrapped
+		// form, because both shapes reach mapErr.
+		t.Run("bare sentinel", func(t *testing.T) {
+			got := mapErr(imap.ErrLiteralSizeExceeded)
+			if !errors.Is(got, mailbox.ErrMessageTooLarge) {
+				t.Errorf("mapErr = %v, want ErrMessageTooLarge", got)
+			}
+		})
+		t.Run("wrapped sentinel", func(t *testing.T) {
+			wrapped := fmt.Errorf("imap: connection closed: %w", imap.ErrLiteralSizeExceeded)
+			got := mapErr(wrapped)
+			if !errors.Is(got, mailbox.ErrMessageTooLarge) {
+				t.Errorf("mapErr = %v, want ErrMessageTooLarge", got)
+			}
+		})
 	})
 
 	t.Run("generic parse errors do not map to ErrMessageTooLarge", func(t *testing.T) {
@@ -75,6 +92,10 @@ func TestMapErrLiteralSizeEvidence(t *testing.T) {
 			errors.New("imap: expected a space"),
 			errors.New("imap/client: error reading response: expected a space"),
 			errors.New("some other error"),
+			// A connection-closed error whose cause is NOT a
+			// literal-size violation must not be misreported
+			// as a size signal.
+			errors.New("imap: connection closed: EOF"),
 		}
 		for _, in := range cases {
 			got := mapErr(in)

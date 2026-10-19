@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emersion/go-imap"
+	"github.com/flowbyte-com/go-imap"
 
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
 	"github.com/flowbyte-com/themailroom/internal/mimeparse"
@@ -216,22 +216,21 @@ func mapErr(err error) error {
 	if errors.Is(err, mimeparse.ErrMalformed) {
 		return mailbox.ErrMalformed
 	}
-	// The IMAP literal-size evidence is concrete. The only
-	// string go-imap produces for an over-cap literal is
-	// "literal exceeding maximum size" from its own
-	// MaxLiteralSize check (which is not currently set on
-	// the client; see the package doc for the security
-	// limitation). We translate that single, specific
-	// string to ErrMessageTooLarge. Generic parse errors
-	// such as "expected a space" or "error reading response"
-	// are NOT evidence of an oversized literal; they are
-	// surfaced as ErrMalformed so a tool-layer caller can
+	// The IMAP literal-size evidence is concrete and typed.
+	// The go-imap fork (github.com/flowbyte-com/go-imap)
+	// returns imap.ErrLiteralSizeExceeded when the announced
+	// literal size exceeds the protocol-level cap. The
+	// executor wraps it in a typed connection-closed error,
+	// so errors.Is finds it through the Unwrap chain. We
+	// translate that to ErrMessageTooLarge. Generic parse
+	// errors are NOT evidence of an oversized literal; they
+	// are surfaced as ErrMalformed so a tool-layer caller can
 	// distinguish a real protocol error from a size-cap
 	// control that succeeded.
-	msg := err.Error()
-	if strings.Contains(msg, "literal exceeding maximum size") {
+	if errors.Is(err, imap.ErrLiteralSizeExceeded) {
 		return mailbox.ErrMessageTooLarge
 	}
+	msg := err.Error()
 	if imap.IsParseError(err) {
 		return mailbox.ErrMalformed
 	}
