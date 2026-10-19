@@ -15,9 +15,9 @@
 // submission, destructive mailbox operations and outbound
 // attachments are deliberately not implemented here.
 //
-// # IMAP literal memory allocation: KNOWN UNBOUNDED RISK
+// # IMAP literal memory allocation: ENFORCED AT THE PROTOCOL LAYER
 //
-// The go-imap v1.2.1 client allocates a buffer of the
+// The upstream go-imap v1.2.1 client allocates a buffer of the
 // announced literal size and reads the literal body into it
 // before the application sees the data
 // (read.go::ReadLiteral:
@@ -25,54 +25,65 @@
 //	b := make([]byte, n)
 //	if _, err := io.ReadFull(r, b); err != nil { ... }
 //
-// The application-level cap enforced by
-// io.LimitReader + length check on the literal body is
-// applied AFTER this allocation. It is an application-side
-// backstop, not a pre-allocation guard.
+// An application-level cap (io.LimitReader + length check) is
+// therefore only an application-side backstop: it runs AFTER
+// the protocol layer has allocated the buffer, so it does not
+// bound the allocation.
 //
-// Consequence: a server (including a malicious or buggy one)
-// that announces a literal larger than MaxMessageBytes causes
-// the go-imap client to allocate up to the announced size
-// before the application rejects the body. The default
-// MaxMessageBytes of 25 MiB does NOT bound this allocation
-// because the buffer is allocated by the go-imap library
-// before our code sees the bytes.
+// This backend uses a narrow fork of go-imap
+// (github.com/flowbyte-com/go-imap, module version
+// v1.2.1-themailroom.4) that adds:
 //
-// The go-imap library's Reader.MaxLiteralSize field would
-// refuse the literal before allocation if it could be set.
-// The field exists on the embedded *imap.Reader inside
-// *client.Client, but Client does not expose a setter for
-// it; accessing it requires reflection through an unexported
-// field or a forked go-imap. We evaluated both approaches
-// and concluded that neither is safe to ship without
-// upstream changes:
+//   - client.DialOptions.MaxLiteralSize, which the backend sets
+//     to the per-account MaxMessageBytes. The fork's
+//     ReadLiteral checks the announced size against this cap
+//     BEFORE the make([]byte, n) call, so an over-cap
+//     announcement is rejected without allocating a buffer
+//     proportional to the announced size.
+//   - imap.ErrLiteralSizeExceeded, an exported sentinel so the
+//     violation can be distinguished from an unrelated parse
+//     failure.
+//   - A reader-side fix that closes the connection when a
+//     parse error desynchronises the response stream, and a
+//     typed connection-closed error that preserves the
+//     underlying cause.
+//   - A constructor that applies the cap to the IMAP reader
+//     at creation time, before the server greeting is parsed
+//     and before the background reader goroutine starts. The
+//     cap is therefore in effect for the very first byte
+//     read from the connection, with no pre-configuration
+//     window and no data race between the constructor and
+//     the reader goroutine.
 //
-//   - go-imap Reader.MaxLiteralSize via reflection: when the
-//     cap is hit, the resulting parse error is silently
-//     swallowed by Message.Parse (message.go:269: the literal
-//     type assertion drops the error). The executor returns
-//     success with the message body missing, and the
-//     connection is left in a broken state. Reproduced in
-//     testing; documented in the abandoned experimental
-//     filter in commit bcc3cdc.
-//   - A line-aware net.Conn filter: prototyped and unit-tested
-//     in commit bcc3cdc; removed in the merge-prep cleanup
-//     because it produced false positives on the TLS
-//     handshake. The line-state parser that avoids these
-//     false positives is a substantial engineering effort
-//     and is tracked as a pre-production security requirement
-//     (see PHASE2_DESIGN.md §10).
+// The cap is set on the IMAP *Reader*, not on the transport, so
+// it applies identically to the implicit-TLS and STARTTLS
+// paths: in both cases the Reader observes the decrypted IMAP
+// byte stream.
 //
-// Therefore, in Phase 2.1, oversized IMAP literals can cause
-// unbounded allocation before the application-level cap
-// rejects them. This is documented as a known security
-// limitation. Callers who fetch messages from untrusted
-// IMAP servers MUST mitigate this at the network layer
-// (firewall / proxy with a body-size filter) until the
-// protocol-level cap is implemented in Phase 2.2.
+// The application-level cap is retained as a defence in depth
+// and as the check that guarantees a literal is never silently
+// truncated.
 //
 // See docs/THREAT_MODEL.md T4 and docs/PHASE2_DESIGN.md §8/§10
-// for the full threat analysis and tracked work.
+// for the full threat analysis, the fork's change set, and the
+// route back to upstream.
+//
+// # Remaining limitations
+//
+// Fixing the literal-allocation vulnerability does NOT make the
+// application production-hardened. Other work remains, tracked in
+// docs/PHASE2.2.md:
+//
+//   - The IMAP search correctness defects (docs/PHASE2_DESIGN.md
+//     §7): Flagged and Unseen are not honoured by the IMAP
+//     backend, and Subject+From+To are OR'd by the IMAP TEXT
+//     keyword.
+//   - There is no attachment retrieval tool.
+//   - The fork is a temporary measure; it must be upstreamed or
+//     replaced.
+//
+// See docs/PHASE2_DESIGN.md §8/§10 for the full threat analysis
+// and tracked work.
 package imapclient
 
 import (
@@ -82,6 +93,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os/exec"
 	"strconv"
@@ -89,8 +101,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
+	"github.com/flowbyte-com/go-imap"
+	"github.com/flowbyte-com/go-imap/client"
 
 	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
@@ -116,6 +128,10 @@ type Backend struct {
 	// default with ServerName set and MinVersion TLS 1.2.
 	tlsConfig *tls.Config
 
+	// commandTimeout caps the time an IMAP command may take.
+	// Zero means the go-imap client default (no timeout).
+	commandTimeout time.Duration
+
 	// selectedValidity is the UIDVALIDITY of the most recent
 	// SELECT/EXAMINE call. It is captured and surfaced on every
 	// read so callers can compare against their own cached value.
@@ -137,6 +153,12 @@ type Options struct {
 	// this nil; tests use it to inject InsecureSkipVerify against a
 	// self-signed certificate.
 	TLSConfig *tls.Config
+
+	// CommandTimeout caps the time an IMAP command may take. Zero
+	// means the client default (no timeout). A bounded timeout
+	// prevents a misbehaving server from blocking the server
+	// process forever.
+	CommandTimeout time.Duration
 }
 
 // New returns a Backend that has not yet connected. The first
@@ -153,11 +175,12 @@ func New(cfg config.AccountConfig, opts Options) (*Backend, error) {
 	// construction time.
 	norm := cfg.WithDefaults()
 	return &Backend{
-		cfg:         norm,
-		email:       norm.Email,
-		limits:      norm.Limits,
-		dialTimeout: dialTimeout,
-		tlsConfig:   opts.TLSConfig,
+		cfg:            norm,
+		email:          norm.Email,
+		limits:         norm.Limits,
+		dialTimeout:    dialTimeout,
+		tlsConfig:      opts.TLSConfig,
+		commandTimeout: opts.CommandTimeout,
 	}, nil
 }
 
@@ -401,14 +424,16 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 		// larger than the cap and we return ErrMessageTooLarge.
 		// A literal of exactly cap bytes is valid.
 		//
-		// SECURITY NOTE: this cap is an application-level
-		// backstop, not a pre-allocation guard. The
-		// underlying go-imap client (v1.2.1) allocates a
-		// buffer of the announced literal size and reads the
-		// body into it *before* this code runs. The default
-		// 25 MiB cap does not bound that allocation. See the
-		// package doc and PHASE2_DESIGN.md §8/§10 for the
-		// tracked pre-production security requirement.
+		// The literal was already read (and bounded) by the
+		// go-imap reader's MaxLiteralSize cap, which the
+		// backend sets to MaxMessageBytes at dial time. The
+		// check below is a defence in depth: it guarantees
+		// that a literal is never silently truncated, even if
+		// the protocol-level cap were bypassed.
+		//
+		// See the package doc for the pre-allocation
+		// guarantee and PHASE2_DESIGN.md §8/§10 for the full
+		// threat analysis.
 		cap := int64(b.limits.MaxMessageBytes)
 		limited := io.LimitReader(literal, cap+1)
 		rawBytes, rerr := io.ReadAll(limited)
@@ -671,6 +696,23 @@ func (b *Backend) dialAndLogin() (*client.Client, error) {
 		return nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
 	}
 	var conn net.Conn = raw
+	// opts carries the protocol-level IMAP literal-size cap. It
+	// is applied at the *imap.Reader level, i.e. before the
+	// reader allocates a buffer for an announced literal. This
+	// is the pre-allocation control required by
+	// docs/PHASE2_DESIGN.md §10.
+	//
+	// The cap is set on the Reader, not on the transport, so it
+	// applies identically to the implicit-TLS and STARTTLS
+	// paths: in both cases the Reader sees the *decrypted*
+	// IMAP byte stream.
+	opts := client.DialOptions{}
+	if b.limits.MaxMessageBytes > 0 {
+		if b.limits.MaxMessageBytes > math.MaxUint32 {
+			return nil, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
+		}
+		opts.MaxLiteralSize = client.MaxLiteralSize(b.limits.MaxMessageBytes)
+	}
 	switch {
 	case b.cfg.IMAP.TLS:
 		tlsConn := tls.Client(conn, tlsCfg)
@@ -680,10 +722,13 @@ func (b *Backend) dialAndLogin() (*client.Client, error) {
 		}
 		conn = tlsConn
 	case b.cfg.IMAP.StartTLS:
-		c, err := client.New(conn)
+		c, err := client.NewWithOptions(conn, opts)
 		if err != nil {
 			_ = raw.Close()
 			return nil, err
+		}
+		if b.commandTimeout > 0 {
+			c.Timeout = b.commandTimeout
 		}
 		if err := c.StartTLS(tlsCfg); err != nil {
 			_ = c.Close()
@@ -703,10 +748,13 @@ func (b *Backend) dialAndLogin() (*client.Client, error) {
 		_ = raw.Close()
 		return nil, errors.New("imap: tls or starttls must be enabled")
 	}
-	c, err := client.New(conn)
+	c, err := client.NewWithOptions(conn, opts)
 	if err != nil {
 		_ = raw.Close()
 		return nil, err
+	}
+	if b.commandTimeout > 0 {
+		c.Timeout = b.commandTimeout
 	}
 	pw, err := resolvePassword(b.cfg.IMAP)
 	if err != nil {

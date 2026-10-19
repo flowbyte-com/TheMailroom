@@ -16,8 +16,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	memserver "github.com/emersion/go-imap/backend/memory"
-	imapsrv "github.com/emersion/go-imap/server"
+	memserver "github.com/flowbyte-com/go-imap/backend/memory"
+	imapsrv "github.com/flowbyte-com/go-imap/server"
 
 	"github.com/flowbyte-com/themailroom/internal/accounts"
 	"github.com/flowbyte-com/themailroom/internal/config"
