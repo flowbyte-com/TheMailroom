@@ -216,22 +216,24 @@ func mapErr(err error) error {
 	if errors.Is(err, mimeparse.ErrMalformed) {
 		return mailbox.ErrMalformed
 	}
-	// The IMAP literal cap (MaxLiteralSize) raises a parse
-	// error before the literal is allocated. When the cap
-	// is hit, the client may surface either a parse error
-	// whose message contains "exceeding maximum size" or
-	// (if the response stream is desynchronised) a generic
-	// parse error like "expected a space". We detect both
-	// shapes and translate to ErrMessageTooLarge.
+	// The IMAP literal-size evidence is concrete. The only
+	// string go-imap produces for an over-cap literal is
+	// "literal exceeding maximum size" from its own
+	// MaxLiteralSize check (which is not currently set on
+	// the client; see the package doc for the security
+	// limitation). We translate that single, specific
+	// string to ErrMessageTooLarge. Generic parse errors
+	// such as "expected a space" or "error reading response"
+	// are NOT evidence of an oversized literal; they are
+	// surfaced as ErrMalformed so a tool-layer caller can
+	// distinguish a real protocol error from a size-cap
+	// control that succeeded.
 	msg := err.Error()
-	if imap.IsParseError(err) ||
-		strings.Contains(msg, "exceeding maximum size") ||
-		strings.Contains(msg, "expected a space") ||
-		strings.Contains(msg, "error reading response") {
-		// The literal cap is a hard memory-safety control. The
-		// failure to read a literal at all is treated the same
-		// as a literal that exceeds the configured size.
+	if strings.Contains(msg, "literal exceeding maximum size") {
 		return mailbox.ErrMessageTooLarge
+	}
+	if imap.IsParseError(err) {
+		return mailbox.ErrMalformed
 	}
 	switch {
 	case strings.HasPrefix(msg, "imap: connection closed"):

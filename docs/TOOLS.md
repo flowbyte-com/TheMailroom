@@ -218,6 +218,26 @@ tool (Phase 2) returns the bytes through a confined stream.
   re-`EXAMINE`s and re-validates UIDVALIDITY before acting. A
   mutating operation is never silently retried.
 
+**IMAP literal memory: known UNBOUNDED risk (pre-Phase-2.2).**
+
+The `max_message_bytes` cap on the IMAP body is an
+application-level backstop, **not** a pre-allocation guard.
+The underlying IMAP client (go-imap v1.2.1) allocates a
+buffer of the server-announced literal size and reads the
+literal body into it *before* the application sees the
+data. A server (including a hostile or buggy one) that
+announces a literal larger than `max_message_bytes` will
+cause that allocation *before* the application rejects the
+body. The default 25 MiB cap does not bound this
+allocation.
+
+Production deployments that fetch from untrusted IMAP
+servers must mitigate this at the network layer
+(firewall, reverse proxy with a body-size filter) until
+the protocol-level cap is implemented in Phase 2.2. The
+tracked security requirement with acceptance criteria is
+in `docs/PHASE2_DESIGN.md` §10.
+
 **MIME safety limits** (per account):
 
 - `max_message_bytes` — caps the raw RFC 5322 size (default 25 MiB).
