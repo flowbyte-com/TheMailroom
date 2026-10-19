@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/emersion/go-message v0.18.2
-	github.com/flowbyte-com/go-imap v1.2.1-themailroom.3
+	github.com/flowbyte-com/go-imap v1.2.1-themailroom.4
 	github.com/modelcontextprotocol/go-sdk v1.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )

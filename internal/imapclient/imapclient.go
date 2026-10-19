@@ -32,7 +32,7 @@
 //
 // This backend uses a narrow fork of go-imap
 // (github.com/flowbyte-com/go-imap, module version
-// v1.2.1-themailroom.3) that adds:
+// v1.2.1-themailroom.4) that adds:
 //
 //   - client.DialOptions.MaxLiteralSize, which the backend sets
 //     to the per-account MaxMessageBytes. The fork's
@@ -47,6 +47,13 @@
 //     parse error desynchronises the response stream, and a
 //     typed connection-closed error that preserves the
 //     underlying cause.
+//   - A constructor that applies the cap to the IMAP reader
+//     at creation time, before the server greeting is parsed
+//     and before the background reader goroutine starts. The
+//     cap is therefore in effect for the very first byte
+//     read from the connection, with no pre-configuration
+//     window and no data race between the constructor and
+//     the reader goroutine.
 //
 // The cap is set on the IMAP *Reader*, not on the transport, so
 // it applies identically to the implicit-TLS and STARTTLS

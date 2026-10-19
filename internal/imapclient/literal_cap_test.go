@@ -374,6 +374,87 @@ func TestForkEnforcesCapBeforeAllocation(t *testing.T) {
 	}
 }
 
+// TestForkAppliesCapBeforeReaderStarts is the source-level
+// guard against the constructor-ordering defect found in the PR #5
+// review.
+//
+// The defect: the fork's NewWithOptions called New(conn) and then
+// assigned c.conn.Reader.MaxLiteralSize. New(conn) already
+// constructs the reader, parses the server greeting and starts the
+// background reader goroutine, so the assignment happened after
+// the reader goroutine was live. That was a data race with the
+// goroutine's read of Reader.MaxLiteralSize, and it left a
+// pre-configuration window in which the live reader could accept
+// an over-cap literal with no cap at all.
+//
+// The fix applies the cap to the *imap.Reader at construction
+// time, before the greeting is parsed and before the reader
+// goroutine starts.
+//
+// This test asserts that ordering structurally, so a future
+// upstream or fork change that reintroduces the post-start
+// assignment is caught without needing to reproduce a race.
+func TestForkAppliesCapBeforeReaderStarts(t *testing.T) {
+	src, err := forkClientGoSource(t)
+	if err != nil {
+		t.Fatalf("locating the fork's client/client.go: %v", err)
+	}
+
+	// The cap must be assigned to the reader.
+	assignIdx := strings.Index(src, "r.MaxLiteralSize = uint32(opts.MaxLiteralSize)")
+	if assignIdx < 0 {
+		t.Fatal("fork client/client.go does not assign the cap to the reader; the constructor shape changed")
+	}
+
+	// The greeting is parsed (and the reader goroutine started)
+	// by handleGreetAndStartReading.
+	greetIdx := strings.Index(src, "c.handleGreetAndStartReading()")
+	if greetIdx < 0 {
+		t.Fatal("fork client/client.go does not call handleGreetAndStartReading; the constructor shape changed")
+	}
+	if assignIdx > greetIdx {
+		t.Errorf("the cap assignment (offset %d) appears AFTER handleGreetAndStartReading (offset %d); "+
+			"the cap must be applied before the greeting is parsed and before the reader goroutine starts",
+			assignIdx, greetIdx)
+	}
+
+	// The reader must not be mutated after the constructor
+	// returns. Any assignment to c.conn.Reader.MaxLiteralSize
+	// would be a post-start mutation and a data race.
+	if strings.Contains(src, "c.conn.Reader.MaxLiteralSize") {
+		t.Error("fork client/client.go mutates c.conn.Reader.MaxLiteralSize; " +
+			"the cap must be set on the reader at construction time, never after the reader goroutine starts")
+	}
+}
+
+// forkClientGoSource locates the fork's client/client.go in the
+// module cache.
+func forkClientGoSource(t *testing.T) (string, error) {
+	t.Helper()
+	modCache := os.Getenv("GOMODCACHE")
+	if modCache == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		modCache = filepath.Join(home, "go", "pkg", "mod")
+	}
+	pattern := filepath.Join(modCache, "github.com", "flowbyte-com", "go-imap@*", "client", "client.go")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no fork client/client.go found under %s", pattern)
+	}
+	for _, m := range matches {
+		if strings.Contains(m, "v1.2.1-themailroom.4") {
+			return readFile(m)
+		}
+	}
+	return readFile(matches[0])
+}
+
 // forkReadGoSource locates the fork's read.go in the module
 // cache.
 func forkReadGoSource(t *testing.T) (string, error) {
@@ -396,7 +477,7 @@ func forkReadGoSource(t *testing.T) (string, error) {
 	}
 	// Prefer the version we depend on.
 	for _, m := range matches {
-		if strings.Contains(m, "v1.2.1-themailroom.3") {
+		if strings.Contains(m, "v1.2.1-themailroom.4") {
 			return readFile(m)
 		}
 	}
@@ -529,6 +610,59 @@ func TestOversizedLiteralUnderImplicitTLS(t *testing.T) {
 	_, err = be.FetchMessage(context.Background(), "test", "INBOX", uid, uv)
 	if !errors.Is(err, mailbox.ErrMessageTooLarge) {
 		t.Errorf("err = %v, want ErrMessageTooLarge", err)
+	}
+}
+
+// TestOversizedUnsolicitedLiteralRejected is the
+// constructor-window regression at the TheMailroom level.
+//
+// The server sends the greeting and an unsolicited FETCH response
+// with an over-cap literal header in a single write, and never
+// sends the body. The over-cap literal must be rejected during
+// the initial connection setup — before the cap would have been
+// applied by the old post-construction assignment — and the
+// connection must be terminated.
+//
+// The test server never sends the oversized body, so a client
+// that tried to allocate it would block until the command
+// timeout rather than failing fast.
+func TestOversizedUnsolicitedLiteralRejected(t *testing.T) {
+	const cap = 4096
+	// Announce 64 MiB. It is never sent.
+	const announced = 64 * 1024 * 1024
+
+	srv := &rawIMAPServer{bodySize: announced, tlsConfig: &tls.Config{
+		Certificates: []tls.Certificate{genCert(t)},
+		MinVersion:   tls.VersionTLS12,
+	}}
+	addr, cleanup := srv.start(t)
+	defer cleanup()
+
+	be := backendForRawServer(t, addr, cap, false)
+	defer be.Close()
+
+	// The first operation triggers the connection. The
+	// unsolicited over-cap literal arrives with the greeting,
+	// so the failure must surface on this call (or on the
+	// connection setup) rather than being silently accepted.
+	_, err := be.FetchMessage(context.Background(), "test", "INBOX", 1, 1)
+	if err == nil {
+		t.Fatal("FetchMessage returned nil error; the over-cap unsolicited literal must be rejected")
+	}
+	if !errors.Is(err, mailbox.ErrMessageTooLarge) &&
+		!strings.Contains(err.Error(), "connection closed") &&
+		!strings.Contains(err.Error(), "literal exceeding maximum size") {
+		t.Errorf("err = %v; want a literal-size violation or a connection failure", err)
+	}
+
+	// The connection must have been discarded: the server
+	// never sends a body, so a client that kept the
+	// connection would still be waiting.
+	be.mu.Lock()
+	closed := be.client == nil
+	be.mu.Unlock()
+	if !closed {
+		t.Error("the connection was not discarded after the over-cap unsolicited literal")
 	}
 }
 

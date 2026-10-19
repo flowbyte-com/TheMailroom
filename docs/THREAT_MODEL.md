@@ -93,7 +93,7 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   the **IMAP protocol layer**, before the literal buffer is
   allocated. The go-imap fork
   (`github.com/flowbyte-com/go-imap`, module version
-  `v1.2.1-themailroom.3`) adds a
+  `v1.2.1-themailroom.4`) adds a
   `client.DialOptions.MaxLiteralSize` option; TheMailroom
   sets it to `max_message_bytes` at dial time. The fork's
   `ReadLiteral` checks the announced literal size against
@@ -103,6 +103,19 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   on the transport, so it applies identically to the
   implicit-TLS and STARTTLS paths (the Reader sees the
   decrypted stream in both cases).
+- **(implemented, no pre-configuration window)** The cap is
+  assigned to the `*imap.Reader` **at construction time**,
+  before the server greeting is parsed and before the
+  background reader goroutine starts. An earlier cut of the
+  fork assigned the cap after `New(conn)` returned, which
+  left the reader goroutine live and uncapped for a window
+  (an unbounded-allocation window) and raced with the
+  goroutine's read of the cap. `Reader.MaxLiteralSize` is now
+  written in exactly one place, and only before any
+  goroutine that could read it exists. The structural
+  invariant is asserted by
+  `TestForkAppliesCapBeforeReaderStarts`; the behavioural
+  coverage is in the fork's `client/constructor_test.go`.
 - **(implemented, defence in depth)** The application-level
   cap (`io.LimitReader` + length check on the literal body)
   is retained. It guarantees that a literal is never silently

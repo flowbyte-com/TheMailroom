@@ -296,7 +296,7 @@ bound this allocation.
 TheMailroom now uses a **narrow fork** of go-imap:
 
 - Module: `github.com/flowbyte-com/go-imap`
-- Version: `v1.2.1-themailroom.3`
+- Version: `v1.2.1-themailroom.4`
 - Upstream: `github.com/emersion/go-imap` v1.2.1
 - License: BSD-2-Clause, preserved verbatim
 - Fork changelog: `CHANGES.md` in the fork repository
@@ -335,6 +335,46 @@ implicit-TLS and the STARTTLS path. The cap is set on the IMAP
 both: in both cases the Reader observes the *decrypted* IMAP byte
 stream.
 
+### Constructor ordering (corrected in PR #5 follow-up)
+
+The first cut of the fork set the cap *after* construction:
+
+```go
+func NewWithOptions(conn net.Conn, opts DialOptions) (*Client, error) {
+    c, err := New(conn)          // <- parses the greeting AND
+    ...                          //    starts the reader goroutine
+    c.conn.Reader.MaxLiteralSize = uint32(opts.MaxLiteralSize)  // <- too late
+    return c, nil
+}
+```
+
+`New(conn)` constructs the reader, parses the server greeting
+and starts the background reader goroutine. The assignment
+therefore happened while the reader goroutine was already live,
+which was both:
+
+- **a data race** — the goroutine reads `Reader.MaxLiteralSize`
+  in `ReadLiteral` (read.go) while the caller writes it; and
+- **a pre-configuration allocation window** — during that
+  window the live reader goroutine could accept an over-cap
+  literal with *no cap at all*, i.e. an unbounded allocation of
+  the announced size.
+
+The constructor was refactored so the cap is assigned to the
+`*imap.Reader` **at creation time**, before the reader is
+installed in the `Conn`, before the greeting is parsed, and
+before the reader goroutine exists. `New(conn)` keeps its
+upstream signature and behaviour and is equivalent to
+`NewWithOptions(conn, DialOptions{})`.
+
+`Reader.MaxLiteralSize` is now written in exactly one place (the
+constructor) and only before any goroutine that could read it
+exists. The only other write in the tree is
+`server/conn.go`, which sets the limit on the *server's* reader
+at connection construction — before the server's `send`
+goroutine and before its command loop start. It is likewise not
+a post-start mutation.
+
 ### Evidence that the allocation is prevented
 
 1. **Source-level.** `TestForkEnforcesCapBeforeAllocation` reads
@@ -356,6 +396,17 @@ stream.
    contains the whole RFC 5322 message, so a message whose raw
    size is exactly the cap is a literal exactly at the cap: it
    is accepted; one byte over is rejected.
+5. **Constructor ordering.** `TestForkAppliesCapBeforeReaderStarts`
+   (TheMailroom) asserts structurally that the fork assigns the
+   cap to the reader *before* the greeting is parsed, and never
+   mutates the reader after the constructor returns. The fork's
+   own `client/constructor_test.go` adds the behavioural and
+   race-detector coverage: an over-cap literal in an unsolicited
+   response that arrives with the greeting is rejected, the
+   connection is terminated, and no operation reports a missing
+   body as a success. Against the pre-fix constructor shape those
+   tests report a data race between `Reader.ReadLiteral` and
+   `NewWithOptions`.
 
 ### Remaining risks
 
@@ -496,12 +547,12 @@ runs as a long-lived process handling untrusted mail.
 
 | # | Criterion | Status | Evidence |
 |---|-----------|--------|----------|
-| 1 | Pre-allocation enforcement | Met | `TestForkEnforcesCapBeforeAllocation` (source-level ordering assertion); the fork's `ReadLiteral` checks the size before `make([]byte, n)`. |
+| 1 | Pre-allocation enforcement | Met | `TestForkEnforcesCapBeforeAllocation` (source-level ordering assertion); the fork's `ReadLiteral` checks the size before `make([]byte, n)`. `TestForkAppliesCapBeforeReaderStarts` additionally asserts the cap is assigned to the reader before the greeting is parsed and before the reader goroutine starts, so there is no pre-configuration window. |
 | 2 | Correct boundary (cap accepted, cap+1 rejected) | Met | `TestLiteralSizeCapBoundary` (cap-1 / cap / cap+1 against a real message); fork test `TestReader_MaxLiteralSize_Boundary`. |
 | 3 | Decrypted-transport compatibility (both TLS modes) | Met | The cap is set on the IMAP `Reader`, which observes the decrypted stream in both modes. `TestOversizedLiteralUnderImplicitTLS`, `TestOversizedLiteralUnderSTARTTLS`. |
 | 4 | IMAP framing compatibility | Met | The cap is enforced by the IMAP parser, not by a byte-pattern scan, so it cannot misfire on binary content. `TestBinaryContentWithLiteralHeaderBytes`. |
 | 5 | Binary safety (body is opaque) | Met | The cap inspects only the announced size; the body is never parsed or classified. `TestBinaryContentWithLiteralHeaderBytes`. |
-| 6 | Disconnection safety (conn closed, error typed, not a panic) | Met | The fork closes the conn on a parse error and returns a typed `*connectionClosedError`. `TestLiteralSizeCapEnforcedBeforeAllocation` (server observes the close), `TestNoSilentSuccessOnLiteralFailure`. |
+| 6 | Disconnection safety (conn closed, error typed, not a panic) | Met | The fork closes the conn on a parse error and returns a typed `*connectionClosedError`. `TestLiteralSizeCapEnforcedBeforeAllocation` (server observes the close), `TestNoSilentSuccessOnLiteralFailure`, `TestOversizedUnsolicitedLiteralRejected` (over-cap literal in an unsolicited response that arrives with the greeting). |
 | 7 | Both transport modes | Met | `TestOversizedLiteralUnderImplicitTLS`, `TestOversizedLiteralUnderSTARTTLS`; the STARTTLS path sets the cap before the upgrade and the `*imap.Reader` survives the upgrade. |
 | 8 | No silent success | Met | The application-level `int64(len(rawBytes)) > cap` check is retained and returns `ErrMessageTooLarge`. `TestNoSilentSuccessOnLiteralFailure`. |
 | 9 | No panic disguised as a size limit | Met | The `recover()` in `FetchMessage` returns a generic `fmt.Errorf("imap: fetch panic: %v", r)`, which maps to `codeInternalError`, not `codeMessageTooLarge`. |
@@ -513,8 +564,8 @@ runs as a long-lived process handling untrusted mail.
 
 Option 1 was selected and implemented. The fork is
 `github.com/flowbyte-com/go-imap` at module version
-`v1.2.1-themailroom.3`, pinned to the immutable commit
-`5d0b5c2`. Its full change set is documented in the fork's
+`v1.2.1-themailroom.4`, pinned to the immutable commit
+`0fc6600`. Its full change set is documented in the fork's
 `CHANGES.md`.
 
 Why option 1 over option 2 (the `net.Conn` filter):
@@ -542,7 +593,7 @@ fork cannot be upstreamed.
 ### Dependency management
 
 - The dependency is pinned to an immutable tag
-  (`v1.2.1-themailroom.3`) in `go.mod`. No `replace` directive
+  (`v1.2.1-themailroom.4`) in `go.mod`. No `replace` directive
   is used, so the build is reproducible from the public
   module proxy.
 - `go mod verify` verifies the module contents against
