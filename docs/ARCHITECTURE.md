@@ -41,6 +41,7 @@ The module is split into focused internal packages. Each layer depends only on t
 |  internal/accounts        (Account registry, conns.)    |
 |  internal/permissions     (caps, enforcement)           |
 |  internal/config          (load + validate config)      |
+|  internal/searchspec      (shared search semantics)     |
 +---------------------------------------------------------+
 |  internal/version         (build metadata)              |
 +---------------------------------------------------------+
@@ -162,6 +163,36 @@ The single most security-sensitive path for outbound email. Uses Go 1.24+ `os.Ro
 - Path canonicalisation prevents `..` escape.
 - Files larger than the configured limit are rejected.
 - Per-account `attachment_send_paths` allow-list is enforced regardless of agent input.
+
+### 2.6a Search semantics (`internal/searchspec`)
+
+The IMAP backend delegates matching to the IMAP server; the
+in-memory backend matches locally. For the public API contract
+to mean anything, the two must agree. `internal/searchspec`
+holds the parts that must be identical:
+
+- **Date granularity.** An IMAP SEARCH date key carries a date
+  with no time component, so date matching is at day
+  granularity. `TruncateDate` reduces a timestamp to the UTC day
+  boundary, which is exactly what the reference server does
+  when it truncates the message's `Date:` header before
+  comparing. Both backends apply it, so they agree.
+- **Flag predicates.** `MatchesUnseen` and `MatchesFlagged`
+  implement the IMAP definitions: unseen means the absence of
+  `\Seen`, flagged means the presence of `\Flagged`.
+- **Flag derivation for the in-memory backend.** RFC 2156
+  `Status:` header translation, so an in-memory message can
+  answer the flag filters.
+
+The header criteria are ANDed. The IMAP backend computes the
+conjunction in the client (one SEARCH per header criterion and
+an intersection of the UID sets) because the IMAP `TEXT` key
+ORs its terms and matches the body as well as the headers.
+The in-memory backend ANDs them natively.
+
+`internal/imapclient/search_consistency_test.go` runs the same
+query set against both backends over identical fixture
+messages and requires identical results.
 
 ### 2.7 Accounts (`internal/accounts`)
 

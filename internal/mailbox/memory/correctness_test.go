@@ -166,41 +166,88 @@ func TestAttachmentSizeCap(t *testing.T) {
 	}
 }
 
-// TestPreExistingSearchFlagGap documents the known
-// limitation: q.Flagged and q.Unseen are accepted by the
-// SearchQuery type but the in-memory searchMatches function
-// does not honour them. Unseen always returns no matches
-// (memory messages are all \\Seen), and Flagged is silently
-// ignored. A future change should set q.Flagged to filter on
-// the \\Flagged flag in the MessageSummary. This test will
-// start failing when the gap is fixed; the fix author should
-// update the test to assert the new behaviour.
-func TestPreExistingSearchFlagGap(t *testing.T) {
+// TestSearchFlagFilters verifies that the Flagged and Unseen
+// filters are honoured by the memory backend.
+//
+// The flags come from the RFC 2156 Status: header of the .eml
+// file: "R" means \Seen, "F" means \Flagged, and so on. A
+// message with no Status: header carries no flags, which means
+// it is unseen and not flagged.
+//
+// This replaces the earlier TestPreExistingSearchFlagGap,
+// which documented that the filters were silently ignored.
+func TestSearchFlagFilters(t *testing.T) {
 	b := newBackend(t)
-	// q.Unseen: with the current semantics, every Unseen
-	// query returns no matches.
-	res, err := b.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
+
+	// The welcome.eml fixture has no Status: header, so it
+	// carries no flags: it is unseen and not flagged.
+	unseen, err := b.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
 		Subject: "Welcome",
 		Unseen:  true,
 	})
 	if err != nil {
 		t.Fatalf("SearchMessages: %v", err)
 	}
-	if len(res.Messages) != 0 {
-		t.Errorf("Unseen filter should match no memory messages; got %d", len(res.Messages))
+	if len(unseen.Messages) != 1 {
+		t.Errorf("Unseen filter matched %d messages, want 1 (the fixture has no \\Seen flag)", len(unseen.Messages))
 	}
-	// q.Flagged is currently ignored; the unfiltered count
-	// for the same subject should be 1.
-	res2, err := b.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
+
+	// The same message must not match the Flagged filter.
+	flagged, err := b.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
 		Subject: "Welcome",
 		Flagged: true,
 	})
 	if err != nil {
 		t.Fatalf("SearchMessages: %v", err)
 	}
-	if len(res2.Messages) != 1 {
-		t.Errorf("Flagged filter is currently a no-op; expected 1 result, got %d", len(res2.Messages))
+	if len(flagged.Messages) != 0 {
+		t.Errorf("Flagged filter matched %d messages, want 0 (the fixture has no \\Flagged flag)", len(flagged.Messages))
 	}
+
+	// A message that is both seen and flagged must match
+	// neither the Unseen nor the Flagged filter.
+	b2 := backendWithStatus(t, "RF")
+	seen, err := b2.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
+		Unseen: true,
+	})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(seen.Messages) != 0 {
+		t.Errorf("Unseen filter matched %d messages, want 0 (the fixture is \\Seen)", len(seen.Messages))
+	}
+	fl, err := b2.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
+		Flagged: true,
+	})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(fl.Messages) != 1 {
+		t.Errorf("Flagged filter matched %d messages, want 1", len(fl.Messages))
+	}
+}
+
+// backendWithStatus builds a memory backend whose only message
+// carries the given RFC 2156 Status: header value.
+func backendWithStatus(t *testing.T, status string) *Backend {
+	t.Helper()
+	dir := t.TempDir()
+	raw := "From: a@example.test\r\n" +
+		"To: b@example.test\r\n" +
+		"Subject: Status fixture\r\n" +
+		"Date: Mon, 15 Jan 2024 10:11:12 +0000\r\n" +
+		"Status: " + status + "\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		"body\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "m.eml"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestMaxAttachmentsLimit is the end-to-end regression for

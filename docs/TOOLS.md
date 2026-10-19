@@ -31,7 +31,7 @@ All tools take `account_id` as a required string field. There is no implicit "cu
 - `BackendError` — IMAP/SMTP operation failed; details are redacted.
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
-- `NotImplemented` — capability exists in the schema but is not yet wired (Phase 1 stubs). Also returned when a search filter (`Flagged` or `Unseen`) is set; the filter is accepted by the schema but not yet implemented in the IMAP / memory backends.
+- `NotImplemented` — capability exists in the schema but is not yet wired.
 - `MessageTooLarge` — the message exceeds `max_message_bytes`.
 - `NestingTooDeep` — the MIME nesting exceeds `max_mime_nesting`.
 - `TooManyParts` — the MIME part count exceeds `max_mime_parts`.
@@ -274,6 +274,30 @@ Searches a mailbox.
 ```
 
 Empty query fields are ignored. The `limit` is clamped per-account.
+
+**Criteria semantics.**
+
+- All populated criteria are **ANDed** together. A message must
+  satisfy every criterion to be returned.
+- `subject`, `from` and `to` are case-insensitive **substring**
+  matches against the corresponding header. `to` matches any
+  recipient in **To or Cc**.
+- `body` is a case-insensitive substring match against the
+  decoded plain-text body.
+- `flagged` requires the `\Flagged` flag; `unseen` requires the
+  **absence** of the `\Seen` flag. A message carrying no flags
+  is unseen and not flagged.
+- `since` and `before` have **day granularity**: the value is
+  truncated to the UTC day before it is applied, because an IMAP
+  SEARCH date key carries a date with no time component. A
+  `since` of `2024-08-15T23:00:00Z` therefore includes messages
+  sent earlier on 2024-08-15. This matches what the IMAP server
+  does and keeps the IMAP and in-memory backends in agreement.
+- An **empty query returns every message** in the mailbox,
+  bounded by the per-account limit.
+
+No requested criterion is silently ignored. If a criterion
+cannot be honoured, the tool returns an explicit error.
 
 **Output.**
 

@@ -172,19 +172,6 @@ func convertAttachments(in []mimeparse.Attachment) []mailbox.Attachment {
 	return out
 }
 
-// compactStrings drops empty entries from a list of strings. Some
-// IMAP servers reject SEARCH with empty criteria, others accept them;
-// the safe path is to send only non-empty values.
-func compactStrings(in []string) []string {
-	out := in[:0]
-	for _, s := range in {
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // mapErr converts a low-level go-imap error into one of the
 // package-level typed errors. Any unrecognised error is returned
 // verbatim so callers can format it; the server is the source of

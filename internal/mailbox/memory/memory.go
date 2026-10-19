@@ -4,6 +4,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
 	"github.com/flowbyte-com/themailroom/internal/mimeparse"
+	"github.com/flowbyte-com/themailroom/internal/searchspec"
 )
 
 // Backend is a Backend implementation that reads messages from a directory.
@@ -186,11 +188,59 @@ func (b *Backend) parse(data []byte) (*mailbox.Message, error) {
 		Text:        decoded.Text,
 		HTML:        decoded.HTML,
 		Attachments: convertAttachments(decoded.Attachments),
+		// Flags come from the RFC 2156 Status: header, the
+		// standard way for a local store to record message
+		// state. A message with no Status: header has no
+		// flags, which means it is unseen and not flagged.
+		// This is what lets the memory backend answer the
+		// Flagged and Unseen search filters the same way the
+		// IMAP backend does.
+		Flags: searchspec.FlagsFromStatusHeader(rawHeader(data, "Status")),
 	}
 	if msg.Headers.Date.IsZero() {
 		msg.Headers.Date = timeNow()
 	}
 	return msg, nil
+}
+
+// rawHeader returns the value of the named header from the raw
+// RFC 5322 bytes, or "" if the header is absent. Only the
+// header block is scanned; the body is never read.
+//
+// It is used for the RFC 2156 Status: header, which the MIME
+// parser does not surface because it is not part of the public
+// message view.
+func rawHeader(data []byte, name string) string {
+	// The header block ends at the first empty line.
+	end := len(data)
+	if i := bytes.Index(data, []byte("\r\n\r\n")); i >= 0 && i < end {
+		end = i
+	} else if i := bytes.Index(data, []byte("\n\n")); i >= 0 && i < end {
+		end = i
+	}
+	block := data[:end]
+	// Unfold continuation lines (a header line starting with
+	// whitespace continues the previous one).
+	lines := strings.Split(string(block), "\n")
+	var unfolded []string
+	for _, ln := range lines {
+		ln = strings.TrimRight(ln, "\r")
+		if len(ln) > 0 && (ln[0] == ' ' || ln[0] == '\t') && len(unfolded) > 0 {
+			unfolded[len(unfolded)-1] += " " + strings.TrimSpace(ln)
+			continue
+		}
+		unfolded = append(unfolded, ln)
+	}
+	for _, ln := range unfolded {
+		k, v, ok := strings.Cut(ln, ":")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(k), name) {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // convertAttachments maps the mimeparse attachment view onto the
@@ -349,6 +399,20 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	return mailbox.ListResult{UIDValidity: 1, Messages: out}, nil
 }
 
+// searchMatches applies the shared search contract to a memory
+// message. The semantics must match the IMAP backend's (see
+// internal/searchspec):
+//
+//   - Subject, From and To are ANDed and are case-insensitive
+//     substring matches. The To filter matches any recipient in
+//     To or Cc.
+//   - Body is a case-insensitive substring match on the decoded
+//     plain-text body.
+//   - Since / Before use day granularity: the value is
+//     truncated to the start of its day, exactly as an IMAP
+//     SEARCH date key is truncated on the wire.
+//   - Flagged requires the \Flagged flag; Unseen requires the
+//     absence of the \Seen flag.
 func searchMatches(m *mailbox.Message, q mailbox.SearchQuery) bool {
 	if q.Subject != "" && !strings.Contains(strings.ToLower(m.Headers.Subject), strings.ToLower(q.Subject)) {
 		return false
@@ -356,30 +420,31 @@ func searchMatches(m *mailbox.Message, q mailbox.SearchQuery) bool {
 	if q.From != "" && !strings.Contains(strings.ToLower(m.Headers.From), strings.ToLower(q.From)) {
 		return false
 	}
-	if q.To != "" && !anyContainsCI(m.Headers.To, q.To) {
+	if q.To != "" && !anyContainsCI(m.Headers.To, q.To) && !anyContainsCI(m.Headers.Cc, q.To) {
 		return false
 	}
 	if q.Body != "" && !strings.Contains(strings.ToLower(m.Text), strings.ToLower(q.Body)) {
 		return false
 	}
-	if q.Since != nil && m.Headers.Date.Before(*q.Since) {
+	if q.Since != nil {
+		// Day granularity, matching the IMAP search date.
+		since := searchspec.TruncateDate(*q.Since)
+		if m.Headers.Date.Before(since) {
+			return false
+		}
+	}
+	if q.Before != nil {
+		before := searchspec.TruncateDate(*q.Before)
+		if !m.Headers.Date.Before(before) {
+			return false
+		}
+	}
+	if !searchspec.MatchesUnseen(m.Flags, q.Unseen) {
 		return false
 	}
-	if q.Before != nil && !m.Headers.Date.Before(*q.Before) {
+	if !searchspec.MatchesFlagged(m.Flags, q.Flagged) {
 		return false
 	}
-	if q.Unseen {
-		// Memory backend semantics: all messages are treated
-		// as \\Seen. An Unseen filter therefore matches
-		// nothing, which is the only safe answer.
-		return false
-	}
-	// q.Flagged is a pre-existing gap: searchMatches does
-	// not consider q.Flagged. The field is accepted but
-	// ignored. The wire schema marks it omitempty so callers
-	// that do not set it see no behaviour change; callers
-	// that do set it get the same result as the unfiltered
-	// query.
 	return true
 }
 
