@@ -296,7 +296,7 @@ bound this allocation.
 TheMailroom now uses a **narrow fork** of go-imap:
 
 - Module: `github.com/flowbyte-com/go-imap`
-- Version: `v1.2.1-themailroom.2`
+- Version: `v1.2.1-themailroom.3`
 - Upstream: `github.com/emersion/go-imap` v1.2.1
 - License: BSD-2-Clause, preserved verbatim
 - Fork changelog: `CHANGES.md` in the fork repository
@@ -513,8 +513,8 @@ runs as a long-lived process handling untrusted mail.
 
 Option 1 was selected and implemented. The fork is
 `github.com/flowbyte-com/go-imap` at module version
-`v1.2.1-themailroom.2`, pinned to the immutable commit
-`134db63`. Its full change set is documented in the fork's
+`v1.2.1-themailroom.3`, pinned to the immutable commit
+`5d0b5c2`. Its full change set is documented in the fork's
 `CHANGES.md`.
 
 Why option 1 over option 2 (the `net.Conn` filter):
@@ -542,7 +542,7 @@ fork cannot be upstreamed.
 ### Dependency management
 
 - The dependency is pinned to an immutable tag
-  (`v1.2.1-themailroom.2`) in `go.mod`. No `replace` directive
+  (`v1.2.1-themailroom.3`) in `go.mod`. No `replace` directive
   is used, so the build is reproducible from the public
   module proxy.
 - `go mod verify` verifies the module contents against

@@ -93,7 +93,7 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   the **IMAP protocol layer**, before the literal buffer is
   allocated. The go-imap fork
   (`github.com/flowbyte-com/go-imap`, module version
-  `v1.2.1-themailroom.2`) adds a
+  `v1.2.1-themailroom.3`) adds a
   `client.DialOptions.MaxLiteralSize` option; TheMailroom
   sets it to `max_message_bytes` at dial time. The fork's
   `ReadLiteral` checks the announced literal size against
