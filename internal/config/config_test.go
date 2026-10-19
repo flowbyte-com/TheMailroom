@@ -416,3 +416,42 @@ accounts:
 		t.Errorf("JSON leaked password: %s", b)
 	}
 }
+
+// TestRedactedIncludesNewLimits is a regression for the Phase 2.1
+// safety limit fields. The redacted form is the only canonical
+// printable view; if any new limit field is added without being
+// included here, a future maintainer may add it to the schema
+// without re-reviewing the redaction path.
+func TestRedactedIncludesNewLimits(t *testing.T) {
+	yaml := `
+accounts:
+  - id: a
+    email: u@example.test
+    imap: {host: x.example.test, username: u, password: topsecret}
+    smtp: {host: x.example.test, username: u, password: topsecret2}
+    limits:
+      max_attachment_bytes: 1024
+      max_total_attachment_bytes: 2048
+      max_mime_nesting: 8
+      max_mime_parts: 200
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	s := cfg.Redacted()
+	for _, want := range []string{
+		"max_attachment_bytes=1024",
+		"max_total_attachment_bytes=2048",
+		"max_mime_nesting=8",
+		"max_mime_parts=200",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("Redacted() missing %q; got: %s", want, s)
+		}
+	}
+	// The credential value must still be elided.
+	if strings.Contains(s, "topsecret") || strings.Contains(s, "topsecret2") {
+		t.Errorf("Redacted() leaked credential: %s", s)
+	}
+}

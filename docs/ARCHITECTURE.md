@@ -104,9 +104,19 @@ IMAP4rev1 backend. It uses `github.com/emersion/go-imap` v1
 - Implicit TLS on 993 and STARTTLS on 143.
 - `LIST *` for mailboxes, with sorted output.
 - `UID SEARCH` and `UID FETCH` for listings and searches.
-- `UID FETCH BODY[]` for full message bodies.
+- `UID FETCH BODY.PEEK[]` for full message bodies (never sets
+  `\Seen`).
+- `EXAMINE` (read-only `SELECT`) for every read; the server-side
+  state cannot accept `STORE` or `APPEND` through a read
+  connection.
+- Live UIDVALIDITY capture on every EXAMINE; the value is returned
+  in `list_messages` / `search_messages` results and is mandatory
+  on `read_message`. A stale or zero UIDVALIDITY is rejected before
+  any body is read.
 - Single shared connection per account under a mutex.
-- Automatic reconnect on connection drop or server error.
+- Automatic reconnect on connection drop or server error; a
+  reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating
+  operations are never silently retried.
 - Refusal to dial without TLS or STARTTLS — plain IMAP is never
   accepted.
 
@@ -114,13 +124,22 @@ SMTP submission and MIME composition are deliberately not in this
 slice. They are documented in `docs/PHASE2_DESIGN.md` and will land in
 subsequent PRs.
 
-### 2.5 MIME (`internal/mailmime`)
+### 2.5 MIME (`internal/mimeparse`)
 
-Wrapping `github.com/emersion/go-message` (parser + composer). This package:
+Wrapping `github.com/emersion/go-message` (parser + composer).
+`internal/mimeparse` is the read-only parser that both backends use
+so memory and IMAP expose the same structured view. The composer
+lands with `send_message` in Phase 2.2. The parser:
 
-- Parses incoming messages into text/html/attachment parts with charset awareness.
-- Composes outgoing messages with multipart/alternative, multipart/mixed, etc.
-- Applies size and attachment-count limits before send.
+- Decodes text/* and html/* bodies, applying the declared
+  Content-Transfer-Encoding and charset (RFC 2047) automatically.
+- Walks multipart/alternative, multipart/mixed, multipart/related
+  and any combination of nested multipart containers.
+- Captures attachment metadata (filename, mime type, size, part
+  path, Content-ID, disposition) without materialising the
+  attachment body in the wire response.
+- Enforces per-message, per-attachment, total-attachment, nesting
+  and part-count limits before allocating large buffers.
 
 ### 2.6 Attachments (`internal/attachments`)
 

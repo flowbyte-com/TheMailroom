@@ -4,23 +4,17 @@
 package memory
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"mime"
-	"mime/multipart"
-	"net/mail"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
+	"github.com/flowbyte-com/themailroom/internal/mimeparse"
 )
 
 // Backend is a Backend implementation that reads messages from a directory.
@@ -28,11 +22,21 @@ type Backend struct {
 	mu     sync.RWMutex
 	root   string
 	loaded map[string][]*mailbox.Message // mailbox -> messages (uid=index+1)
+	limits config.LimitsConfig
 }
 
 // New returns a Backend that loads .eml files from root. The directory is
-// scanned synchronously; pass an already-populated directory.
+// scanned synchronously; pass an already-populated directory. The default
+// limits are applied; use NewWithLimits to override.
 func New(root string) (*Backend, error) {
+	return NewWithLimits(root, config.LimitsConfig{})
+}
+
+// NewWithLimits returns a Backend with explicit limits. Tests use this to
+// trigger size / depth / part-count cap behaviour without rebuilding the
+// configuration pipeline. The limits are applied during the initial load
+// so that messages exceeding the cap are rejected with a parse error.
+func NewWithLimits(root string, limits config.LimitsConfig) (*Backend, error) {
 	info, err := os.Stat(root)
 	if err != nil {
 		return nil, fmt.Errorf("memory: stat %s: %w", root, err)
@@ -43,11 +47,43 @@ func New(root string) (*Backend, error) {
 	b := &Backend{
 		root:   root,
 		loaded: make(map[string][]*mailbox.Message),
+		limits: withDefaults(limits),
 	}
 	if err := b.load(); err != nil {
 		return nil, err
 	}
 	return b, nil
+}
+
+// withDefaults fills in zero-valued limit fields with the same defaults
+// the loader uses. The defaults match the documented package-level
+// constants.
+func withDefaults(l config.LimitsConfig) config.LimitsConfig {
+	if l.MaxMessageBytes == 0 {
+		l.MaxMessageBytes = config.DefaultMaxMessageBytes
+	}
+	if l.MaxAttachmentBytes == 0 {
+		l.MaxAttachmentBytes = config.DefaultMaxAttachmentBytes
+	}
+	if l.MaxTotalAttachmentBytes == 0 {
+		l.MaxTotalAttachmentBytes = config.DefaultMaxTotalAttachmentBytes
+	}
+	if l.MaxAttachments == 0 {
+		l.MaxAttachments = config.DefaultMaxAttachments
+	}
+	if l.MaxMIMENesting == 0 {
+		l.MaxMIMENesting = config.DefaultMaxMIMENesting
+	}
+	if l.MaxMIMEParts == 0 {
+		l.MaxMIMEParts = config.DefaultMaxMIMEParts
+	}
+	if l.MaxSearchResults == 0 {
+		l.MaxSearchResults = config.DefaultMaxSearchResults
+	}
+	if l.MaxBatchOperations == 0 {
+		l.MaxBatchOperations = config.DefaultMaxBatchOperations
+	}
+	return l
 }
 
 // load reads every *.eml file in root (recursively) and indexes it under
@@ -106,7 +142,7 @@ func (b *Backend) load() error {
 		if err != nil {
 			return fmt.Errorf("memory: read %s: %w", path, err)
 		}
-		msg, err := parseMessage(data)
+		msg, err := b.parse(data)
 		if err != nil {
 			return fmt.Errorf("memory: parse %s: %w", path, err)
 		}
@@ -130,12 +166,60 @@ func (b *Backend) load() error {
 	return nil
 }
 
+// parse decodes a single .eml using the shared mimeparse package so
+// memory and IMAP backends expose the same structured view. Limits
+// are applied per account.
+func (b *Backend) parse(data []byte) (*mailbox.Message, error) {
+	decoded, err := mimeparse.Parse(data, mimeparse.Limits{
+		MaxMessageBytes:         b.limits.MaxMessageBytes,
+		MaxAttachmentBytes:      b.limits.MaxAttachmentBytes,
+		MaxTotalAttachmentBytes: b.limits.MaxTotalAttachmentBytes,
+		MaxMIMENesting:          b.limits.MaxMIMENesting,
+		MaxMIMEParts:            b.limits.MaxMIMEParts,
+	})
+	if err != nil {
+		return nil, err
+	}
+	msg := &mailbox.Message{
+		Headers:     decoded.Headers,
+		Text:        decoded.Text,
+		HTML:        decoded.HTML,
+		Attachments: convertAttachments(decoded.Attachments),
+	}
+	if msg.Headers.Date.IsZero() {
+		msg.Headers.Date = timeNow()
+	}
+	return msg, nil
+}
+
+// convertAttachments maps the mimeparse attachment view onto the
+// internal representation. The internal field set is deliberately
+// smaller: it is the API the tools layer commits to.
+func convertAttachments(in []mimeparse.Attachment) []mailbox.Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]mailbox.Attachment, len(in))
+	for i, a := range in {
+		out[i] = mailbox.Attachment{
+			Index:       i,
+			Part:        a.Part,
+			Filename:    a.Filename,
+			MimeType:    a.MimeType,
+			Size:        a.Size,
+			ContentID:   a.ContentID,
+			Inline:      a.IsInline,
+			Disposition: a.Disposition,
+		}
+	}
+	return out
+}
+
 func mailboxNameFor(root, path string) string {
 	rel, err := filepath.Rel(root, filepath.Dir(path))
 	if err != nil || rel == "." {
 		return "INBOX"
 	}
-	// Convert "foo/bar" to "foo/bar". Use forward slashes consistently.
 	return filepath.ToSlash(rel)
 }
 
@@ -152,8 +236,6 @@ func (b *Backend) Mailboxes(ctx context.Context, accountID string) ([]mailbox.Ma
 			UIDNext:     uint32(len(msgs) + 1),
 		})
 	}
-	// Always surface INBOX so a client can probe before any messages
-	// exist.
 	if len(out) == 0 {
 		out = append(out, mailbox.Mailbox{Name: "INBOX", UIDValidity: 1, UIDNext: 1})
 	}
@@ -171,7 +253,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	}
 	limit := opts.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = b.limits.MaxBatchOperations
 	}
 	out := make([]mailbox.MessageSummary, 0, len(msgs))
 	for i, m := range msgs {
@@ -189,11 +271,11 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		}
 		out = append(out, mailbox.MessageSummary{
 			UID:           m.UID,
-			Flags:         []string{},
+			Flags:         copyStrings(m.FlagsSlice()),
 			InternalDate:  m.Headers.Date,
 			Size:          uint32(m.Size()),
 			From:          m.Headers.From,
-			To:            m.Headers.To,
+			To:            copyStrings(m.Headers.To),
 			Subject:       m.Headers.Subject,
 			HasAttachment: len(m.Attachments) > 0,
 		})
@@ -201,8 +283,17 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	return out, nil
 }
 
-// FetchMessage returns a deep copy of the message.
-func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid uint32) (*mailbox.Message, error) {
+// FetchMessage returns a deep copy of the message. The memory
+// backend always reports UIDVALIDITY=1; callers that pass any
+// other value receive ErrUIDMismatch to keep the contract
+// identical with the IMAP backend.
+func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid uint32, uidValidity uint32) (*mailbox.Message, error) {
+	if uidValidity == 0 {
+		return nil, mailbox.ErrUIDMissing
+	}
+	if uidValidity != 1 {
+		return nil, mailbox.ErrUIDMismatch
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	msgs, ok := b.loaded[mbx]
@@ -211,9 +302,8 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 	}
 	for _, m := range msgs {
 		if m.UID == uid {
-			// Deep copy of the body fields; the message itself is
-			// immutable from the caller's perspective.
 			clone := *m
+			clone.Attachments = copyAttachments(m.Attachments)
 			return &clone, nil
 		}
 	}
@@ -231,7 +321,7 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	}
 	limit := q.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = b.limits.MaxSearchResults
 	}
 	out := []mailbox.MessageSummary{}
 	for _, m := range msgs {
@@ -240,11 +330,11 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		}
 		out = append(out, mailbox.MessageSummary{
 			UID:           m.UID,
-			Flags:         []string{},
+			Flags:         copyStrings(m.FlagsSlice()),
 			InternalDate:  m.Headers.Date,
 			Size:          uint32(m.Size()),
 			From:          m.Headers.From,
-			To:            m.Headers.To,
+			To:            copyStrings(m.Headers.To),
 			Subject:       m.Headers.Subject,
 			HasAttachment: len(m.Attachments) > 0,
 		})
@@ -275,7 +365,6 @@ func searchMatches(m *mailbox.Message, q mailbox.SearchQuery) bool {
 		return false
 	}
 	if q.Unseen {
-		// Memory backend treats all messages as Seen; Unseen=false.
 		return false
 	}
 	return true
@@ -290,143 +379,20 @@ func anyContainsCI(haystack []string, needle string) bool {
 	return false
 }
 
-// parseMessage decodes an RFC 822 message into a mailbox.Message using
-// only the standard library. It supports multipart/alternative and
-// multipart/mixed sufficiently for tests; exotic structures are
-// best-effort.
-func parseMessage(data []byte) (*mailbox.Message, error) {
-	msg, err := mail.ReadMessage(bufio.NewReader(bytes.NewReader(data)))
-	if err != nil {
-		return nil, fmt.Errorf("read message: %w", err)
+func copyStrings(in []string) []string {
+	if in == nil {
+		return []string{}
 	}
-	out := &mailbox.Message{Headers: mailbox.MessageHeaders{}}
-	out.Headers.MessageID = msg.Header.Get("Message-Id")
-	out.Headers.Subject = msg.Header.Get("Subject")
-	out.Headers.From = msg.Header.Get("From")
-	out.Headers.InReplyTo = msg.Header.Get("In-Reply-To")
-	if v := msg.Header.Get("References"); v != "" {
-		out.Headers.References = strings.Fields(v)
-	}
-	if v := msg.Header.Get("To"); v != "" {
-		out.Headers.To = splitAddresses(v)
-	}
-	if v := msg.Header.Get("Cc"); v != "" {
-		out.Headers.Cc = splitAddresses(v)
-	}
-	if t, err := mail.ParseDate(msg.Header.Get("Date")); err == nil {
-		out.Headers.Date = t
-	} else {
-		out.Headers.Date = time.Now().UTC()
-	}
-
-	ct := msg.Header.Get("Content-Type")
-	if ct == "" {
-		// Plain text fallback.
-		body, _ := io.ReadAll(msg.Body)
-		out.Text = string(body)
-		return out, nil
-	}
-	mediaType, params, err := mime.ParseMediaType(ct)
-	if err != nil {
-		body, _ := io.ReadAll(msg.Body)
-		out.Text = string(body)
-		return out, nil
-	}
-
-	if strings.HasPrefix(mediaType, "multipart/") {
-		mr := multipart.NewReader(msg.Body, params["boundary"])
-		for {
-			part, err := mr.NextPart()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				break
-			}
-			pCT := part.Header.Get("Content-Type")
-			mt, pParams, _ := mime.ParseMediaType(pCT)
-			disposition, dParams, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
-			isAttachment := disposition == "attachment" || (dParams["filename"] != "" && disposition != "inline")
-			partBody, _ := io.ReadAll(part)
-			if isAttachment {
-				out.Attachments = append(out.Attachments, mailbox.Attachment{
-					Index:    len(out.Attachments),
-					Filename: dParams["filename"],
-					MimeType: mt,
-					Size:     int64(len(partBody)),
-				})
-				continue
-			}
-			switch {
-			case strings.HasPrefix(mt, "text/plain"):
-				out.Text = string(partBody)
-			case strings.HasPrefix(mt, "text/html"):
-				out.HTML = string(partBody)
-			case strings.HasPrefix(mt, "multipart/"):
-				// Best-effort nested multipart handling.
-				nested := &mailbox.Message{}
-				nested.Headers = out.Headers
-				nested.Text = out.Text
-				nested.HTML = out.HTML
-				nested.Attachments = out.Attachments
-				if err := mergePart(nested, mt, pParams["boundary"], partBody); err == nil {
-					out = nested
-				}
-			}
-		}
-		return out, nil
-	}
-
-	// Single-part body.
-	body, _ := io.ReadAll(msg.Body)
-	if strings.HasPrefix(mediaType, "text/plain") {
-		out.Text = string(body)
-	} else if strings.HasPrefix(mediaType, "text/html") {
-		out.HTML = string(body)
-	} else {
-		out.Attachments = append(out.Attachments, mailbox.Attachment{
-			Index:    0,
-			Filename: params["name"],
-			MimeType: mediaType,
-			Size:     int64(len(body)),
-		})
-	}
-	return out, nil
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
 }
 
-func mergePart(m *mailbox.Message, mediaType, boundary string, body []byte) error {
-	if boundary == "" {
-		return errors.New("multipart with no boundary")
+func copyAttachments(in []mailbox.Attachment) []mailbox.Attachment {
+	if in == nil {
+		return nil
 	}
-	mr := multipart.NewReader(bytes.NewReader(body), boundary)
-	for {
-		part, err := mr.NextPart()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		ct := part.Header.Get("Content-Type")
-		mt, _, _ := mime.ParseMediaType(ct)
-		data, _ := io.ReadAll(part)
-		switch {
-		case strings.HasPrefix(mt, "text/plain"):
-			m.Text = string(data)
-		case strings.HasPrefix(mt, "text/html"):
-			m.HTML = string(data)
-		}
-	}
-}
-
-func splitAddresses(s string) []string {
-	addrs, err := mail.ParseAddressList(s)
-	if err != nil {
-		return strings.Fields(s)
-	}
-	out := make([]string, len(addrs))
-	for i, a := range addrs {
-		out[i] = a.Address
-	}
+	out := make([]mailbox.Attachment, len(in))
+	copy(out, in)
 	return out
 }

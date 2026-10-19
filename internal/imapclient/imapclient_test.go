@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -172,7 +173,15 @@ func TestFetchMessage(t *testing.T) {
 		t.Fatal("no messages")
 	}
 	uid := list[0].UID
-	m, err := be.FetchMessage(context.Background(), "test", "INBOX", uid)
+	// Live UIDVALIDITY from the selected mailbox.
+	uv, err := be.MailboxUIDValidity(context.Background(), "test", "INBOX")
+	if err != nil {
+		t.Fatalf("MailboxUIDValidity: %v", err)
+	}
+	if uv == 0 {
+		t.Fatal("live UIDVALIDITY is zero; server bug or wrapper bug")
+	}
+	m, err := be.FetchMessage(context.Background(), "test", "INBOX", uid, uv)
 	if err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
@@ -185,6 +194,9 @@ func TestFetchMessage(t *testing.T) {
 	if m.Headers.Subject == "" {
 		t.Error("Subject missing")
 	}
+	if m.UIDValidity != uv {
+		t.Errorf("UIDValidity = %d, want %d", m.UIDValidity, uv)
+	}
 }
 
 func TestFetchMessageMissingUID(t *testing.T) {
@@ -193,9 +205,34 @@ func TestFetchMessageMissingUID(t *testing.T) {
 	be := testBackend(t, addr)
 	defer be.Close()
 
-	_, err := be.FetchMessage(context.Background(), "test", "INBOX", 99999)
+	_, err := be.FetchMessage(context.Background(), "test", "INBOX", 99999, 1)
 	if err != mailbox.ErrMessageNotFound {
 		t.Errorf("err = %v, want ErrMessageNotFound", err)
+	}
+}
+
+func TestFetchMessageUIDMismatch(t *testing.T) {
+	addr, cleanup := testServer(t)
+	defer cleanup()
+	be := testBackend(t, addr)
+	defer be.Close()
+
+	// Pass a UIDVALIDITY that does not match the live one.
+	_, err := be.FetchMessage(context.Background(), "test", "INBOX", 1, 42)
+	if !errors.Is(err, mailbox.ErrUIDMismatch) {
+		t.Errorf("err = %v, want ErrUIDMismatch", err)
+	}
+}
+
+func TestFetchMessageUIDMissing(t *testing.T) {
+	addr, cleanup := testServer(t)
+	defer cleanup()
+	be := testBackend(t, addr)
+	defer be.Close()
+
+	_, err := be.FetchMessage(context.Background(), "test", "INBOX", 1, 0)
+	if !errors.Is(err, mailbox.ErrUIDMissing) {
+		t.Errorf("err = %v, want ErrUIDMissing", err)
 	}
 }
 
@@ -317,7 +354,7 @@ func TestFetchMessageHeadersFromEnvelope(t *testing.T) {
 		To:      []*imap.Address{{MailboxName: "c", HostName: "d.test"}},
 		Date:    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
-	h := headersFromEnvelope(env, "Message-Id: <x@y>\r\nIn-Reply-To: <p@q>\r\nReferences: <r1> <r2>\r\n\r\n")
+	h := headersFromEnvelope(env, []byte("Message-Id: <x@y>\r\nIn-Reply-To: <p@q>\r\nReferences: <r1> <r2>\r\n\r\n"))
 	if h.Subject != "Test" {
 		t.Errorf("Subject = %q", h.Subject)
 	}

@@ -108,13 +108,7 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 			for i, m := range msgs {
 				summaries[i] = messageSummaryFrom(m)
 			}
-			uidValidity := uint32(0)
-			for _, m := range mailboxList(ctx, acc, args.Mailbox) {
-				if m.Name == args.Mailbox {
-					uidValidity = m.UIDValidity
-					break
-				}
-			}
+			uidValidity := uidValidityOf(ctx, acc, args.Mailbox)
 			output = &ListMessagesResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
@@ -135,6 +129,14 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = invalidInput("mailbox is required")
 				return
 			}
+			if args.UID == 0 {
+				err = invalidInput("uid is required")
+				return
+			}
+			if args.UIDValidity == 0 {
+				err = invalidInput("uid_validity is required; obtain it from list_messages or search_messages before calling read_message")
+				return
+			}
 			acc, gerr := registry.Get(args.AccountID)
 			if gerr != nil {
 				err = mapError(gerr)
@@ -144,37 +146,36 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = mapError(&permissions.ErrPermissionDenied{Account: acc.ID, Capability: permissions.CapRead})
 				return
 			}
-			msg, berr := acc.Backend().FetchMessage(ctx, args.AccountID, args.Mailbox, args.UID)
+			msg, berr := acc.Backend().FetchMessage(ctx, args.AccountID, args.Mailbox, args.UID, args.UIDValidity)
 			if berr != nil {
 				err = mapError(berr)
 				return
 			}
-			truncated := false
+			truncated := msg.Truncated
 			if msg.Size() > acc.Limits.MaxMessageBytes {
 				msg.Text = truncateRunes(msg.Text, acc.Limits.MaxMessageBytes)
 				msg.HTML = truncateRunes(msg.HTML, acc.Limits.MaxMessageBytes)
 				truncated = true
 			}
-			if args.UIDValidity != 0 && msg.UIDValidity != 0 && msg.UIDValidity != args.UIDValidity {
-				err = typed(codeUidMismatch, "uid/uid_validity mismatch", map[string]any{
-					"expected": msg.UIDValidity,
-					"got":      args.UIDValidity,
-				})
-				return
-			}
 			atts := make([]attachmentView, len(msg.Attachments))
 			for i, a := range msg.Attachments {
 				atts[i] = attachmentFrom(a)
+			}
+			flags := msg.FlagsSlice()
+			if flags == nil {
+				flags = []string{}
 			}
 			output = &ReadMessageResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
 				UID:         msg.UID,
 				UIDValidity: msg.UIDValidity,
+				Flags:       flags,
 				Headers:     headersFrom(msg.Headers),
 				Text:        msg.Text,
 				HTML:        msg.HTML,
 				Attachments: atts,
+				Warnings:    msg.Warnings,
 				Truncated:   truncated,
 			}
 			return
@@ -223,13 +224,7 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 			for i, m := range msgs {
 				summaries[i] = messageSummaryFrom(m)
 			}
-			uidValidity := uint32(0)
-			for _, m := range mailboxList(ctx, acc, args.Mailbox) {
-				if m.Name == args.Mailbox {
-					uidValidity = m.UIDValidity
-					break
-				}
-			}
+			uidValidity := uidValidityOf(ctx, acc, args.Mailbox)
 			output = &SearchMessagesResult{
 				AccountID:   args.AccountID,
 				Mailbox:     args.Mailbox,
@@ -240,13 +235,36 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 		})
 }
 
-// mailboxList returns the mailboxes for an account; used to surface
-// UIDVALIDITY in list/search outputs without exposing an extra field in
-// the tool schema.
-func mailboxList(ctx context.Context, acc *accounts.Account, name string) []mailbox.Mailbox {
+// uidValidityOf asks the backend for the current UIDVALIDITY of
+// the mailbox. IMAP backends may need to issue an EXAMINE; memory
+// backends return the cached value without a round-trip. Errors
+// are swallowed: a failure to read UIDVALIDITY is non-fatal for
+// listing and search, so the result returns 0 and the caller can
+// re-EXAMINE on a subsequent read.
+func uidValidityOf(ctx context.Context, acc *accounts.Account, name string) uint32 {
+	type validityBackend interface {
+		MailboxUIDValidity(ctx context.Context, accountID, mbx string) (uint32, error)
+	}
+	if v, ok := acc.Backend().(validityBackend); ok {
+		uv, err := v.MailboxUIDValidity(ctx, acc.ID, name)
+		if err == nil {
+			return uv
+		}
+	}
+	// Fall back to the list path: the memory backend does not
+	// implement MailboxUIDValidity but reports UIDVALIDITY=1 in
+	// Mailboxes.
 	out, _ := acc.Backend().Mailboxes(ctx, acc.ID)
-	return out
+	for _, m := range out {
+		if m.Name == name {
+			return m.UIDValidity
+		}
+	}
+	return 0
 }
+
+// mailboxList is no longer used; uidValidityOf asks the backend
+// directly for the live UIDVALIDITY.
 
 func truncateRunes(s string, max int) string {
 	if max <= 0 {

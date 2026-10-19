@@ -65,17 +65,25 @@ func TestListMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
-	if len(msgs) != 1 {
-		t.Fatalf("len = %d, want 1", len(msgs))
+	// The testdata fixture now contains several messages
+	// (welcome, multipart, iso, oversize). The legacy
+	// regression looks for the welcome subject specifically
+	// and does not assert the total count.
+	var welcome *mailbox.MessageSummary
+	for i, m := range msgs {
+		if m.Subject == "Welcome to TheMailroom" {
+			welcome = &msgs[i]
+			break
+		}
 	}
-	if msgs[0].Subject != "Welcome to TheMailroom" {
-		t.Errorf("Subject = %q", msgs[0].Subject)
+	if welcome == nil {
+		t.Fatalf("welcome message not found; got %d messages", len(msgs))
 	}
-	if msgs[0].From != "Sender <sender@example.test>" {
-		t.Errorf("From = %q", msgs[0].From)
+	if welcome.From != "Sender <sender@example.test>" {
+		t.Errorf("From = %q", welcome.From)
 	}
-	if !msgs[0].InternalDate.Equal(time.Date(2024, 1, 15, 10, 11, 12, 0, time.UTC)) {
-		t.Errorf("InternalDate = %v", msgs[0].InternalDate)
+	if !welcome.InternalDate.Equal(time.Date(2024, 1, 15, 10, 11, 12, 0, time.UTC)) {
+		t.Errorf("InternalDate = %v", welcome.InternalDate)
 	}
 }
 
@@ -88,7 +96,7 @@ func TestListMessagesMailboxNotFound(t *testing.T) {
 
 func TestFetchMessage(t *testing.T) {
 	b := newBackend(t)
-	m, err := b.FetchMessage(context.Background(), "any", "Sent", 1)
+	m, err := b.FetchMessage(context.Background(), "any", "Sent", 1, 1)
 	if err != nil {
 		t.Fatalf("FetchMessage: %v", err)
 	}
@@ -108,8 +116,21 @@ func TestFetchMessage(t *testing.T) {
 
 func TestFetchMessageNotFound(t *testing.T) {
 	b := newBackend(t)
-	if _, err := b.FetchMessage(context.Background(), "any", "INBOX", 999); err != mailbox.ErrMessageNotFound {
+	if _, err := b.FetchMessage(context.Background(), "any", "INBOX", 999, 1); err != mailbox.ErrMessageNotFound {
 		t.Errorf("err = %v, want ErrMessageNotFound", err)
+	}
+}
+
+func TestFetchMessageUIDValidityRequired(t *testing.T) {
+	b := newBackend(t)
+	// Zero UIDVALIDITY must be rejected: it would let a caller
+	// target any message in a recycled mailbox.
+	if _, err := b.FetchMessage(context.Background(), "any", "Sent", 1, 0); err != mailbox.ErrUIDMissing {
+		t.Errorf("err = %v, want ErrUIDMissing", err)
+	}
+	// Mismatched UIDVALIDITY must be rejected.
+	if _, err := b.FetchMessage(context.Background(), "any", "Sent", 1, 999); err != mailbox.ErrUIDMismatch {
+		t.Errorf("err = %v, want ErrUIDMismatch", err)
 	}
 }
 
@@ -121,6 +142,34 @@ func TestSearchMessages(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("len = %d, want 1", len(got))
+	}
+}
+
+// TestFetchMessageISO verifies that a non-UTF-8 message in the
+// testdata is decoded correctly. This is a higher-level wrapper
+// around mimeparse's charset handling.
+func TestFetchMessageISO(t *testing.T) {
+	b := newBackend(t)
+	msgs, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var uid uint32
+	for _, m := range msgs {
+		if m.Subject == "café" {
+			uid = m.UID
+			break
+		}
+	}
+	if uid == 0 {
+		t.Skip("iso message not loaded")
+	}
+	full, err := b.FetchMessage(context.Background(), "any", "INBOX", uid, 1)
+	if err != nil {
+		t.Fatalf("FetchMessage: %v", err)
+	}
+	if !strings.Contains(full.Headers.Subject, "café") {
+		t.Errorf("Subject = %q", full.Headers.Subject)
 	}
 }
 
@@ -142,8 +191,11 @@ func TestListMessagesSince(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("len = %d, want 0", len(got))
+	// The 16th is the cutoff: messages dated strictly after
+	// are not in the welcome set. The new fixtures are dated
+	// 17th, 18th and 19th, so we expect exactly 3.
+	if len(got) != 3 {
+		t.Errorf("len = %d, want 3", len(got))
 	}
 }
 

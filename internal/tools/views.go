@@ -22,10 +22,14 @@ type accountView struct {
 }
 
 type limitsView struct {
-	MaxMessageBytes    int `json:"max_message_bytes"`
-	MaxAttachments     int `json:"max_attachments"`
-	MaxSearchResults   int `json:"max_search_results"`
-	MaxBatchOperations int `json:"max_batch_operations"`
+	MaxMessageBytes         int `json:"max_message_bytes"`
+	MaxAttachmentBytes      int `json:"max_attachment_bytes"`
+	MaxTotalAttachmentBytes int `json:"max_total_attachment_bytes"`
+	MaxAttachments          int `json:"max_attachments"`
+	MaxSearchResults        int `json:"max_search_results"`
+	MaxBatchOperations      int `json:"max_batch_operations"`
+	MaxMIMENesting          int `json:"max_mime_nesting"`
+	MaxMIMEParts            int `json:"max_mime_parts"`
 }
 
 func accountViewFrom(a *accounts.Account) accountView {
@@ -50,10 +54,14 @@ func accountViewFrom(a *accounts.Account) accountView {
 
 func limitsFrom(l config.LimitsConfig) limitsView {
 	return limitsView{
-		MaxMessageBytes:    l.MaxMessageBytes,
-		MaxAttachments:     l.MaxAttachments,
-		MaxSearchResults:   l.MaxSearchResults,
-		MaxBatchOperations: l.MaxBatchOperations,
+		MaxMessageBytes:         l.MaxMessageBytes,
+		MaxAttachmentBytes:      l.MaxAttachmentBytes,
+		MaxTotalAttachmentBytes: l.MaxTotalAttachmentBytes,
+		MaxAttachments:          l.MaxAttachments,
+		MaxSearchResults:        l.MaxSearchResults,
+		MaxBatchOperations:      l.MaxBatchOperations,
+		MaxMIMENesting:          l.MaxMIMENesting,
+		MaxMIMEParts:            l.MaxMIMEParts,
 	}
 }
 
@@ -89,6 +97,7 @@ type messageSummaryV struct {
 	To            []string  `json:"to,omitempty"`
 	Subject       string    `json:"subject,omitempty"`
 	HasAttachment bool      `json:"has_attachments"`
+	Preview       string    `json:"preview,omitempty"`
 }
 
 func messageSummaryFrom(m mailbox.MessageSummary) messageSummaryV {
@@ -151,19 +160,25 @@ func headersFrom(h mailbox.MessageHeaders) headersView {
 
 // attachmentView is the wire shape of an attachment.
 type attachmentView struct {
-	Index     int    `json:"index"`
-	Filename  string `json:"filename,omitempty"`
-	MimeType  string `json:"mime_type,omitempty"`
-	Size      int64  `json:"size"`
-	ContentID string `json:"content_id,omitempty"`
+	Index       int    `json:"index"`
+	Part        string `json:"part,omitempty"`
+	Filename    string `json:"filename,omitempty"`
+	MimeType    string `json:"mime_type,omitempty"`
+	Size        int64  `json:"size"`
+	ContentID   string `json:"content_id,omitempty"`
+	Inline      bool   `json:"inline,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
 }
 
 func attachmentFrom(a mailbox.Attachment) attachmentView {
 	return attachmentView{
-		Index:     a.Index,
-		Filename:  a.Filename,
-		MimeType:  a.MimeType,
-		Size:      a.Size,
-		ContentID: a.ContentID,
+		Index:       a.Index,
+		Part:        a.Part,
+		Filename:    a.Filename,
+		MimeType:    a.MimeType,
+		Size:        a.Size,
+		ContentID:   a.ContentID,
+		Inline:      a.Inline,
+		Disposition: a.Disposition,
 	}
 }

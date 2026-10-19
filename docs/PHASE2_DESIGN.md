@@ -1,7 +1,8 @@
 # Phase 2 Design Notes
 
-> Status: in progress. Phase 2 first slice (IMAP read-only) has landed
-> in `internal/imapclient`. This document captures the design decisions
+> Status: in progress. Phase 2.1 (read-only IMAP correctness + MIME
+> reading) is implemented in `internal/imapclient` and
+> `internal/mimeparse`. This document captures the design decisions
 > for the remaining slices: SMTP submission, MIME composition, reply /
 > forward, attachments, and protected mailbox modifications.
 
@@ -12,7 +13,7 @@
 | IMAP client          | `github.com/emersion/go-imap` v1.2.1 | **Selected.** v1 is the stable, production-tracked line. v2 is parallel development, not yet marked stable. TheMailroom will move to v2 only when upstream tags a stable release. |
 | IMAP server (tests)  | `github.com/emersion/go-imap/server` + `backend/memory` | **Selected.** Spin up a real IMAP4rev1 server in-process for tests. |
 | SMTP client          | `github.com/emersion/go-smtp` v0.25.0 | **Selected.** Mature submission client; STARTTLS, AUTH (PLAIN, LOGIN, CRAM-MD5). |
-| MIME parser/composer | `github.com/emersion/go-message` v0.18.2 | **Selected.** Charset-aware, multipart-aware, RFC 2047 handling. |
+| MIME parser/composer | `github.com/emersion/go-message` v0.18.2 | **Selected.** Charset-aware, multipart-aware, RFC 2047 handling. **Implemented in Phase 2.1** as `internal/mimeparse`. |
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+) | **Selected.** OS-level confinement; prevents symlink escape. |
 | Self-signed test CA  | `crypto/rsa`, `crypto/x509`, `crypto/tls` (stdlib) | **Selected.** Generate certs in tests; trust via `InsecureSkipVerify` only in the test-only `Options.TLSConfig` knob. |
 

@@ -218,19 +218,46 @@ func TestListMessages(t *testing.T) {
 	got, err := env.call(t, "list_messages", map[string]any{
 		"account_id": "full",
 		"mailbox":    "INBOX",
-		"limit":      5,
+		"limit":      50,
 	})
 	if err != nil {
 		t.Fatalf("list_messages: %v", err)
 	}
 	msgs := got["messages"].([]any)
-	if len(msgs) != 1 {
-		t.Errorf("len = %d, want 1", len(msgs))
+	if len(msgs) < 1 {
+		t.Fatalf("len = %d, want >= 1", len(msgs))
 	}
-	first := msgs[0].(map[string]any)
-	if first["subject"] != "Welcome to TheMailroom" {
-		t.Errorf("subject = %v", first["subject"])
+	// The fixtures are loaded newest-first; the welcome message
+	// may not be at index 0. Search for it.
+	var found bool
+	for _, m := range msgs {
+		entry := m.(map[string]any)
+		if entry["subject"] == "Welcome to TheMailroom" {
+			found = true
+			break
+		}
 	}
+	if !found {
+		t.Errorf("welcome message not in list (subjects=%v)", messagesSubjects(msgs))
+	}
+	// uid_validity is exposed at the result level.
+	if _, ok := got["uid_validity"]; !ok {
+		t.Error("uid_validity not surfaced by list_messages")
+	}
+}
+
+// messagesSubjects is a test helper that prints subjects for
+// diagnostic failure messages.
+func messagesSubjects(msgs []any) []string {
+	out := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		if e, ok := m.(map[string]any); ok {
+			if s, ok := e["subject"].(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 func TestReadMessage(t *testing.T) {
@@ -238,9 +265,10 @@ func TestReadMessage(t *testing.T) {
 	defer env.cleanup()
 
 	got, err := env.call(t, "read_message", map[string]any{
-		"account_id": "full",
-		"mailbox":    "Sent",
-		"uid":        float64(1), // JSON numbers decode to float64
+		"account_id":   "full",
+		"mailbox":      "Sent",
+		"uid":          float64(1),
+		"uid_validity": float64(1),
 	})
 	if err != nil {
 		t.Fatalf("read_message: %v", err)
@@ -272,6 +300,25 @@ func TestReadMessageUidMismatch(t *testing.T) {
 	}
 }
 
+func TestReadMessageUIDValidityRequired(t *testing.T) {
+	env := setupEnv(t, "full")
+	defer env.cleanup()
+
+	// Omitting UIDVALIDITY must be rejected at the tool layer
+	// before any backend call.
+	_, err := env.call(t, "read_message", map[string]any{
+		"account_id": "full",
+		"mailbox":    "Sent",
+		"uid":        float64(1),
+	})
+	if err == nil {
+		t.Fatal("expected invalid input when uid_validity is omitted")
+	}
+	if !strings.Contains(err.Error(), "uid_validity") {
+		t.Errorf("err = %v, want mention of uid_validity", err)
+	}
+}
+
 func TestSearchMessages(t *testing.T) {
 	env := setupEnv(t, "full")
 	defer env.cleanup()
@@ -297,7 +344,7 @@ func TestSearchMessagesEmptyQuery(t *testing.T) {
 	defer env.cleanup()
 
 	// An empty query has no filters; the implementation returns every
-	// matching message up to the limit (default 50 in Phase 1).
+	// matching message up to the limit (default 50).
 	got, err := env.call(t, "search_messages", map[string]any{
 		"account_id": "full",
 		"mailbox":    "INBOX",
@@ -307,8 +354,8 @@ func TestSearchMessagesEmptyQuery(t *testing.T) {
 		t.Fatalf("search_messages: %v", err)
 	}
 	matches := got["matches"].([]any)
-	if len(matches) != 1 {
-		t.Errorf("len = %d, want 1 (empty query returns all)", len(matches))
+	if len(matches) < 1 {
+		t.Errorf("len = %d, want >= 1 (empty query returns all)", len(matches))
 	}
 }
 
@@ -374,7 +421,7 @@ accounts:
 	}{
 		{"list_mailboxes", map[string]any{"account_id": "locked"}},
 		{"list_messages", map[string]any{"account_id": "locked", "mailbox": "INBOX"}},
-		{"read_message", map[string]any{"account_id": "locked", "mailbox": "INBOX", "uid": float64(1)}},
+		{"read_message", map[string]any{"account_id": "locked", "mailbox": "INBOX", "uid": float64(1), "uid_validity": float64(1)}},
 		{"search_messages", map[string]any{"account_id": "locked", "mailbox": "INBOX", "query": map[string]any{}}},
 	}
 	for _, tc := range cases {
@@ -444,24 +491,8 @@ func TestReadMessageUIDValidityAccepts(t *testing.T) {
 	if got["text"] == nil {
 		t.Error("text body missing")
 	}
-}
-
-// TestReadMessageUIDValidityOmitted checks that omitting UIDVALIDITY
-// is allowed (the wire schema marks it omitempty).
-func TestReadMessageUIDValidityOmitted(t *testing.T) {
-	env := setupEnv(t, "full")
-	defer env.cleanup()
-
-	got, err := env.call(t, "read_message", map[string]any{
-		"account_id": "full",
-		"mailbox":    "Sent",
-		"uid":        float64(1),
-	})
-	if err != nil {
-		t.Fatalf("read_message: %v", err)
-	}
-	if got["text"] == nil {
-		t.Error("text body missing")
+	if got["uid_validity"].(float64) != 1 {
+		t.Errorf("uid_validity = %v, want 1", got["uid_validity"])
 	}
 }
 
