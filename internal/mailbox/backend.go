@@ -36,6 +36,18 @@ type Backend interface {
 	// report a UIDVALIDITY (some broken servers return 0).
 	FetchMessage(ctx context.Context, accountID, mailbox string, uid uint32, uidValidity uint32) (*Message, error)
 
+	// FetchAttachment returns one attachment from an immutable
+	// message. part is the 1-indexed IMAP-style part path previously
+	// returned by FetchMessage/read_message.
+	//
+	// Implementations MUST validate uidValidity before returning
+	// content and MUST NOT set the \Seen flag. Content is decoded:
+	// transfer encodings are removed and text parts are charset-
+	// decoded to UTF-8 where possible. Text attachments are therefore
+	// not guaranteed to be byte-identical to the sender's original
+	// file.
+	FetchAttachment(ctx context.Context, accountID, mailbox string, uid uint32, uidValidity uint32, part string) (*AttachmentData, error)
+
 	// SearchMessages returns matching message summaries. The
 	// returned UIDValidity is the live value observed during the
 	// same EXAMINE that produced the search results.
@@ -157,6 +169,19 @@ type Attachment struct {
 	Disposition string `json:"disposition,omitempty"`
 }
 
+// AttachmentData is the decoded content of one selected attachment,
+// together with the metadata from the same MIME parse. Content is
+// transfer-decoded; text parts are charset-decoded to UTF-8 where
+// possible. Callers must not treat filenames or MIME types as trusted
+// paths or executable content.
+type AttachmentData struct {
+	UID         uint32
+	UIDValidity uint32
+	Attachment  Attachment
+	Content     []byte
+	Warnings    []string
+}
+
 // Size returns an approximate total size of the message body used for
 // listings. It avoids forcing callers to know about the on-wire format.
 func (m *Message) Size() int {
@@ -178,6 +203,8 @@ var (
 	ErrAccountNotFound         = errors.New("mailbox: account not found")
 	ErrMailboxNotFound         = errors.New("mailbox: mailbox not found")
 	ErrMessageNotFound         = errors.New("mailbox: message not found")
+	ErrAttachmentNotFound      = errors.New("mailbox: attachment not found")
+	ErrInvalidPart             = errors.New("mailbox: invalid attachment part")
 	ErrUIDMismatch             = errors.New("mailbox: uid/uid_validity mismatch")
 	ErrUIDMissing              = errors.New("mailbox: server did not report uid_validity")
 	ErrLimitExceeded           = errors.New("mailbox: limit exceeded")

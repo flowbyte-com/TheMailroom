@@ -1,6 +1,8 @@
 # TheMailroom Tools
 
-> Status: Phase 1 implements the **read-only** tools below. Phase 2 adds sending, modification, deletion, and attachment tools.
+> Status: Phase 1 implements the read-only tools below. Phase 2.2 adds
+> `read_attachment`; sending, modification and deletion remain future
+> work.
 
 Every tool:
 
@@ -32,14 +34,16 @@ All tools take `account_id` as a required string field. There is no implicit "cu
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
 - `NotImplemented` — capability exists in the schema but is not yet wired.
-- `MessageTooLarge` — the message exceeds `max_message_bytes`.
+- `MessageTooLarge` — the raw message exceeds `max_message_bytes`.
 - `NestingTooDeep` — the MIME nesting exceeds `max_mime_nesting`.
 - `TooManyParts` — the MIME part count exceeds `max_mime_parts`.
 - `TooManyAttachments` — the attachment count exceeds `max_attachments`.
-- `AttachmentTooLarge` — an attachment exceeds `max_attachment_bytes`.
+- `AttachmentTooLarge` — a single attachment exceeds `max_attachment_bytes`,
+  or the decoded total exceeds `max_total_attachment_bytes`.
+- `AttachmentNotFound` — the requested part is not an exposed attachment.
 - `Malformed` — the message could not be parsed.
 
-## Read-only tools (Phase 1)
+## Read-only tools
 
 ### `list_accounts`
 
@@ -203,9 +207,11 @@ any rendering. The server never concatenates bodies into a
 `part` is the IMAP-style 1-indexed path (e.g. `"1.2"` for the
 second part of a `multipart/related` nested inside the root).
 `content_id` is the value of the `Content-ID` header for inline
-references. `disposition` is `attachment` or `inline`. Decoded
-bodies are never materialised inline; a follow-up `read_attachment`
-tool (Phase 2) returns the bytes through a confined stream.
+references. `disposition` is `attachment` or `inline`. Attachment
+bodies are not materialised by `read_message`; use
+`read_attachment` with the returned `part` to request one
+explicitly. Listing or reading a message never triggers an
+automatic attachment fetch.
 
 **Read-only IMAP guarantees.**
 
@@ -218,36 +224,106 @@ tool (Phase 2) returns the bytes through a confined stream.
   re-`EXAMINE`s and re-validates UIDVALIDITY before acting. A
   mutating operation is never silently retried.
 
-**IMAP literal memory: known UNBOUNDED risk (pre-Phase-2.2).**
+**IMAP literal memory: bounded at the protocol layer.**
 
-The `max_message_bytes` cap on the IMAP body is an
-application-level backstop, **not** a pre-allocation guard.
-The underlying IMAP client (go-imap v1.2.1) allocates a
-buffer of the server-announced literal size and reads the
-literal body into it *before* the application sees the
-data. A server (including a hostile or buggy one) that
-announces a literal larger than `max_message_bytes` will
-cause that allocation *before* the application rejects the
-body. The default 25 MiB cap does not bound this
-allocation.
+The `max_message_bytes` cap is enforced by the go-imap fork
+(`github.com/flowbyte-com/go-imap` v1.2.1-themailroom.4) at the
+protocol reader level. `client.DialOptions.MaxLiteralSize` is set
+to `max_message_bytes` at dial time; `ReadLiteral` checks the
+server-announced literal size **before** allocating the literal
+buffer. An oversized announcement is therefore rejected without an
+allocation proportional to the announced size. The application
+check in the backend remains as defence in depth.
 
-Production deployments that fetch from untrusted IMAP
-servers must mitigate this at the network layer
-(firewall, reverse proxy with a body-size filter) until
-the protocol-level cap is implemented in Phase 2.2. The
-tracked security requirement with acceptance criteria is
-in `docs/PHASE2_DESIGN.md` §10.
+The cap bounds each literal. It does not bound the number of
+literals a server may stream over a long-lived connection; the MIME
+part-count, attachment-count and batch limits remain the backstops.
+See `docs/PHASE2_DESIGN.md` §8 and §10 for the full analysis.
 
 **MIME safety limits** (per account):
 
 - `max_message_bytes` — caps the raw RFC 5322 size (default 25 MiB).
 - `max_attachment_bytes` — caps a single attachment (default 6 MiB).
 - `max_total_attachment_bytes` — caps the sum of attachments (default 25 MiB).
+- `max_attachments` — caps the number of exposed attachments (default 50).
 - `max_mime_nesting` — caps multipart depth (default 16).
 - `max_mime_parts` — caps the total number of parts visited (default 500).
 
 Violations return a typed error (`MessageTooLarge`, `AttachmentTooLarge`,
-`NestingTooDeep`, `TooManyParts`) without reading the rest of the message.
+`NestingTooDeep`, `TooManyParts`, `TooManyAttachments`) without reading
+the rest of the message.
+
+### `read_attachment`
+
+Reads exactly one attachment selected by the part path returned by
+`read_message`. The tool does not list or discover attachments; it
+never fetches on its own during listing or message reading.
+
+**Input.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "uid": 1024,
+  "uid_validity": 1234567890,
+  "part": "2"
+}
+```
+
+`uid_validity` and the live mailbox binding have the same contract as
+`read_message`: a stale value returns `UidMismatch` and a zero value
+returns `InvalidInput`. `part` is validated for length, depth,
+numeric components and the per-account MIME part limit before any
+backend call. It is a reference into the parsed message, never a
+filesystem path or an IMAP command fragment.
+
+**Output.**
+
+```json
+{
+  "account_id": "personal",
+  "mailbox": "INBOX",
+  "uid": 1024,
+  "uid_validity": 1234567890,
+  "part": "2",
+  "filename": "report.pdf",
+  "mime_type": "application/pdf",
+  "size": 123456,
+  "content_base64": "JVBERi0xLjQK...",
+  "warnings": []
+}
+```
+
+`size` is the decoded content length. `content_base64` is standard,
+padded RFC 4648 base64. There is no `truncated` field: content that
+exceeds a limit is an error, never a partial success. Base64 expands
+the payload by roughly one third; a default maximum-size attachment
+(6 MiB) can therefore produce an approximately 8 MiB tool response.
+
+**Content and safety.**
+
+- The part must be an exposed attachment from `read_message`:
+  attachment disposition, inline part, or the opaque outer
+  `message/rfc822` attachment. Multipart containers, ordinary body
+  parts, missing parts and descendants hidden inside an opaque
+  `message/rfc822` attachment return `AttachmentNotFound`.
+- The complete message is parsed and all configured MIME and size
+  limits are applied, including siblings of the requested part. If a
+  later part fails a limit, no content is returned.
+- Transfer encodings are decoded. Text parts are charset-decoded to
+  UTF-8 where possible, so text attachment bytes may be normalised
+  rather than byte-identical to the sender's original file. Binary
+  transfer-encoded content is decoded to its original bytes.
+- The IMAP backend uses the same read-only `EXAMINE` and
+  `UID FETCH BODY.PEEK[]` path as `read_message`; fetching an
+  attachment never sets `\Seen`. The memory backend uses a private
+  raw-message snapshot and does not re-read the source file.
+- Filenames and MIME types are untrusted metadata. The tool never
+  opens or executes the content and never writes it to disk.
+
+**Required capability:** `read` only. Outbound `attachment_send` is a
+separate capability and is not required or implied.
 
 ### `search_messages`
 
@@ -316,9 +392,10 @@ differences in a server-delegated search and are not errors.
 **Deferred attachment metadata.** The IMAP backend's
 `list_messages` and `search_messages` summaries do not populate
 `has_attachments`; it is always `false`. The in-memory backend
-does populate it. Filling it for IMAP requires
-`BODYSTRUCTURE` parsing and is deferred to the Phase 2.2
-Priority 3 `read_attachment` work.
+does populate it. This is a separate outstanding issue, not fixed
+by `read_attachment`; populating it for IMAP would require
+`BODYSTRUCTURE` parsing and is deliberately not introduced in this
+slice.
 
 **Output.**
 
@@ -333,11 +410,10 @@ Priority 3 `read_attachment` work.
 }
 ```
 
-## Phase 2 tools (sketched)
+## Future tools (not implemented)
 
-These names and shapes are stable contracts; only the implementation lands later.
+These names and shapes are sketches, not current contracts.
 
-- `read_attachment` — fetch an attachment by `(mailbox, uid, attachment_index)`. Requires `read`.
 - `send_message` — compose and send a new message. Requires `send` and `attachment_send` if attachments are included.
 - `reply_message` — reply, optionally quoting the original. Requires `send`. Honours `reply_all`.
 - `forward_message` — forward an existing message including its attachments. Requires `send` and `attachment_send`.

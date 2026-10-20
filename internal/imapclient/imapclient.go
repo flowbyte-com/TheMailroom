@@ -330,16 +330,102 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 // mismatch returns ErrUIDMismatch without acting. A server that
 // reports a zero UIDVALIDITY returns ErrUIDMissing.
 func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid uint32, uidValidity uint32) (*mailbox.Message, error) {
+	var msg *mailbox.Message
+	err := b.fetchRawMessage(ctx, accountID, mbx, uid, uidValidity, func(raw *rawMessage) error {
+		decoded, perr := mimeparse.Parse(raw.Body, b.mimeLimits())
+		if perr != nil {
+			return perr
+		}
+		msg = &mailbox.Message{
+			UID:         raw.UID,
+			UIDValidity: raw.UIDValidity,
+			Flags:       raw.Flags,
+			Headers:     decoded.Headers,
+			Text:        decoded.Text,
+			HTML:        decoded.HTML,
+			Attachments: convertAttachments(decoded.Attachments),
+			Warnings:    decoded.Warnings,
+			Truncated:   decoded.Truncated,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+// FetchAttachment returns one selected attachment from a message.
+// It reuses the same read-only full-message fetch as FetchMessage
+// (EXAMINE, live UIDVALIDITY validation, BODY.PEEK[]) and then asks
+// mimeparse to validate the complete message and capture only the
+// requested decoded part. No part path is ever interpolated into an
+// IMAP command.
+func (b *Backend) FetchAttachment(ctx context.Context, accountID, mbx string, uid uint32, uidValidity uint32, part string) (*mailbox.AttachmentData, error) {
+	if _, err := mailbox.ParsePartPath(part, b.limits.MaxMIMENesting, b.limits.MaxMIMEParts); err != nil {
+		return nil, err
+	}
+	var data *mailbox.AttachmentData
+	err := b.fetchRawMessage(ctx, accountID, mbx, uid, uidValidity, func(raw *rawMessage) error {
+		ac, perr := mimeparse.ExtractAttachment(raw.Body, part, b.mimeLimits())
+		if perr != nil {
+			return perr
+		}
+		data = &mailbox.AttachmentData{
+			UID:         raw.UID,
+			UIDValidity: raw.UIDValidity,
+			Attachment:  convertAttachment(ac.Attachment, 0),
+			Content:     ac.Content,
+			Warnings:    ac.Warnings,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// mimeLimits returns the parser limits shared by FetchMessage and
+// FetchAttachment.
+func (b *Backend) mimeLimits() mimeparse.Limits {
+	return mimeparse.Limits{
+		MaxMessageBytes:         b.limits.MaxMessageBytes,
+		MaxAttachmentBytes:      b.limits.MaxAttachmentBytes,
+		MaxTotalAttachmentBytes: b.limits.MaxTotalAttachmentBytes,
+		MaxMIMENesting:          b.limits.MaxMIMENesting,
+		MaxMIMEParts:            b.limits.MaxMIMEParts,
+		MaxAttachments:          b.limits.MaxAttachments,
+	}
+}
+
+// rawMessage is the result of the shared read-only full-message
+// fetch. Body is the complete RFC 5322 message, bounded by the
+// configured message and protocol literal caps.
+type rawMessage struct {
+	UID         uint32
+	UIDValidity uint32
+	Flags       []string
+	Body        []byte
+}
+
+// fetchRawMessage performs the existing read-only EXAMINE +
+// BODY.PEEK[] flow and invokes inspect with the raw message while
+// the backend lock is held. Keeping this in one helper ensures
+// FetchMessage and FetchAttachment share the same UIDVALIDITY,
+// literal-size, connection-cleanup and panic handling, including the
+// existing behaviour of closing the connection when MIME decoding
+// fails.
+func (b *Backend) fetchRawMessage(ctx context.Context, accountID, mbx string, uid uint32, uidValidity uint32, inspect func(*rawMessage) error) error {
 	if mbx == "" {
-		return nil, mailbox.ErrMailboxNotFound
+		return mailbox.ErrMailboxNotFound
 	}
 	if uid == 0 {
-		return nil, errors.New("imap: uid must be non-zero")
+		return errors.New("imap: uid must be non-zero")
 	}
 	if uidValidity == 0 {
-		return nil, mailbox.ErrUIDMissing
+		return mailbox.ErrUIDMissing
 	}
-	var msg *mailbox.Message
 	err := b.withClient(ctx, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
 		if err != nil {
@@ -443,43 +529,21 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 		if int64(len(rawBytes)) > cap {
 			return mailbox.ErrMessageTooLarge
 		}
-		// Decode the body through the shared mimeparse package.
-		// We use the same limits for both backends; this keeps
-		// wire-format shape stable between memory and IMAP.
-		decoded, perr := mimeparse.Parse(rawBytes, mimeparse.Limits{
-			MaxMessageBytes:         b.limits.MaxMessageBytes,
-			MaxAttachmentBytes:      b.limits.MaxAttachmentBytes,
-			MaxTotalAttachmentBytes: b.limits.MaxTotalAttachmentBytes,
-			MaxMIMENesting:          b.limits.MaxMIMENesting,
-			MaxMIMEParts:            b.limits.MaxMIMEParts,
-			MaxAttachments:          b.limits.MaxAttachments,
-		})
-		if perr != nil {
-			// Hard MIME failure: refuse the fetch. The
-			// partial decode is intentionally not returned;
-			// the caller must treat the error as
-			// authoritative. We do, however, surface the
-			// error in the result so the agent can show it
-			// to the user.
-			return mapErr(perr)
-		}
-		msg = &mailbox.Message{
+		out := &rawMessage{
 			UID:         raw.Uid,
 			UIDValidity: mboxStatus.UidValidity,
 			Flags:       flagsToStrings(raw.Flags),
-			Headers:     decoded.Headers,
-			Text:        decoded.Text,
-			HTML:        decoded.HTML,
-			Attachments: convertAttachments(decoded.Attachments),
-			Warnings:    decoded.Warnings,
-			Truncated:   decoded.Truncated,
+			Body:        rawBytes,
+		}
+		if inspect != nil {
+			return inspect(out)
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, mapErr(err)
+		return mapErr(err)
 	}
-	return msg, nil
+	return nil
 }
 
 // SearchMessages runs a UID SEARCH against the server. Empty

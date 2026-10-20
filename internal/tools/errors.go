@@ -1,7 +1,8 @@
 // Package tools defines the MCP tool surface for TheMailroom.
 //
-// The tools expose the read-only operations in Phase 1: list_accounts,
-// list_mailboxes, list_messages, read_message, and search_messages.
+// The tools expose the read-only operations: list_accounts,
+// list_mailboxes, list_messages, read_message, read_attachment,
+// and search_messages.
 //
 // Every tool:
 //   - validates input against a JSON Schema derived from the args struct;
@@ -29,6 +30,7 @@ const (
 	codeNotImplemented     = "NotImplemented"
 	codeMailboxNotFound    = "MailboxNotFound"
 	codeMessageNotFound    = "MessageNotFound"
+	codeAttachmentNotFound = "AttachmentNotFound"
 	codeInternalError      = "InternalError"
 	codeMessageTooLarge    = "MessageTooLarge"
 	codeNestingTooDeep     = "NestingTooDeep"
@@ -78,6 +80,10 @@ func mapError(err error) *TypedError {
 		return typed(codeMailboxNotFound, "mailbox not found", nil)
 	case errors.Is(err, mailbox.ErrMessageNotFound):
 		return typed(codeMessageNotFound, "message not found", nil)
+	case errors.Is(err, mailbox.ErrAttachmentNotFound):
+		return typed(codeAttachmentNotFound, "attachment not found", nil)
+	case errors.Is(err, mailbox.ErrInvalidPart):
+		return typed(codeInvalidInput, "invalid attachment part", nil)
 	case errors.Is(err, mailbox.ErrUIDMismatch):
 		return typed(codeUidMismatch, "uid/uid_validity mismatch", nil)
 	case errors.Is(err, mailbox.ErrLimitExceeded):
@@ -92,6 +98,8 @@ func mapError(err error) *TypedError {
 		return typed(codeTooManyAttachments, "too many attachments", nil)
 	case errors.Is(err, mailbox.ErrAttachmentTooLarge):
 		return typed(codeAttachmentTooLarge, "attachment exceeds size limit", nil)
+	case errors.Is(err, mailbox.ErrTotalAttachmentTooLarge):
+		return typed(codeAttachmentTooLarge, "total attachment size exceeds limit", nil)
 	case errors.Is(err, mailbox.ErrMalformed):
 		return typed(codeMalformed, "malformed message", nil)
 	default:

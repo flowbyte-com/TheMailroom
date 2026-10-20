@@ -28,10 +28,12 @@
 //   - MaxTotalAttachmentBytes caps the sum of decoded attachment
 //     sizes. Exceeding it returns ErrTotalAttachmentTooLarge.
 //
-// Attachments are never materialised as full Go byte slices: the
-// wire view exposes a per-part reference (mailbox + UIDVALIDITY +
-// UID + part path) and the decoded size only. The body is read
-// lazily and the counting reader stops as soon as the cap is
+// Parse exposes attachment metadata and a per-part reference
+// (mailbox + UIDVALIDITY + UID + part path); it does not retain
+// attachment bodies. ExtractAttachment retains at most the one
+// selected attachment while traversing and returns it only after the
+// complete message and every limit have been validated. Bodies are
+// read through a counting reader that stops as soon as the cap is
 // exceeded, so a multi-gigabyte attachment consumes only a small
 // amount of memory before being rejected.
 package mimeparse
@@ -121,6 +123,7 @@ var (
 	ErrTooManyAttachments      = errors.New("mime: attachment count exceeds limit")
 	ErrAttachmentTooLarge      = errors.New("mime: attachment exceeds size limit")
 	ErrTotalAttachmentTooLarge = errors.New("mime: total attachment size exceeds limit")
+	ErrAttachmentNotFound      = errors.New("mime: attachment not found")
 	ErrMalformed               = errors.New("mime: malformed message")
 )
 
@@ -154,10 +157,70 @@ type Decoded struct {
 	Warnings    []string               `json:"warnings,omitempty"`
 }
 
+// AttachmentContent is the selected attachment's metadata and decoded
+// bytes. Content is transfer-decoded; text parts are charset-decoded
+// to UTF-8 where possible, so text content is not guaranteed to be
+// byte-identical to the sender's original file.
+type AttachmentContent struct {
+	Attachment
+	Content  []byte
+	Warnings []string
+}
+
 // Parse decodes a single message. The raw input is the full RFC 5322
 // bytes (headers + body). Limits are applied as described on the
 // package doc; see Errors for the typed failures.
+//
+// Parse returns attachment metadata only. Use ExtractAttachment to
+// materialise one selected attachment.
 func Parse(raw []byte, limits Limits) (*Decoded, error) {
+	return parse(raw, limits, "", nil)
+}
+
+// ExtractAttachment decodes a message, validates the complete MIME
+// structure and every resource limit, and returns the decoded content
+// of the single attachment whose part path matches part. It never
+// returns partial content: if any later part fails validation, the
+// whole call fails.
+//
+// part must be the 1-indexed IMAP-style path returned in
+// Decoded.Attachments[].Part. Multipart containers, ordinary body
+// parts and parts hidden inside an opaque message/rfc822 attachment
+// are not attachments and return ErrAttachmentNotFound.
+func ExtractAttachment(raw []byte, part string, limits Limits) (*AttachmentContent, error) {
+	if part == "" {
+		return nil, ErrAttachmentNotFound
+	}
+	capture := &attachmentCapture{}
+	d, err := parse(raw, limits, part, capture)
+	if err != nil {
+		return nil, err
+	}
+	if !capture.found {
+		return nil, ErrAttachmentNotFound
+	}
+	for _, a := range d.Attachments {
+		if a.Part == part {
+			return &AttachmentContent{
+				Attachment: a,
+				Content:    capture.content,
+				Warnings:   d.Warnings,
+			}, nil
+		}
+	}
+	return nil, ErrAttachmentNotFound
+}
+
+type attachmentCapture struct {
+	content []byte
+	found   bool
+}
+
+// parse is the shared traversal used by Parse and ExtractAttachment.
+// When capture is non-nil, the decoded bytes of the attachment whose
+// part path equals capturePart are recorded. Traversal continues after
+// capture so later sibling limits still apply.
+func parse(raw []byte, limits Limits, capturePart string, capture *attachmentCapture) (*Decoded, error) {
 	limits = limits.withDefaults()
 	if limits.MaxMessageBytes > 0 && len(raw) > limits.MaxMessageBytes {
 		return nil, ErrMessageTooLarge
@@ -184,6 +247,13 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 	attachmentCount := 0
 	var text, html string
 	var atts []Attachment
+	appendAttachment := func(a Attachment, data []byte) {
+		atts = append(atts, a)
+		if capture != nil && capturePart == a.Part {
+			capture.content = data
+			capture.found = true
+		}
+	}
 	// attachmentLimit is the per-attachment cap (int64 for the
 	// counting reader).
 	attachmentCap := int64(limits.MaxAttachmentBytes)
@@ -317,7 +387,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 			}
 			totalAttachmentBytes += int64(len(data))
 			attachmentCount++
-			atts = append(atts, Attachment{
+			appendAttachment(Attachment{
 				Part:        partPath(path),
 				Filename:    filename,
 				MimeType:    mediaType,
@@ -326,7 +396,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 				Disposition: "attachment",
 				IsText:      isTextLike(mediaType),
 				IsInline:    false,
-			})
+			}, data)
 			return nil
 		}
 
@@ -345,7 +415,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 				}
 				attachmentCount++
 				totalAttachmentBytes += int64(len(data))
-				atts = append(atts, Attachment{
+				appendAttachment(Attachment{
 					Part:        partPath(path),
 					Filename:    filename,
 					MimeType:    mediaType,
@@ -354,7 +424,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 					Disposition: "attachment",
 					IsText:      true,
 					IsInline:    false,
-				})
+				}, data)
 				return nil
 			}
 			text = string(data)
@@ -371,7 +441,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 				}
 				attachmentCount++
 				totalAttachmentBytes += int64(len(data))
-				atts = append(atts, Attachment{
+				appendAttachment(Attachment{
 					Part:        partPath(path),
 					Filename:    filename,
 					MimeType:    mediaType,
@@ -380,7 +450,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 					Disposition: "attachment",
 					IsText:      true,
 					IsInline:    false,
-				})
+				}, data)
 				return nil
 			}
 			html = string(data)
@@ -398,7 +468,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 			}
 			attachmentCount++
 			totalAttachmentBytes += int64(len(data))
-			atts = append(atts, Attachment{
+			appendAttachment(Attachment{
 				Part:        partPath(path),
 				Filename:    filename, // may be empty for unnamed inline parts
 				MimeType:    mediaType,
@@ -407,7 +477,7 @@ func Parse(raw []byte, limits Limits) (*Decoded, error) {
 				Disposition: "inline",
 				IsText:      isTextLike(mediaType),
 				IsInline:    true,
-			})
+			}, data)
 		}
 		// Anything else (e.g. an application/octet-stream
 		// without a Content-Disposition) is intentionally

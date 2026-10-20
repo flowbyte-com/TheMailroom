@@ -158,18 +158,22 @@ func convertAttachments(in []mimeparse.Attachment) []mailbox.Attachment {
 	}
 	out := make([]mailbox.Attachment, len(in))
 	for i, a := range in {
-		out[i] = mailbox.Attachment{
-			Index:       i,
-			Part:        a.Part,
-			Filename:    a.Filename,
-			MimeType:    a.MimeType,
-			Size:        a.Size,
-			ContentID:   a.ContentID,
-			Inline:      a.IsInline,
-			Disposition: a.Disposition,
-		}
+		out[i] = convertAttachment(a, i)
 	}
 	return out
+}
+
+func convertAttachment(a mimeparse.Attachment, index int) mailbox.Attachment {
+	return mailbox.Attachment{
+		Index:       index,
+		Part:        a.Part,
+		Filename:    a.Filename,
+		MimeType:    a.MimeType,
+		Size:        a.Size,
+		ContentID:   a.ContentID,
+		Inline:      a.IsInline,
+		Disposition: a.Disposition,
+	}
 }
 
 // mapErr converts a low-level go-imap error into one of the
@@ -199,6 +203,9 @@ func mapErr(err error) error {
 	}
 	if errors.Is(err, mimeparse.ErrTotalAttachmentTooLarge) {
 		return mailbox.ErrTotalAttachmentTooLarge
+	}
+	if errors.Is(err, mimeparse.ErrAttachmentNotFound) {
+		return mailbox.ErrAttachmentNotFound
 	}
 	if errors.Is(err, mimeparse.ErrMalformed) {
 		return mailbox.ErrMalformed
