@@ -97,12 +97,13 @@ func searchGroups(q mailbox.SearchQuery) []searchGroup {
 // baseCriteria returns the criteria that apply to every search:
 // the body term, the flag terms and the date terms.
 //
-// The date terms are truncated to the day boundary because the
-// IMAP search date is a date with no time (see
+// The query date terms are truncated to their UTC day boundary
+// because the IMAP search date is a date with no time (see
 // internal/searchspec). The IMAP server compares the message's
-// Date: header against that date, so a message sent earlier on
-// the same day matches a "since" of that day. The memory backend
-// applies the same truncation, so the two backends agree.
+// Date: header by the calendar day named by its own fields, so a
+// message sent earlier on the same local day matches a "since"
+// of that day. The memory backend applies the same two rules,
+// so the two backends agree.
 func baseCriteria(q mailbox.SearchQuery) *imap.SearchCriteria {
 	crit := &imap.SearchCriteria{}
 	if q.Body != "" {

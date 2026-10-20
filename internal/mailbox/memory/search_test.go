@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
 )
 
@@ -85,14 +86,28 @@ func memFixtures() []memFixture {
 // fixtures.
 func newFixtureBackend(t *testing.T) *Backend {
 	t.Helper()
+	return newBackendWithFixturesAndLimits(t, memFixtures(), config.LimitsConfig{})
+}
+
+// newBackendWithFixtures builds a memory backend with custom
+// fixtures and default limits.
+func newBackendWithFixtures(t *testing.T, fixtures []memFixture) *Backend {
+	t.Helper()
+	return newBackendWithFixturesAndLimits(t, fixtures, config.LimitsConfig{})
+}
+
+// newBackendWithFixturesAndLimits builds a memory backend with
+// custom fixtures and explicit limits.
+func newBackendWithFixturesAndLimits(t *testing.T, fixtures []memFixture, limits config.LimitsConfig) *Backend {
+	t.Helper()
 	dir := t.TempDir()
-	for i, f := range memFixtures() {
+	for i, f := range fixtures {
 		name := filepath.Join(dir, fixtureName(i))
 		if err := os.WriteFile(name, []byte(f.raw()), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	b, err := New(dir)
+	b, err := NewWithLimits(dir, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +217,57 @@ func TestMemorySearchDateGranularity(t *testing.T) {
 	want = []string{"Alpha report", "Beta report", "Gamma report"}
 	if !equalSubjects(got, want) {
 		t.Errorf("Before=2024-08-14 matched %v, want %v", got, want)
+	}
+}
+
+// TestMemorySearchNonUTCDateHeaders verifies that the message
+// Date header is compared by the calendar day named by its own
+// fields, matching the IMAP server. Converting the message dates
+// to UTC first would incorrectly exclude both fixtures: the
+// +0200 message from "since 15 August" and the -0500 message from
+// "before 15 August".
+func TestMemorySearchNonUTCDateHeaders(t *testing.T) {
+	b := newBackendWithFixtures(t, []memFixture{
+		{
+			subject: "Early local day",
+			from:    "ann@example.test",
+			to:      []string{"bob@example.test"},
+			date:    "Thu, 15 Aug 2024 00:30:00 +0200",
+			body:    "early body",
+		},
+		{
+			subject: "Late previous local day",
+			from:    "carol@example.test",
+			to:      []string{"bob@example.test"},
+			date:    "Wed, 14 Aug 2024 23:30:00 -0500",
+			body:    "late body",
+		},
+	})
+
+	since := time.Date(2024, 8, 15, 0, 0, 0, 0, time.UTC)
+	got := searchSubjects(t, b, mailbox.SearchQuery{Since: &since})
+	want := []string{"Early local day"}
+	if !equalSubjects(got, want) {
+		t.Errorf("Since=2024-08-15 matched %v, want %v", got, want)
+	}
+
+	before := time.Date(2024, 8, 15, 0, 0, 0, 0, time.UTC)
+	got = searchSubjects(t, b, mailbox.SearchQuery{Before: &before})
+	want = []string{"Late previous local day"}
+	if !equalSubjects(got, want) {
+		t.Errorf("Before=2024-08-15 matched %v, want %v", got, want)
+	}
+}
+
+// TestMemorySearchLimitClampedToMax verifies that the memory
+// backend enforces max_search_results itself, including when the
+// caller supplies a larger Limit. The tool layer also clamps, but
+// the backend contract must hold on its own.
+func TestMemorySearchLimitClampedToMax(t *testing.T) {
+	b := newBackendWithFixturesAndLimits(t, memFixtures(), config.LimitsConfig{MaxSearchResults: 1})
+	got := searchSubjects(t, b, mailbox.SearchQuery{Subject: "report", Limit: 100})
+	if len(got) != 1 {
+		t.Errorf("Limit=100 with MaxSearchResults=1 matched %d messages, want 1", len(got))
 	}
 }
 

@@ -374,7 +374,7 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		return mailbox.ListResult{}, mailbox.ErrMailboxNotFound
 	}
 	limit := q.Limit
-	if limit <= 0 {
+	if limit <= 0 || limit > b.limits.MaxSearchResults {
 		limit = b.limits.MaxSearchResults
 	}
 	out := []mailbox.MessageSummary{}
@@ -408,9 +408,10 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 //     To or Cc.
 //   - Body is a case-insensitive substring match on the decoded
 //     plain-text body.
-//   - Since / Before use day granularity: the value is
-//     truncated to the start of its day, exactly as an IMAP
-//     SEARCH date key is truncated on the wire.
+//   - Since / Before use day granularity: the query value is
+//     truncated to its UTC day, and the message Date is reduced
+//     to the calendar day named by its own fields, matching the
+//     IMAP search date comparison.
 //   - Flagged requires the \Flagged flag; Unseen requires the
 //     absence of the \Seen flag.
 func searchMatches(m *mailbox.Message, q mailbox.SearchQuery) bool {
@@ -426,16 +427,21 @@ func searchMatches(m *mailbox.Message, q mailbox.SearchQuery) bool {
 	if q.Body != "" && !strings.Contains(strings.ToLower(m.Text), strings.ToLower(q.Body)) {
 		return false
 	}
+	// Date search is at calendar-day granularity. The query
+	// value is reduced to its UTC day, while the message Date
+	// header keeps the calendar day named by its own fields;
+	// converting the message date to UTC first would shift it
+	// near midnight. This matches the reference IMAP server.
+	msgDay := searchspec.CalendarDay(m.Headers.Date)
 	if q.Since != nil {
-		// Day granularity, matching the IMAP search date.
 		since := searchspec.TruncateDate(*q.Since)
-		if m.Headers.Date.Before(since) {
+		if msgDay.Before(since) {
 			return false
 		}
 	}
 	if q.Before != nil {
 		before := searchspec.TruncateDate(*q.Before)
-		if !m.Headers.Date.Before(before) {
+		if !msgDay.Before(before) {
 			return false
 		}
 	}

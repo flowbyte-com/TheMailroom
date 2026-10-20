@@ -33,8 +33,16 @@ import (
 // the IMAP backend sees.
 func memorySearchBackend(t *testing.T) *mem.Backend {
 	t.Helper()
+	return memorySearchBackendForFixtures(t, searchFixtures())
+}
+
+// memorySearchBackendForFixtures builds a memory backend from an
+// arbitrary fixture set, so cross-backend tests can use their own
+// messages (for example, Date headers in non-UTC timezones).
+func memorySearchBackendForFixtures(t *testing.T, fixtures []searchFixture) *mem.Backend {
+	t.Helper()
 	dir := t.TempDir()
-	for i, f := range searchFixtures() {
+	for i, f := range fixtures {
 		raw := f.raw()
 		if len(f.flags) > 0 {
 			// Translate the IMAP system flags into the
@@ -164,4 +172,77 @@ func memorySubjects(t *testing.T, be *mem.Backend, q mailbox.SearchQuery) []stri
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestBackendsAgreeOnNonUTCDateBoundaries is the regression for
+// Date headers whose timezone offset moves their UTC instant to a
+// different calendar day. IMAP compares the Date header's own
+// calendar day; the memory backend must do the same.
+func TestBackendsAgreeOnNonUTCDateBoundaries(t *testing.T) {
+	fixtures := []searchFixture{
+		{
+			subject:      "Early local day",
+			from:         "ann@example.test",
+			to:           []string{"bob@example.test"},
+			dateHeader:   "Thu, 15 Aug 2024 00:30:00 +0200",
+			internalDate: time.Date(2024, 8, 15, 0, 30, 0, 0, time.FixedZone("CEST", 2*3600)),
+			body:         "early body",
+		},
+		{
+			subject:      "Late previous local day",
+			from:         "carol@example.test",
+			to:           []string{"bob@example.test"},
+			dateHeader:   "Wed, 14 Aug 2024 23:30:00 -0500",
+			internalDate: time.Date(2024, 8, 14, 23, 30, 0, 0, time.FixedZone("CDT", -5*3600)),
+			body:         "late body",
+		},
+	}
+
+	addr, cleanup := startSearchServerWithFixtures(t, fixtures)
+	defer cleanup()
+	imapBe := testBackend(t, addr)
+	defer imapBe.Close()
+	memBe := memorySearchBackendForFixtures(t, fixtures)
+
+	since14 := time.Date(2024, 8, 14, 0, 0, 0, 0, time.UTC)
+	since15 := time.Date(2024, 8, 15, 0, 0, 0, 0, time.UTC)
+	before15 := time.Date(2024, 8, 15, 0, 0, 0, 0, time.UTC)
+
+	queries := []struct {
+		name string
+		q    mailbox.SearchQuery
+		want []string
+	}{
+		{
+			name: "since 14th (both calendar days)",
+			q:    mailbox.SearchQuery{Since: &since14},
+			want: []string{"Early local day", "Late previous local day"},
+		},
+		{
+			name: "since 15th (only the +0200 message)",
+			q:    mailbox.SearchQuery{Since: &since15},
+			want: []string{"Early local day"},
+		},
+		{
+			name: "before 15th (only the -0500 message)",
+			q:    mailbox.SearchQuery{Before: &before15},
+			want: []string{"Late previous local day"},
+		},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.name, func(t *testing.T) {
+			imapGot := imapSubjects(t, imapBe, tc.q)
+			memGot := memorySubjects(t, memBe, tc.q)
+			if !equalSubjects(imapGot, tc.want) {
+				t.Errorf("imap matched %v, want %v", imapGot, tc.want)
+			}
+			if !equalSubjects(memGot, tc.want) {
+				t.Errorf("memory matched %v, want %v", memGot, tc.want)
+			}
+			if !equalSubjects(imapGot, memGot) {
+				t.Errorf("backends disagree:\n  imap:   %v\n  memory: %v", imapGot, memGot)
+			}
+		})
+	}
 }

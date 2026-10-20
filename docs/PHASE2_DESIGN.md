@@ -260,29 +260,47 @@ now states its resolution.
   IMAP date key carries no time component, so the comparison is
   at day granularity. *Resolved in Phase 2.2 Priority 2.* The
   day granularity is now explicit in the public contract: the
-  search value is truncated to the UTC day before it is
-  applied, which is exactly what the reference server does
-  when it truncates the message's `Date:` header to UTC
-  midnight. The memory backend applies the same truncation, so
-  the two backends agree. A server in a non-UTC timezone
-  interprets the bare date in its own local time and can
-  differ by up to one day; that is inherent to IMAP's
-  date-only search keys and is documented rather than papered
-  over.
+  search value is truncated to its UTC day before it is
+  applied. The message side is reduced to the calendar day
+  named by the `Date:` header's own fields, ignoring its time
+  and timezone offset, which is what the reference server
+  compares. The memory backend uses the same two
+  normalisations (`TruncateDate` for the query, `CalendarDay`
+  for the message), so the two backends agree for `Date:`
+  headers in any timezone. A server that interprets the bare
+  search date in its own local timezone can still differ by up
+  to one day; that is inherent to IMAP's date-only search keys
+  and is documented rather than papered over.
 - **`Query.Limit` was ignored at the tool layer.** *Fixed in the
   PR #3 follow-up.* The tool handler now copies
   `args.Query.Limit` into the backend query, and both backends
-  honour it. An empty query returns every message in the
-  mailbox, bounded by the per-account limit; this is now
-  documented in `docs/TOOLS.md`.
+  honour and clamp it to the per-account `max_search_results`.
+  An empty query returns every message in the mailbox, bounded
+  by the per-account limit; this is now documented in
+  `docs/TOOLS.md`.
 - **Search limits and empty-query behaviour** are now
   specified and covered by tests in both backends.
+- **Server-dependent search matching remains.** Header
+  substring/case matching and RFC 2047 encoded-header handling
+  are delegated to the IMAP server; the memory backend matches
+  decoded headers. IMAP `BODY` is server-side and may match
+  HTML, attachments or raw MIME content, while the memory
+  backend searches decoded plain text only. These differences
+  are inherent to delegating search to the server and are
+  documented in `docs/TOOLS.md`.
+- **Attachment metadata in list/search summaries is deferred.**
+  The IMAP backend's list and search summaries do not populate
+  `has_attachments` (it is always false); the memory backend
+  does. Populating it requires `BODYSTRUCTURE` parsing and is
+  deferred to Phase 2.2 Priority 3 (`read_attachment`).
 
-The cross-backend agreement is asserted directly:
-`internal/imapclient/search_consistency_test.go` runs the same
-sixteen query combinations against the IMAP backend and the
-memory backend over the same fixture messages and requires
-identical results.
+Cross-backend agreement on the tested criteria is asserted
+directly: `internal/imapclient/search_consistency_test.go` runs
+the same seventeen query combinations against the IMAP backend
+and the memory backend over the same fixture messages and
+requires identical results. It also has a dedicated non-UTC
+date-boundary case that exercises a `+0200` and a `-0500` `Date:`
+header.
 
 ## 8. IMAP literal memory allocation: enforced at the protocol layer
 
@@ -652,8 +670,9 @@ deliverables, and out-of-scope items, is in
    and §10 for the per-criterion status.
 2. **IMAP search correctness defects** — `Flagged`, `Unseen`,
    `Subject + From + To` OR semantics, `SentSince` /
-   `SentBefore` semantics (§7). **NEXT**: the next
-   development slice.
+   `SentBefore` semantics (§7). **IN REVIEW**: implemented in
+   PR #6, with the date-semantics and limit closeout applied;
+   awaiting review before merge.
 3. **Secure attachment retrieval** — new `read_attachment` tool
    with stable MIME-part references and strict resource
    limits.

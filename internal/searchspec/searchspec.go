@@ -19,28 +19,27 @@
 //
 // RFC 3501's SINCE / BEFORE / SENTSINCE / SENTBEFORE compare
 // *dates*, not timestamps: the search key carries a date with no
-// time and no timezone, and the server interprets it in the
-// server's own local timezone. A search for
+// time and no timezone. A search for
 // "since 2024-08-15T10:11:12Z" therefore behaves as "the
 // message's date is on or after 2024-08-15" and can include
 // messages sent earlier on that day.
 //
-// TheMailroom's public API is explicit about this: the Since and
-// Before criteria are truncated to the UTC day boundary before
-// they are applied.
+// Two different normalisations are involved:
 //
-// Why UTC: the IMAP search date goes on the wire as a bare
-// calendar date ("2-Jan-2006"), and the reference server
-// (go-imap) parses it as UTC midnight and truncates the
-// message's Date: header to UTC midnight before comparing.
-// Truncating the search value to UTC midnight therefore
-// reproduces the server's comparison exactly. A server in
-// another timezone interprets the bare date in its own local
-// time and can differ by up to one day; that is inherent to
-// IMAP's date-only search keys and is documented as a
-// limitation rather than papered over.
+//   - The search value is truncated to its UTC day boundary
+//     (TruncateDate). That is the date placed on the wire.
+//   - The message's Date: header is reduced to the calendar day
+//     named by its own date fields, ignoring the time and the
+//     timezone offset (CalendarDay). This mirrors the reference
+//     IMAP server's comparison.
 //
-// Both backends apply TruncateDate, so they agree exactly.
+// Both backends must use the same two normalisations. In
+// particular, do not use TruncateDate on a message Date:
+// converting it to UTC first can move it to the previous or next
+// calendar day. A server that interprets the bare search date
+// in its own local timezone can still differ by up to one day;
+// that is inherent to IMAP's date-only search keys and is
+// documented as a limitation rather than papered over.
 //
 // # Flag semantics
 //
@@ -67,16 +66,31 @@ const (
 
 // TruncateDate reduces t to the start of its UTC day, which
 // is the granularity an IMAP SEARCH date key carries. The
-// time-of-day and the timezone are both discarded, exactly as
-// the "2-Jan-2006" search date layout does on the wire.
+// timestamp is converted to UTC and its time-of-day is then
+// discarded, exactly as the "2-Jan-2006" search date layout does
+// on the wire.
 //
-// The message side is truncated the same way by the IMAP
-// server before the comparison, so truncating the search
-// value to UTC midnight reproduces the server's comparison
-// exactly.
+// TruncateDate is for query values (Since / Before), not for
+// message Date headers. Converting a message timestamp to UTC
+// before taking its day can move it to a different calendar
+// day; use CalendarDay for the message side.
 func TruncateDate(t time.Time) time.Time {
 	u := t.UTC()
 	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// CalendarDay reduces t to the calendar day named by its own
+// date fields, returned as UTC midnight. The time of day and the
+// timezone offset are ignored, so 2024-08-15 00:30 +0200 and
+// 2024-08-15 23:30 -0500 both map to 2024-08-15 UTC.
+//
+// This is the message-side normalisation for IMAP date search:
+// the reference server compares the Date: header's calendar day
+// and ignores its time and zone. It is deliberately different
+// from TruncateDate, which converts to UTC first.
+func CalendarDay(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }
 
 // HasFlag reports whether the flag set contains the given

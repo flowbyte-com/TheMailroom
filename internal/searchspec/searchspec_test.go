@@ -52,6 +52,59 @@ func TestTruncateDateUsesUTC(t *testing.T) {
 	}
 }
 
+// TestCalendarDay verifies the message-side normalisation: the
+// calendar day named by the timestamp's own date fields is
+// preserved, regardless of the timezone offset.
+func TestCalendarDay(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"UTC midday", "2024-08-15T12:34:56Z", "2024-08-15T00:00:00Z"},
+		{"just after local midnight in +0200", "2024-08-15T00:30:00+02:00", "2024-08-15T00:00:00Z"},
+		{"late local evening in -0500", "2024-08-14T23:30:00-05:00", "2024-08-14T00:00:00Z"},
+		{"late local evening in +1400", "2024-08-15T23:30:00+14:00", "2024-08-15T00:00:00Z"},
+		{"leap day", "2024-02-29T08:00:00Z", "2024-02-29T00:00:00Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in, err := time.Parse(time.RFC3339, tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := time.Parse(time.RFC3339, tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := CalendarDay(in)
+			if !got.Equal(want) {
+				t.Errorf("CalendarDay(%s) = %s, want %s", tc.in, got.Format(time.RFC3339), tc.want)
+			}
+		})
+	}
+}
+
+// TestCalendarDayDiffersFromTruncateDate records why the two
+// helpers are not interchangeable: converting a message date to
+// UTC before truncating can move it to the previous day.
+func TestCalendarDayDiffersFromTruncateDate(t *testing.T) {
+	in, err := time.Parse(time.RFC3339, "2024-08-15T00:30:00+02:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDay := CalendarDay(in)
+	gotUTC := TruncateDate(in)
+	wantDay := time.Date(2024, 8, 15, 0, 0, 0, 0, time.UTC)
+	wantUTC := time.Date(2024, 8, 14, 0, 0, 0, 0, time.UTC)
+	if !gotDay.Equal(wantDay) {
+		t.Errorf("CalendarDay = %s, want %s", gotDay, wantDay)
+	}
+	if !gotUTC.Equal(wantUTC) {
+		t.Errorf("TruncateDate = %s, want %s", gotUTC, wantUTC)
+	}
+}
+
 // TestFlagPredicates verifies the flag semantics.
 func TestFlagPredicates(t *testing.T) {
 	seen := []string{FlagSeen}

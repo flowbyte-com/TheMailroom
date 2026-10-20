@@ -136,7 +136,13 @@ func searchFixtures() []searchFixture {
 // contains the search fixtures.
 func startSearchServer(t *testing.T) (addr string, cleanup func()) {
 	t.Helper()
-	fixtures := searchFixtures()
+	return startSearchServerWithFixtures(t, searchFixtures())
+}
+
+// startSearchServerWithFixtures starts an in-process IMAP server
+// whose INBOX contains the supplied fixtures.
+func startSearchServerWithFixtures(t *testing.T, fixtures []searchFixture) (addr string, cleanup func()) {
+	t.Helper()
 	be := newCustomBackend(func(u *memuserpkg.User) {
 		mb, err := u.GetMailbox("INBOX")
 		if err != nil {
@@ -355,8 +361,10 @@ func TestSearchSeenAndUnseenCombine(t *testing.T) {
 //
 // The IMAP search date carries no time, so "since 2024-08-12"
 // includes every message dated on 2024-08-12, even one sent at
-// 09:00 when the caller asked for 23:00. The memory backend
-// applies the same truncation, so the two agree.
+// 09:00 when the caller asked for 23:00. The query value is
+// truncated to its UTC day, while the message Date header keeps
+// the calendar day named by its own fields; the memory backend
+// applies the same two rules, so the two agree.
 func TestSearchDateBoundaries(t *testing.T) {
 	addr, cleanup := startSearchServer(t)
 	defer cleanup()

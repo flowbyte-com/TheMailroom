@@ -10,7 +10,7 @@
 | Priority | Scope | Status |
 |---|---|---|
 | 1 | Protocol-level IMAP literal-size enforcement | **DONE** — merged in PR #5 (`d28dfa3`) |
-| 2 | IMAP search correctness defects | **NEXT** |
+| 2 | IMAP search correctness defects | **IN REVIEW** — PR #6; corrective closeout applied, awaiting HAL review |
 | 3 | Secure attachment retrieval | Not started |
 
 ## Scope
@@ -28,7 +28,9 @@ Phase 2.1 from being production-hardened:
    `Flagged` and `Unseen` filters are accepted by the schema but
    silently ignored. `Subject + From + To` are OR'd via the
    IMAP `TEXT` keyword. `SentSince` / `SentBefore` use the RFC
-   5322 `Date:` header, not the server's internal date. **NEXT.**
+   5322 `Date:` header, not the server's internal date.
+   **IN REVIEW** — implemented in PR #6; not complete until the
+   corrective closeout passes review.
 3. **Secure attachment retrieval** with stable MIME-part
    references and strict resource limits. The new `read_attachment`
    tool reads a single MIME part by stable part reference
@@ -133,10 +135,11 @@ production-hardened.
 
 ### Priority 2 — IMAP search correctness defects
 
-**Status:** **NEXT**. This is the next development slice after
-Priority 1. It must be a separate, narrowly scoped PR, and it
-must not weaken the `EXAMINE` / UIDVALIDITY pairing or the
-literal-size safety controls from Priority 1.
+**Status:** **IN REVIEW** — implemented in PR #6, with the
+corrective closeout applied; not complete until HAL review and
+merge. It is a separate, narrowly scoped PR, and it must not
+weaken the `EXAMINE` / UIDVALIDITY pairing or the literal-size
+safety controls from Priority 1.
 
 **Defects to fix (PHASE2_DESIGN.md §7):**
 
@@ -205,6 +208,23 @@ filter is not acceptable.
 - Tests in `internal/mailbox/memory/` for the same
   contract, and in `internal/tools/tools_test.go` for the wire
   behaviour.
+
+**Closeout corrections (PR #6).** The initial implementation
+had two backend-parity gaps found in review:
+
+- Memory date search now reduces the message `Date:` header to
+  the calendar day named by its own fields
+  (`searchspec.CalendarDay`), including non-UTC headers, instead
+  of comparing the UTC instant.
+- The memory backend now clamps `Limit` to
+  `max_search_results` itself, matching the IMAP backend and the
+  tool layer.
+
+Regression tests cover both, including a cross-backend non-UTC
+date-boundary case. Remaining server-dependent matching
+differences and the deferred `has_attachments` metadata for IMAP
+summaries are documented in `docs/PHASE2_DESIGN.md` §7 and
+`docs/TOOLS.md`.
 
 **Out of scope for this slice:** SMTP, mailbox modifications,
 attachment retrieval.
