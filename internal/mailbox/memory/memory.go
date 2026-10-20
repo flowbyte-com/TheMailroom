@@ -6,6 +6,7 @@ package memory
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,8 +24,17 @@ import (
 type Backend struct {
 	mu     sync.RWMutex
 	root   string
-	loaded map[string][]*mailbox.Message // mailbox -> messages (uid=index+1)
+	loaded map[string][]*storedMessage // mailbox -> messages (uid=index+1)
 	limits config.LimitsConfig
+}
+
+// storedMessage keeps the parsed message view and, for messages that
+// expose attachments, a private immutable snapshot of the raw RFC 5322
+// bytes. The snapshot is never returned to callers; attachment
+// retrieval re-parses it instead of re-reading the source file.
+type storedMessage struct {
+	msg *mailbox.Message
+	raw []byte
 }
 
 // New returns a Backend that loads .eml files from root. The directory is
@@ -48,7 +58,7 @@ func NewWithLimits(root string, limits config.LimitsConfig) (*Backend, error) {
 	}
 	b := &Backend{
 		root:   root,
-		loaded: make(map[string][]*mailbox.Message),
+		loaded: make(map[string][]*storedMessage),
 		limits: withDefaults(limits),
 	}
 	if err := b.load(); err != nil {
@@ -149,21 +159,25 @@ func (b *Backend) load() error {
 			return fmt.Errorf("memory: parse %s: %w", path, err)
 		}
 		mailboxName := mailboxNameFor(b.root, real)
-		b.loaded[mailboxName] = append(b.loaded[mailboxName], msg)
+		rec := &storedMessage{msg: msg}
+		if len(msg.Attachments) > 0 {
+			rec.raw = data
+		}
+		b.loaded[mailboxName] = append(b.loaded[mailboxName], rec)
 	}
 	// Assign sequential UIDs per mailbox, newest first. UIDVALIDITY is
 	// a constant per process; real IMAP servers change it on mailbox
 	// re-creation. The memory backend has only one process lifetime so
 	// 1 is a stable value.
-	for name, msgs := range b.loaded {
-		sort.SliceStable(msgs, func(i, j int) bool {
-			return msgs[i].Headers.Date.After(msgs[j].Headers.Date)
+	for name, recs := range b.loaded {
+		sort.SliceStable(recs, func(i, j int) bool {
+			return recs[i].msg.Headers.Date.After(recs[j].msg.Headers.Date)
 		})
-		for i, m := range msgs {
-			m.UID = uint32(i + 1)
-			m.UIDValidity = 1
+		for i, rec := range recs {
+			rec.msg.UID = uint32(i + 1)
+			rec.msg.UIDValidity = 1
 		}
-		b.loaded[name] = msgs
+		b.loaded[name] = recs
 	}
 	return nil
 }
@@ -172,14 +186,7 @@ func (b *Backend) load() error {
 // memory and IMAP backends expose the same structured view. Limits
 // are applied per account.
 func (b *Backend) parse(data []byte) (*mailbox.Message, error) {
-	decoded, err := mimeparse.Parse(data, mimeparse.Limits{
-		MaxMessageBytes:         b.limits.MaxMessageBytes,
-		MaxAttachmentBytes:      b.limits.MaxAttachmentBytes,
-		MaxTotalAttachmentBytes: b.limits.MaxTotalAttachmentBytes,
-		MaxMIMENesting:          b.limits.MaxMIMENesting,
-		MaxMIMEParts:            b.limits.MaxMIMEParts,
-		MaxAttachments:          b.limits.MaxAttachments,
-	})
+	decoded, err := mimeparse.Parse(data, b.mimeLimits())
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +254,19 @@ func rawHeader(data []byte, name string) string {
 	return ""
 }
 
+// mimeLimits returns the parser limits shared by message loading and
+// attachment retrieval.
+func (b *Backend) mimeLimits() mimeparse.Limits {
+	return mimeparse.Limits{
+		MaxMessageBytes:         b.limits.MaxMessageBytes,
+		MaxAttachmentBytes:      b.limits.MaxAttachmentBytes,
+		MaxTotalAttachmentBytes: b.limits.MaxTotalAttachmentBytes,
+		MaxMIMENesting:          b.limits.MaxMIMENesting,
+		MaxMIMEParts:            b.limits.MaxMIMEParts,
+		MaxAttachments:          b.limits.MaxAttachments,
+	}
+}
+
 // convertAttachments maps the mimeparse attachment view onto the
 // internal representation. The internal field set is deliberately
 // smaller: it is the API the tools layer commits to.
@@ -256,18 +276,51 @@ func convertAttachments(in []mimeparse.Attachment) []mailbox.Attachment {
 	}
 	out := make([]mailbox.Attachment, len(in))
 	for i, a := range in {
-		out[i] = mailbox.Attachment{
-			Index:       i,
-			Part:        a.Part,
-			Filename:    a.Filename,
-			MimeType:    a.MimeType,
-			Size:        a.Size,
-			ContentID:   a.ContentID,
-			Inline:      a.IsInline,
-			Disposition: a.Disposition,
-		}
+		out[i] = convertAttachment(a, i)
 	}
 	return out
+}
+
+func convertAttachment(a mimeparse.Attachment, index int) mailbox.Attachment {
+	return mailbox.Attachment{
+		Index:       index,
+		Part:        a.Part,
+		Filename:    a.Filename,
+		MimeType:    a.MimeType,
+		Size:        a.Size,
+		ContentID:   a.ContentID,
+		Inline:      a.IsInline,
+		Disposition: a.Disposition,
+	}
+}
+
+// mapMimeError maps parser sentinels onto the public mailbox errors.
+// The memory backend validates every loaded message, so the size
+// errors are not expected during retrieval; mapping them keeps the
+// backend contract identical if limits or parser behaviour change.
+func mapMimeError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, mimeparse.ErrMessageTooLarge):
+		return mailbox.ErrMessageTooLarge
+	case errors.Is(err, mimeparse.ErrNestingTooDeep):
+		return mailbox.ErrNestingTooDeep
+	case errors.Is(err, mimeparse.ErrTooManyParts):
+		return mailbox.ErrTooManyParts
+	case errors.Is(err, mimeparse.ErrTooManyAttachments):
+		return mailbox.ErrTooManyAttachments
+	case errors.Is(err, mimeparse.ErrAttachmentTooLarge):
+		return mailbox.ErrAttachmentTooLarge
+	case errors.Is(err, mimeparse.ErrTotalAttachmentTooLarge):
+		return mailbox.ErrTotalAttachmentTooLarge
+	case errors.Is(err, mimeparse.ErrAttachmentNotFound):
+		return mailbox.ErrAttachmentNotFound
+	case errors.Is(err, mimeparse.ErrMalformed):
+		return mailbox.ErrMalformed
+	default:
+		return err
+	}
 }
 
 func mailboxNameFor(root, path string) string {
@@ -313,7 +366,8 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		limit = b.limits.MaxBatchOperations
 	}
 	out := make([]mailbox.MessageSummary, 0, len(msgs))
-	for i, m := range msgs {
+	for i, rec := range msgs {
+		m := rec.msg
 		if opts.Since != nil && m.Headers.Date.Before(*opts.Since) {
 			continue
 		}
@@ -357,12 +411,55 @@ func (b *Backend) FetchMessage(ctx context.Context, accountID, mbx string, uid u
 	if !ok {
 		return nil, mailbox.ErrMailboxNotFound
 	}
-	for _, m := range msgs {
+	for _, rec := range msgs {
+		m := rec.msg
 		if m.UID == uid {
 			clone := *m
 			clone.Attachments = copyAttachments(m.Attachments)
 			return &clone, nil
 		}
+	}
+	return nil, mailbox.ErrMessageNotFound
+}
+
+// FetchAttachment returns one selected attachment from the retained
+// raw-message snapshot. It never re-reads the source file and never
+// returns the snapshot itself; mimeparse produces fresh decoded
+// content for the requested part.
+func (b *Backend) FetchAttachment(ctx context.Context, accountID, mbx string, uid uint32, uidValidity uint32, part string) (*mailbox.AttachmentData, error) {
+	if uidValidity == 0 {
+		return nil, mailbox.ErrUIDMissing
+	}
+	if uidValidity != 1 {
+		return nil, mailbox.ErrUIDMismatch
+	}
+	if _, err := mailbox.ParsePartPath(part, b.limits.MaxMIMENesting, b.limits.MaxMIMEParts); err != nil {
+		return nil, err
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	msgs, ok := b.loaded[mbx]
+	if !ok {
+		return nil, mailbox.ErrMailboxNotFound
+	}
+	for _, rec := range msgs {
+		if rec.msg.UID != uid {
+			continue
+		}
+		if rec.raw == nil {
+			return nil, mailbox.ErrAttachmentNotFound
+		}
+		ac, err := mimeparse.ExtractAttachment(rec.raw, part, b.mimeLimits())
+		if err != nil {
+			return nil, mapMimeError(err)
+		}
+		return &mailbox.AttachmentData{
+			UID:         rec.msg.UID,
+			UIDValidity: 1,
+			Attachment:  convertAttachment(ac.Attachment, ac.Index),
+			Content:     ac.Content,
+			Warnings:    ac.Warnings,
+		}, nil
 	}
 	return nil, mailbox.ErrMessageNotFound
 }
@@ -382,7 +479,8 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		limit = b.limits.MaxSearchResults
 	}
 	out := []mailbox.MessageSummary{}
-	for _, m := range msgs {
+	for _, rec := range msgs {
+		m := rec.msg
 		if !searchMatches(m, q) {
 			continue
 		}

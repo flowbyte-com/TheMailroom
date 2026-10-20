@@ -542,6 +542,15 @@ func TestFetchMessagePropagatesMIMEError(t *testing.T) {
 	if !errors.Is(err, mailbox.ErrNestingTooDeep) {
 		t.Errorf("err = %v, want ErrNestingTooDeep", err)
 	}
+	// A hard MIME failure is still a backend error: the existing
+	// connection-cleanup contract must close the client so the next
+	// call reconnects and re-EXAMINEs.
+	be.mu.Lock()
+	closed := be.client == nil
+	be.mu.Unlock()
+	if !closed {
+		t.Error("connection was not closed after a hard MIME error")
+	}
 }
 
 // TestListMessagesReturnsReadOnlyUIDVALIDITY verifies that

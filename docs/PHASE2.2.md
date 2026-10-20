@@ -11,7 +11,7 @@
 |---|---|---|
 | 1 | Protocol-level IMAP literal-size enforcement | **DONE** — merged in PR #5 (`d28dfa3`) |
 | 2 | IMAP search correctness defects | **DONE** — merged in PR #6 (`21f859b`) |
-| 3 | Secure attachment retrieval | Not started |
+| 3 | Secure attachment retrieval | **IN REVIEW** — implementation on `phase2.2-priority3-read-attachment`; not merged |
 
 ## Scope
 
@@ -239,60 +239,97 @@ attachment retrieval.
 
 ### Priority 3 — Secure attachment retrieval
 
-**Status:** high-priority; the new `read_attachment` tool is
-required before any production deployment that needs to
-download attachments.
+**Status:** **IN REVIEW**. The implementation is on the
+`phase2.2-priority3-read-attachment` branch and has not been
+merged. Priority 3 must not be marked DONE until HAL reviews the
+implementation PR.
 
 **Requirements:**
 
 - New MCP tool `read_attachment` with input
-  `{account_id, mailbox, uid, uid_validity, part}` and
-  output `{account_id, mailbox, uid, uid_validity, part,
-  filename, mime_type, size, content (base64) | content_ref,
-  truncated, warnings}`. The `part` is the IMAP-style
-  1-indexed part path (e.g. `"1.2"` for the second part of
-  a `multipart/related` nested inside the root).
-- The reference is `(account, mailbox, UIDVALIDITY, UID,
-  part)`. The backend must validate UIDVALIDITY against
-  the live mailbox (re-EXAMINE if necessary) and reject
-  stale values with `ErrUIDMismatch`.
-- The backend must apply the same per-attachment and
-  total-attachment caps as the inline path
-  (`max_attachment_bytes`, `max_total_attachment_bytes`).
-- The backend must return a stable error if the part is
-  not found (`ErrAttachmentNotFound`).
-- The backend must not write to disk.
-- The backend must surface the same `ErrMessageTooLarge`
-  signal if the attachment exceeds the cap (criterion 1 of
-  Priority 1; without the protocol-level cap this is the
-  application-level backstop, with the cap it is the
-  protocol-level enforcement).
-- Attachment body is returned as base64 in the wire
-  response. For very large attachments, a streaming
-  alternative is a future slice (out of scope here).
-- Tool-layer rejection of `read_attachment` if the account
-  lacks the `read` capability.
+  `{account_id, mailbox, uid, uid_validity, part}` and output
+  `{account_id, mailbox, uid, uid_validity, part, filename,
+  mime_type, size, content_base64, warnings}`.
+- `part` is the IMAP-style 1-indexed part path returned by
+  `read_message` (e.g. `"1.2"`). It must match the existing
+  `read_message` attachment reference exactly.
+- The reference is `(account, mailbox, UIDVALIDITY, UID, part)`.
+  The backend validates UIDVALIDITY against the live mailbox and
+  rejects stale values with `ErrUIDMismatch`.
+- The backend applies the same per-attachment, total-attachment,
+  message-size, attachment-count, nesting and MIME-part caps as
+  the inline path. The complete message is validated even after the
+  requested part has been captured; a later failure returns no
+  content.
+- The backend returns typed errors for a missing attachment and
+  invalid part input. `ErrTotalAttachmentTooLarge` maps to the
+  existing MCP `AttachmentTooLarge` code.
+- Attachment body is returned as standard padded base64. There is
+  no `truncated` field and no partial success for oversized
+  content.
+- The tool requires only the existing `read` capability.
+- The backend does not write to disk, and no agent-supplied
+  filesystem path influences retrieval.
 
-**Deliverables for this slice:**
+**Approved implementation approach:** full-message
+`BODY.PEEK[]` followed by selected-attachment extraction through
+the existing `internal/mimeparse` traversal. This deliberately
+avoids per-part IMAP retrieval, BODYSTRUCTURE parsing, caching,
+temporary files, streaming and new storage subsystems. The
+full-message approach gives an exact message-wide total cap and
+exact part membership shared with `read_message`.
 
-- New `FetchAttachment` method on the `Backend` interface
-  in `internal/mailbox/backend.go`.
-- IMAP implementation in
-  `internal/imapclient/imapclient.go` using
-  `imap.FetchItem("BODY.PEEK[part]")` or a typed
-  `imap.BodySectionName`.
-- Memory implementation in
-  `internal/mailbox/memory/memory.go` reading from the
-  in-memory message.
-- New tool registration in `internal/tools/register.go` with
-  the input/output types in `internal/tools/read_attachment.go`.
-- New typed error `mailbox.ErrAttachmentNotFound` and
-  `codeAttachmentNotFound` MCP code.
-- Tests in `internal/imapclient/correctness_test.go` and
-  `internal/tools/tools_test.go` covering: in-spec
-  attachment, oversized attachment, missing part, stale
-  UIDVALIDITY, missing capability, and the boundary at the
-  caps.
+**Implementation:**
+
+- `mailbox.Backend.FetchAttachment`, `mailbox.AttachmentData`,
+  typed `ErrAttachmentNotFound` and `ErrInvalidPart`, and shared
+  part-path validation in `internal/mailbox/part.go`.
+- `mimeparse.ExtractAttachment`, sharing the existing
+  `Parse` traversal, classification and resource limits. It
+  captures at most the selected attachment and returns it only
+  after the complete traversal succeeds. Extraction is
+  fail-closed: malformed siblings, body read or transfer-decoding
+  failures, unknown transfer encodings and oversized ordinary body
+  parts return typed errors instead of partial content, while
+  unrelated non-fatal charset warnings remain warnings. `Parse`
+  retains its existing best-effort behaviour.
+- The returned backend metadata preserves the selected
+  attachment's zero-based ordinal, matching the index exposed by
+  `read_message`.
+- IMAP `FetchAttachment` reusing the refactored read-only
+  `EXAMINE` + `UID FETCH BODY.PEEK[]` path, live UIDVALIDITY and
+  exact UID validation, protocol literal cap and MIME limits.
+  No part path is interpolated into an IMAP command.
+- Memory `FetchAttachment` using a private raw-message snapshot
+  retained only for messages containing exposed attachments. The
+  source `.eml` is not re-read during retrieval. The additional
+  memory cost is bounded by the raw size of those messages and is
+  reported in the PR.
+- `read_attachment` registration and typed error mapping in
+  `internal/tools`.
+- Tests for exact content/metadata, nested and inline parts,
+  opaque `message/rfc822`, non-attachment and invalid-part
+  rejection, stale UIDVALIDITY/missing UID, size limits including
+  a failure after the target was captured, malformed/truncated
+  siblings after the target, unknown transfer encodings,
+  non-fatal charset warnings, selected-text charset failure,
+  selected-attachment index preservation, unchanged `\Seen`
+  flags, memory retrieval after source deletion, MCP permissions,
+  base64 round-trip and existing `read_message` regressions.
+
+**Known content semantics:** text parts are charset-decoded to
+UTF-8 where possible, so text attachment content may be normalised
+rather than byte-identical to the sender's file. This is the
+existing parser behaviour and is documented in `docs/TOOLS.md`;
+the implementation does not claim lossless byte preservation for
+text parts.
+
+**Deferred:** IMAP `has_attachments` summary population remains
+unchanged and is tracked as a separate outstanding issue. It is
+not fixed by Priority 3, and BODYSTRUCTURE parsing is not
+introduced. Outbound SMTP attachments, forwarding, modification
+operations, previews and antivirus integration remain out of
+scope.
 
 ## Workflow
 

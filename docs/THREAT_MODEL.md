@@ -85,8 +85,9 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   - An attachment count cap (`max_attachments`, default 50).
   - Filename sanitisation in attachment metadata (no path separators, no NULs).
 - **(implemented)** Attachments are read from a confined directory; MIME parsing is in-memory, never writes to disk.
-- **(implemented)** Unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide.
-- **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. Decoding a full attachment body goes through a future `read_attachment` tool that uses per-part size caps.
+- **(implemented)** For `read_message`/`Parse`, unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide. `read_attachment` fails closed on unknown transfer encodings and on a selected text attachment with an unknown charset; unrelated charset warnings remain non-fatal.
+- **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. The `read_attachment` tool materialises exactly one explicitly requested part after validating the complete message and its limits. It rejects containers, body parts, missing parts and hidden descendants of opaque `message/rfc822` attachments. Extraction is fail-closed: a malformed sibling, body read or transfer-decoding failure, unknown transfer encoding, or oversized ordinary body part returns a typed error and no content, even if the requested part was already captured. Unrelated charset warnings remain non-fatal; a selected text attachment with an unknown charset is rejected rather than returned undecoded. Text parts are charset-decoded to UTF-8 where possible, so text content may be normalised; binary transfer-encoded content is decoded to its original bytes. Base64 output expands the response by roughly one third, and default maximum-size attachments can produce very large tool responses; this is a documented operational consideration, not an automatic fetch.
+- **(implemented)** `read_attachment` accepts no filesystem path. Its only reference inputs are account, mailbox, UID, UIDVALIDITY and the `read_message` part path; part syntax, length, depth and component bounds are validated before retrieval. Retrieved filenames and MIME types remain untrusted metadata and are never opened, executed or written to disk.
 - **(implemented)** Fuzz tests against the MIME parser are deferred; the existing test suite covers plain text, HTML, alternative, mixed, nested, charset edge cases, and the explicit safety cap paths.
 - **(implemented, protocol-level enforcement)** The
   per-account body cap (`max_message_bytes`) is enforced at
@@ -186,12 +187,12 @@ symlink-to-escape at the OS level, narrowing the window further.
 
 **Mitigations.**
 
-- **(implemented, read-only slice)** `read_message` requires both `uid` and `uid_validity`; a mismatch returns `ErrUidMismatch` (HTTP `UidMismatch`) without reading any body. Omitting `uid_validity` returns `InvalidInput` before any backend call. A server that reports a zero UIDVALIDITY is rejected with `ErrUIDMissing`.
+- **(implemented, read-only slice)** `read_message` and `read_attachment` require both `uid` and `uid_validity`; a mismatch returns `ErrUidMismatch` (HTTP `UidMismatch`) without reading any body. Omitting `uid_validity` returns `InvalidInput` before any backend call. A server that reports a zero UIDVALIDITY is rejected with `ErrUIDMissing`.
 - **(implemented, PR #3 review)** The UIDVALIDITY returned by `list_messages` and `search_messages` is bound to the same IMAP `EXAMINE` that produced the UIDs. The wire-level `ListResult` struct pairs `UIDValidity` and `Messages` so a later selection cannot be combined with the returned UIDs. The legacy `MailboxUIDValidity` helper remains for diagnostics but is documented as a stand-alone EXAMINE that must not be used to validate a UID obtained elsewhere.
 - **(planned)** Phase 2 mutating operations (move, flag, archive, delete) carry the same UIDVALIDITY contract. Move and delete require the `modify` and `delete` capabilities respectively.
 - **(planned)** `delete` is hard-disabled unless explicitly enabled; `archive` is a logical move, not a delete.
 - **(planned)** Trash / Deleted Messages handling honours provider folder names (`Trash`, `INBOX.Trash`, `[Gmail]/Trash`).
-- **(implemented)** No read operation mutates: `read_message` uses `UID FETCH BODY.PEEK[]` (does not set `\Seen`); `list_messages`, `search_messages`, `list_mailboxes` are pure queries. The IMAP backend issues `EXAMINE` (read-only `SELECT`) so the server-side state cannot accept `STORE` or `APPEND` through a read connection.
+- **(implemented)** No read operation mutates: `read_message` and `read_attachment` use `UID FETCH BODY.PEEK[]` (does not set `\Seen`); `list_messages`, `search_messages`, `list_mailboxes` are pure queries. The IMAP backend issues `EXAMINE` (read-only `SELECT`) so the server-side state cannot accept `STORE` or `APPEND` through a read connection.
 
 ### T8. SMTP duplicate sends
 

@@ -26,6 +26,7 @@ func TestMapErrMimeparse(t *testing.T) {
 		{"too many attachments", mimeparse.ErrTooManyAttachments, mailbox.ErrTooManyAttachments},
 		{"attachment too large", mimeparse.ErrAttachmentTooLarge, mailbox.ErrAttachmentTooLarge},
 		{"total attachment too large", mimeparse.ErrTotalAttachmentTooLarge, mailbox.ErrTotalAttachmentTooLarge},
+		{"attachment not found", mimeparse.ErrAttachmentNotFound, mailbox.ErrAttachmentNotFound},
 		{"malformed", mimeparse.ErrMalformed, mailbox.ErrMalformed},
 	}
 	for _, tc := range cases {

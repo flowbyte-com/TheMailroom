@@ -2,9 +2,12 @@
 
 > Status: in progress. Phase 2.1 (read-only IMAP correctness + MIME
 > reading) is implemented in `internal/imapclient` and
-> `internal/mimeparse`. This document captures the design decisions
-> for the remaining slices: SMTP submission, MIME composition, reply /
-> forward, attachments, and protected mailbox modifications.
+> `internal/mimeparse`. Phase 2.2 Priority 3 (inbound
+> `read_attachment`) is implemented on a review branch and is
+> **IN REVIEW**; it is not merged. This document captures the design
+> decisions for that slice and the remaining work: SMTP submission,
+> MIME composition, reply / forward, outbound attachments, and
+> protected mailbox modifications.
 
 ## 1. Library selection (post-research)
 
@@ -82,6 +85,65 @@ Each account has:
 
 These are enforced in the SMTP submission path before any DATA is
 written.
+
+### 2.4 Inbound attachment retrieval (Phase 2.2 Priority 3)
+
+Inbound attachment retrieval is a read operation, distinct from the
+outbound filesystem path references above. The approved slice uses
+full-message `BODY.PEEK[]` plus the existing `internal/mimeparse`
+traversal, then returns exactly one attachment selected by the
+`read_message` part path.
+
+Rejected alternatives:
+
+- **Per-part `BODY.PEEK[part]`.** Feasible for ordinary multipart
+  messages, but it cannot enforce a message-wide total attachment
+  cap or prove that the part has the same membership/classification
+  as `read_message` without also parsing the full message or
+  fetching BODYSTRUCTURE. A missing part can also be indistinguishable
+  from an empty literal on some servers.
+- **BODYSTRUCTURE-driven validation.** It adds an unbounded metadata
+  surface, an additional parser, and does not fully describe
+  `message/rfc822` descendants. It is not used for retrieval or for
+  `has_attachments`.
+- **Caching, temporary files, streaming or a new storage layer.**
+  Out of scope; the slice reuses the existing bounded in-memory
+  paths.
+
+Security properties of the chosen approach:
+
+- The IMAP backend reuses `EXAMINE`, live UIDVALIDITY validation,
+  exact UID matching, `BODY.PEEK[]`, the protocol literal-size cap
+  and the existing MIME limits.
+- The complete MIME tree is validated before content is returned.
+  The selected part is captured only if it is classified as an
+  exposed attachment; containers, body parts, missing parts and
+  descendants hidden inside an opaque `message/rfc822` attachment
+  are rejected with `ErrAttachmentNotFound`.
+- Extraction is fail-closed: malformed siblings, body read or
+  transfer-decoding failures, unknown transfer encodings and
+  oversized ordinary body parts return typed errors and discard any
+  captured content. Unrelated charset warnings remain non-fatal;
+  a selected text attachment with an unknown charset is rejected.
+  `Parse` and `read_message` retain their existing best-effort
+  warning behaviour.
+- `ExtractAttachment` shares the `Parse` traversal rather than
+  introducing a second parser. It reports the selected attachment's
+  actual ordinal so `FetchAttachment` metadata stays consistent
+  with `read_message`.
+- The memory backend retains a private raw snapshot only for
+  messages with exposed attachments, so retrieval does not re-read
+  the source file. The snapshot is not exposed to callers and adds
+  at most the raw message size per such message.
+- Text attachments are charset-decoded to UTF-8 where possible, so
+  text content is not guaranteed to be byte-identical to the
+  sender's file. Binary transfer-encoded content is decoded to its
+  original bytes.
+- Base64 output expands the response by roughly one third. A
+  default maximum-size attachment (6 MiB decoded) can produce an
+  approximately 8 MiB tool response. There is no additional
+  response-size limit in this slice; that remains a documented
+  operational consideration.
 
 ## 3. SMTP submission semantics
 
@@ -290,11 +352,12 @@ now states its resolution.
   backend searches decoded plain text only. These differences
   are inherent to delegating search to the server and are
   documented in `docs/TOOLS.md`.
-- **Attachment metadata in list/search summaries is deferred.**
-  The IMAP backend's list and search summaries do not populate
-  `has_attachments` (it is always false); the memory backend
-  does. Populating it requires `BODYSTRUCTURE` parsing and is
-  deferred to Phase 2.2 Priority 3 (`read_attachment`).
+- **Attachment metadata in list/search summaries is a separate
+  outstanding issue.** The IMAP backend's list and search summaries
+  do not populate `has_attachments` (it is always false); the memory
+  backend does. Populating it requires `BODYSTRUCTURE` parsing and is
+  not part of the Phase 2.2 Priority 3 retrieval slice. Priority 3
+  leaves this behaviour unchanged and does not claim to fix it.
 
 Cross-backend agreement on the tested criteria is asserted
 directly: `internal/imapclient/search_consistency_test.go` runs
@@ -676,8 +739,9 @@ deliverables, and out-of-scope items, is in
    (`21f859b`) after HAL approval at `38b0bf4`; the
    date-semantics and limit closeout is included.
 3. **Secure attachment retrieval** — new `read_attachment` tool
-   with stable MIME-part references and strict resource
-   limits.
+   with stable MIME-part references and strict resource limits.
+   **IN REVIEW** on `phase2.2-priority3-read-attachment`; not
+   merged. See §2.4.
 
 SMTP, outbound attachments, and mutating mailbox operations
 remain out of scope.
@@ -686,7 +750,7 @@ TheMailroom is **not** production-hardened. The literal-size
 requirement (§10) is satisfied, but a long-term dependency on a
 personal fork of go-imap is itself a maintenance risk that must
 be resolved (upstream the change, or replace the library) — see
-§8 and the fork's `CHANGES.md`. The search defects (§7) and the
-missing attachment retrieval tool are also still open. The
+§8 and the fork's `CHANGES.md`. The search defects (§7) are fixed;
+attachment retrieval (§2.4) is implemented but awaiting review. The
 remaining production-readiness work is tracked in
 `docs/PHASE2.2.md`.

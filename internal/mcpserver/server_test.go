@@ -119,7 +119,17 @@ accounts:
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(res.Tools) != 5 {
-		t.Errorf("len(Tools) = %d, want 5", len(res.Tools))
+	if len(res.Tools) != 6 {
+		t.Errorf("len(Tools) = %d, want 6", len(res.Tools))
+	}
+	foundAttachment := false
+	for _, tool := range res.Tools {
+		if tool.Name == "read_attachment" {
+			foundAttachment = true
+			break
+		}
+	}
+	if !foundAttachment {
+		t.Error("read_attachment tool is not registered")
 	}
 }

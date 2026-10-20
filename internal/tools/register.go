@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -176,6 +177,66 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				Attachments: atts,
 				Warnings:    msg.Warnings,
 				Truncated:   truncated,
+			}
+			return
+		})
+
+	// read_attachment
+	mcp.AddTool(server, readAttachmentTool,
+		func(ctx context.Context, _ *mcp.CallToolRequest, args ReadAttachmentArgs) (result *mcp.CallToolResult, output *ReadAttachmentResult, err error) {
+			if args.AccountID == "" {
+				err = invalidInput("account_id is required")
+				return
+			}
+			if args.Mailbox == "" {
+				err = invalidInput("mailbox is required")
+				return
+			}
+			if args.UID == 0 {
+				err = invalidInput("uid is required")
+				return
+			}
+			if args.UIDValidity == 0 {
+				err = invalidInput("uid_validity is required; obtain it from list_messages or search_messages before calling read_attachment")
+				return
+			}
+			if args.Part == "" {
+				err = invalidInput("part is required")
+				return
+			}
+			acc, gerr := registry.Get(args.AccountID)
+			if gerr != nil {
+				err = mapError(gerr)
+				return
+			}
+			if !acc.Permissions.Has(permissions.CapRead) {
+				err = mapError(&permissions.ErrPermissionDenied{Account: acc.ID, Capability: permissions.CapRead})
+				return
+			}
+			if _, perr := mailbox.ParsePartPath(args.Part, acc.Limits.MaxMIMENesting, acc.Limits.MaxMIMEParts); perr != nil {
+				err = mapError(perr)
+				return
+			}
+			data, berr := acc.Backend().FetchAttachment(ctx, args.AccountID, args.Mailbox, args.UID, args.UIDValidity, args.Part)
+			if berr != nil {
+				err = mapError(berr)
+				return
+			}
+			part := data.Attachment.Part
+			if part == "" {
+				part = args.Part
+			}
+			output = &ReadAttachmentResult{
+				AccountID:     args.AccountID,
+				Mailbox:       args.Mailbox,
+				UID:           data.UID,
+				UIDValidity:   data.UIDValidity,
+				Part:          part,
+				Filename:      data.Attachment.Filename,
+				MimeType:      data.Attachment.MimeType,
+				Size:          int64(len(data.Content)),
+				ContentBase64: base64.StdEncoding.EncodeToString(data.Content),
+				Warnings:      data.Warnings,
 			}
 			return
 		})

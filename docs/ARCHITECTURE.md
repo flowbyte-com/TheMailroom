@@ -57,15 +57,15 @@ The MCP layer never sees credentials. All inputs are validated against the tool 
 
 Tools are the public surface. They are grouped by capability:
 
-- Read-only (Phase 1):
+- Read-only:
   - `list_accounts`
   - `list_mailboxes`
   - `list_messages`
   - `read_message`
+  - `read_attachment`
   - `search_messages`
-- Read attachments (Phase 2): `read_attachment`
-- Sending (Phase 2): `send_message`, `reply_message`, `forward_message`
-- Modification (Phase 2): `move_message`, `flag_message`, `archive_message`, `delete_message`
+- Sending (future): `send_message`, `reply_message`, `forward_message`
+- Modification (future): `move_message`, `flag_message`, `archive_message`, `delete_message`
 
 Tools return structured payloads (JSON) and never include credentials or arbitrary raw protocol output. Errors are typed (`PermissionDenied`, `AccountNotFound`, `InvalidInput`, `BackendError`, `RateLimited`, etc.) and serialised without leaking internal details.
 
@@ -76,9 +76,10 @@ A `Backend` interface defines the operations needed by tools:
 ```go
 type Backend interface {
     Mailboxes(ctx context.Context, account AccountRef) ([]Mailbox, error)
-    ListMessages(ctx context.Context, account AccountRef, mailbox string, opts ListOptions) ([]MessageSummary, error)
-    FetchMessage(ctx context.Context, account AccountRef, mailbox string, uid uint32) (*Message, error)
-    SearchMessages(ctx context.Context, account AccountRef, mailbox string, q SearchQuery) ([]MessageSummary, error)
+    ListMessages(ctx context.Context, account AccountRef, mailbox string, opts ListOptions) (ListResult, error)
+    FetchMessage(ctx context.Context, account AccountRef, mailbox string, uid uint32, uidValidity uint32) (*Message, error)
+    FetchAttachment(ctx context.Context, account AccountRef, mailbox string, uid uint32, uidValidity uint32, part string) (*AttachmentData, error)
+    SearchMessages(ctx context.Context, account AccountRef, mailbox string, q SearchQuery) (ListResult, error)
 }
 ```
 
@@ -151,8 +152,17 @@ lands with `send_message` in Phase 2.2. The parser:
 - Captures attachment metadata (filename, mime type, size, part
   path, Content-ID, disposition) without materialising the
   attachment body in the wire response.
-- Enforces per-message, per-attachment, total-attachment, nesting
-  and part-count limits before allocating large buffers.
+- `ExtractAttachment` shares that traversal to return exactly one
+  selected exposed attachment, after the complete message and all
+  limits have been validated. It never returns partial content:
+  malformed siblings, body read/transfer-decoding failures, unknown
+  transfer encodings and oversized ordinary body parts are typed
+  errors. `Parse` keeps its best-effort warning behaviour.
+- Rejects multipart containers, ordinary body parts, missing parts
+  and hidden descendants of opaque `message/rfc822` attachments.
+- Enforces per-message, per-attachment, total-attachment, nesting,
+  attachment-count and part-count limits before allocating large
+  buffers.
 
 ### 2.6 Attachments (`internal/attachments`)
 
