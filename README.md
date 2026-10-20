@@ -34,20 +34,21 @@ correctness (PR #6), and secure inbound attachment retrieval (PR #8).
 The Phase 2.2 documentation closeout is merged as PR #9.
 
 **Phase 2.3 (Outbound submission foundations)** is in progress.
-PR 1 adds conditional SMTP configuration validation, the recipient
-policy, the confined outbound attachment resolver, and safer
-`list_accounts` output. **PR 1 is IN REVIEW.** It does not send email,
-compose MIME messages, or register `send_message`; those remain future
-work. The plan is in
-[`docs/PHASE2.3.md`](docs/PHASE2.3.md).
+PR 1 (merged as PR #10) adds conditional SMTP configuration validation,
+the recipient policy, the confined outbound attachment resolver, and
+safer `list_accounts` output. PR 2 adds a standalone, bounded MIME
+composer and is **IN REVIEW**. It does not send email, register
+`send_message`, or open an SMTP connection; those remain future work.
+The plan is in [`docs/PHASE2.3.md`](docs/PHASE2.3.md).
 
 TheMailroom is a **development milestone, not a
 production-hardened release**. The IMAP literal-size
 pre-allocation vulnerability is fixed, but the fix depends on a
 fork of go-imap that must still be upstreamed or replaced (see
 [`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §8). Inbound
-attachment retrieval is merged (PR #8); outbound SMTP submission and
-MIME composition are not implemented.
+attachment retrieval is merged (PR #8). MIME composition is implemented
+internally for the future outbound path, but outbound SMTP submission is
+not implemented and no send tool is registered.
 
 Phase 2.1 ships:
 
@@ -75,10 +76,10 @@ Phase 2.1 ships:
 | 2 | IMAP search correctness defects | **DONE** (PR #6) |
 | 3 | Secure attachment retrieval | **DONE** (PR #8) |
 
-Outbound SMTP submission, MIME composition, reply/forward, and
-mutating mailbox operations remain unimplemented. Phase 2.3 PR 1 only
-prepares the configuration, recipient-policy, and confined
-attachment-resolution foundations.
+Outbound SMTP submission, `send_message`, reply/forward, and mutating
+mailbox operations remain unimplemented. Phase 2.3 PR 1 prepared the
+configuration, recipient-policy, and confined attachment-resolution
+foundations; PR 2 adds a bounded MIME composer for the future sender.
 
 **Phase 3 (Hardening)** will cover the remaining production gates,
 including bounded IMAP list/search workloads, explicit IMAP command
@@ -187,8 +188,12 @@ preserved and significant, while domain case is not. There are no
 wildcard or substring rules. Local attachment references are relative
 paths resolved only inside `attachment_send_paths`; absolute paths,
 traversal, symlink escapes and non-regular files are rejected. The
-outbound resolver and recipient policy are implemented, but no tool uses
-them to send yet.
+outbound resolver, recipient policy and standalone MIME composer are
+implemented, but no send tool is registered. The composer enforces
+`max_message_bytes` on the final serialized message (including MIME
+boundaries and base64 expansion), bounds header preparation by the same
+limit before encoding, omits Bcc from headers, and returns a generated
+Message-ID for a future sender.
 
 ## Run
 

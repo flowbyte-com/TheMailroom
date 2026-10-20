@@ -1,9 +1,10 @@
 # TheMailroom Tools
 
-> Status: Phase 2.3 PR 1 is **IN REVIEW**. The read-only tools below are
-> implemented and `read_attachment` is merged. PR 1 adds the recipient
-> policy, SMTP configuration validation, and the confined attachment
-> resolver; it does **not** add `send_message` or any SMTP/MIME
+> Status: Phase 2.3 PR 2 is **IN REVIEW**. The read-only tools below are
+> implemented and `read_attachment` is merged. PR 1 (merged as PR #10)
+> adds the recipient policy, SMTP configuration validation, and the
+> confined attachment resolver. PR 2 adds an internal bounded MIME
+> composer, but does **not** add `send_message`, an SMTP client or any
 > submission path. Sending, modification and deletion remain future
 > work.
 
@@ -270,13 +271,13 @@ Violations return a typed error (`MessageTooLarge`, `AttachmentTooLarge`,
 `NestingTooDeep`, `TooManyParts`, `TooManyAttachments`) without reading
 the rest of the message.
 
-**Outbound policy limits (Phase 2.3 PR 1, no send tool yet):**
+**Outbound policy limits (Phase 2.3 PR 1/PR 2, no send tool yet):**
 
 - `max_recipients` — caps unique outbound To + Cc + Bcc recipients (default 50).
 - `max_attachment_bytes` / `max_total_attachment_bytes` — bound decoded
   bytes for path attachments resolved by `internal/attachments`.
-- `max_message_bytes` — reserved for the future MIME composer's final
-  serialized-size check.
+- `max_message_bytes` — enforced by `internal/mailcompose` on the final
+  serialized message. No send tool calls the composer yet.
 
 ### `read_attachment`
 
@@ -446,9 +447,10 @@ slice.
 
 These names and shapes are sketches, not current contracts.
 
-PR 1 implements the configuration and attachment-resolution foundations
-for these tools, but none of them is registered yet. In particular,
-there is no SMTP client and no MIME composer.
+PR 1 (merged as PR #10) implements the configuration and
+attachment-resolution foundations, and PR 2 implements the internal
+bounded MIME composer. None of these tools is registered yet. In
+particular, there is no SMTP client and no submission path.
 
 - `send_message` — compose and send a new message. Requires `send` and `attachment_send` if attachments are included.
 - `reply_message` — reply, optionally quoting the original. Requires `send`. Honours `reply_all`.

@@ -1,11 +1,13 @@
 # Phase 2 Design Notes
 
-> Status: Phase 2.3 PR 1 is **IN REVIEW**. Phase 2.1 (read-only IMAP
+> Status: Phase 2.3 PR 2 is **IN REVIEW**. Phase 2.1 (read-only IMAP
 > correctness + MIME reading) is implemented in `internal/imapclient`
 > and `internal/mimeparse`. Phase 2.2 is complete, including inbound
-> `read_attachment` (PR #8). Phase 2.3 PR 1 implements the recipient
-> policy, conditional SMTP configuration validation, and the confined
-> outbound attachment resolver. SMTP submission, MIME composition,
+> `read_attachment` (PR #8). Phase 2.3 PR 1 (merged as PR #10)
+> implements the recipient policy, conditional SMTP configuration
+> validation, and the confined outbound attachment resolver. PR 2
+> implements the standalone bounded MIME composer in
+> `internal/mailcompose`. SMTP submission, `send_message`,
 > reply/forward, and protected mailbox modifications are **not**
 > implemented.
 
@@ -15,8 +17,8 @@
 |----------------------|--------------------------------------|----------|
 | IMAP client          | `github.com/emersion/go-imap` v1.2.1 | **Selected.** v1 is the stable, production-tracked line. v2 is parallel development, not yet marked stable. TheMailroom will move to v2 only when upstream tags a stable release. |
 | IMAP server (tests)  | `github.com/emersion/go-imap/server` + `backend/memory` | **Selected.** Spin up a real IMAP4rev1 server in-process for tests. |
-| SMTP client          | `github.com/emersion/go-smtp` v0.25.0 | **Selected for Phase 2.3 PR 2.** Not yet a dependency or implemented. |
-| MIME parser/composer | `github.com/emersion/go-message` v0.18.2 | **Selected.** Charset-aware, multipart-aware, RFC 2047 handling. **Parser implemented in Phase 2.1** as `internal/mimeparse`; composer is planned for Phase 2.3 PR 2. |
+| SMTP client          | `github.com/emersion/go-smtp` v0.25.0 | **Selected for Phase 2.3 PR 3.** Not yet a dependency or implemented. |
+| MIME parser/composer | `github.com/emersion/go-message` v0.18.2 | **Selected.** Charset-aware, multipart-aware, RFC 2047 handling. **Parser implemented in Phase 2.1** as `internal/mimeparse`; **bounded composer implemented in Phase 2.3 PR 2** as `internal/mailcompose`. |
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+) | **Selected.** OS-level confinement; prevents symlink escape. |
 | Self-signed test CA  | `crypto/rsa`, `crypto/x509`, `crypto/tls` (stdlib) | **Selected.** Generate certs in tests; trust via `InsecureSkipVerify` only in the test-only `Options.TLSConfig` knob. |
 
@@ -89,12 +91,14 @@ Each account has:
   all local attachments.
 - `max_recipients` (default 50): unique To + Cc + Bcc envelope
   recipients.
-- `max_message_bytes` (default 25 MiB): eventual serialized RFC 5322
-  message size, including transfer-encoding expansion.
+- `max_message_bytes` (default 25 MiB): serialized RFC 5322 message
+  size, including all headers, MIME boundaries and transfer-encoding
+  expansion.
 
-The attachment and recipient limits are implemented in Phase 2.3 PR 1.
-`max_message_bytes` must be enforced by the future MIME composer because
-only it knows the final serialized size. No send path exists yet.
+The attachment and recipient limits were implemented in Phase 2.3 PR 1.
+`max_message_bytes` is now enforced by the PR 2 composer's bounded
+writer: exactly-at-limit succeeds and any larger message returns a typed
+error. No send path exists yet.
 
 ### 2.4 Inbound attachment retrieval (Phase 2.2 Priority 3)
 
@@ -155,6 +159,94 @@ Security properties of the chosen approach:
   response-size limit in this slice; that remains a documented
   operational consideration.
 
+### 2.4a Outbound MIME composition (Phase 2.3 PR 2)
+
+`internal/mailcompose` is a pure message-construction component. It does
+not open SMTP connections, resolve filesystem paths, call MCP handlers,
+mutate mailbox state or depend on provider behaviour. It consumes the
+`attachments.File` values already frozen by `internal/attachments` and
+returns a complete byte slice plus the generated Message-ID.
+
+The contract is:
+
+```go
+type Request struct {
+    From        string   // trusted account identity
+    To          []string // canonicalised with recipients.Canonical
+    Cc          []string
+    Bcc         []string // validated, never serialized
+    Subject     string
+    Text        string
+    HTML        string
+    Attachments []attachments.File
+}
+
+type Result struct {
+    Message   []byte
+    MessageID string // bare id, without angle brackets
+}
+
+func Compose(req Request, limits config.LimitsConfig) (Result, error)
+```
+
+The composer emits only fixed headers: `From`, optional `To` and `Cc`,
+`Subject`, `Date`, `Message-ID`, `MIME-Version`, and the appropriate
+MIME part headers. It accepts no header map or raw MIME fragment.
+`Subject` is RFC 2047 encoded when needed; attachment filenames use
+RFC 2231. CR/LF and control characters are rejected in user-controlled
+header fields and filenames. Bcc never appears in serialized headers.
+The future sender must use the same validated recipients to build the
+SMTP envelope separately.
+
+The MIME trees are:
+
+- `text/plain; charset=utf-8` alone.
+- `text/html; charset=utf-8` alone.
+- `multipart/alternative` with text/plain first and text/html second.
+- `multipart/mixed` whose first child is the single body part or the
+  alternative container, followed by the attachments in request order.
+
+Body parts use quoted-printable. Attachment parts carry
+`Content-Disposition: attachment`, a base64 transfer encoding and the
+exact frozen bytes. Filenames use RFC 2231 encoding; values long enough
+to risk header folding are emitted as RFC 2231 continuations. Unknown
+filename extensions use
+`application/octet-stream`; a fixed in-process extension table is used
+instead of the host MIME database so composition performs no filesystem
+reads. Duplicate basenames remain separate parts and zero-byte
+attachments are valid.
+
+`Compose` consumes `config.LimitsConfig` directly. It re-checks
+`max_attachment_bytes`, `max_total_attachment_bytes` and
+`max_attachments` before serialization even when the caller did not use
+the resolver. A bounded writer enforces `max_message_bytes` on the final
+serialized output, including headers, boundaries and transfer-encoding
+expansion. Exactly-at-limit succeeds; one byte larger returns
+`ErrMessageTooLarge`. All failures return the zero `Result`, never
+partial bytes. No temporary files or disk spooling are used.
+
+Before header encoding, the composer uses `max_message_bytes` as a
+preparation budget: oversized subjects and filenames are rejected before
+RFC 2047/RFC 2231 expansion, aggregate raw address input and address
+counts are bounded, and the canonical `From`/`To`/`Cc` values must fit
+the same budget. This bounds temporary allocations under a small
+serialized limit without enforcing the recipient allow-list or changing
+recipient canonicalisation. The bounded writer still determines the
+exact final-size boundary.
+
+Typed errors distinguish invalid message/header input, invalid
+attachment metadata, too many attachments, per-attachment size, total
+attachment size, serialized size, MIME failure and invalid limits. They
+are suitable for mapping to MCP errors when the sender lands. Error
+messages do not echo attachment contents, credentials or raw untrusted
+header values.
+
+Authorization remains outside the composer: the future `send_message`
+handler must call `recipients.Policy.Validate` (the exact allow-list and
+recipient limit) before composing, and must pass the account's
+configured `email` as `From`. The composer canonicalises addresses but
+cannot prove that `From` is the configured identity.
+
 ## 3. SMTP submission semantics
 
 ### 3.1 Single submit cycle
@@ -166,9 +258,12 @@ This is intentional:
 
 - We do not have a notion of a "send spool" — a crashed send is a
   failed send.
+- The composer generates exactly one Message-ID per composition and
+  returns it with the serialized bytes. The future sender must report
+  that value on an ambiguous failure rather than generating a second
+  identity. A new composition receives a new Message-ID.
 - The agent (MCP caller) is responsible for retrying with the
-  **same** Message-ID if needed; TheMailroom never reuses a
-  Message-ID.
+  **same** prepared message and Message-ID if needed.
 - Duplicate sends are the agent's responsibility. TheMailroom
   surfaces the `Message-ID` and the SMTP server's response so the
   agent can detect duplicates on its end.

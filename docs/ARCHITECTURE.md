@@ -1,10 +1,11 @@
 # TheMailroom Architecture
 
-> Status: Phase 2.3 PR 1 is **IN REVIEW**. The read-only IMAP path,
+> Status: Phase 2.3 PR 2 is **IN REVIEW**. The read-only IMAP path,
 > inbound attachment retrieval, recipient policy, conditional SMTP
-> validation, and the confined outbound attachment resolver are
-> implemented. SMTP submission and MIME composition are planned and are
-> **not** implemented.
+> validation, the confined outbound attachment resolver, and the
+> bounded MIME composer are implemented. SMTP submission,
+> `send_message`, reply/forward and mailbox mutation are **not**
+> implemented.
 
 ## 1. Goals and non-goals
 
@@ -39,7 +40,8 @@ The module is split into focused internal packages. Each layer depends only on t
 |  internal/mailbox/memory  (in-memory Backend)           |
 |  internal/imapclient      (IMAP Backend — read slice)   |
 |  internal/smtpclient      (SMTP submission — planned)   |
-|  internal/mimeparse       (MIME parse; composer planned)|
+|  internal/mailcompose     (bounded MIME composer)       |
+|  internal/mimeparse       (read-only MIME parser)       |
 |  internal/attachments     (os.Root outbound confinement)|
 |  internal/recipients      (outbound recipient policy)   |
 +---------------------------------------------------------+
@@ -141,19 +143,39 @@ IMAP4rev1 backend. It uses a narrow fork of
 - Refusal to dial without TLS or STARTTLS — plain IMAP is never
   accepted.
 
-SMTP submission and MIME composition are deliberately not implemented
-yet. Phase 2.3 PR 1 validates SMTP configuration only when an account
-has the `send` capability; it does not instantiate an SMTP client. The
-future sender is documented in `docs/PHASE2_DESIGN.md` and
+SMTP submission is deliberately not implemented yet. Phase 2.3 PR 1
+validates SMTP configuration only when an account has the `send`
+capability; it does not instantiate an SMTP client. PR 2 provides a
+standalone composer, but nothing calls it from a send path. The future
+sender is documented in `docs/PHASE2_DESIGN.md` and
 `docs/PHASE2.3.md`.
 
-### 2.5 MIME (`internal/mimeparse`)
+### 2.5 MIME (`internal/mimeparse`, `internal/mailcompose`)
 
-Wrapping `github.com/emersion/go-message` (parser + composer).
-`internal/mimeparse` is the read-only parser that both backends use
-so memory and IMAP expose the same structured view. The outbound
-composer is planned for Phase 2.3 PR 2 and is not implemented. The
-parser:
+Both packages use `github.com/emersion/go-message`.
+`internal/mimeparse` is the read-only parser that both mailbox
+backends use so memory and IMAP expose the same structured view.
+`internal/mailcompose` is the outbound composer added in Phase 2.3
+PR 2. It is a pure, in-memory component: it accepts a fixed `From`
+identity, To/Cc/Bcc values (canonicalised internally), text/HTML bodies
+and frozen attachment data, and returns complete serialized bytes plus the
+generated Message-ID. It has no SMTP connection, MCP handler,
+filesystem access, path resolution, mailbox state or provider-specific
+behaviour. Bcc is validated but omitted from serialized headers.
+
+The composer emits a single `text/plain` or `text/html` body when only
+one format is supplied, a `multipart/alternative` container (plain then
+HTML) when both are supplied, and a `multipart/mixed` root with the body
+child first followed by attachments in request order. Attachments use
+base64 and RFC 2231 filenames. A bounded writer enforces
+`max_message_bytes` on the final serialized message; per-file, total
+attachment and attachment-count limits are re-checked defensively.
+The same limit bounds header preparation before RFC 2047/RFC 2231
+encoding and address-list joins, so a small serialized limit also bounds
+temporary header allocations. Exactly-at-limit succeeds and any overage
+returns a typed error with no partial result.
+
+The parser:
 
 - Decodes text/* and html/* bodies, applying the declared
   Content-Transfer-Encoding and charset (RFC 2047) automatically.
@@ -195,6 +217,8 @@ for filesystem confinement:
   are never returned. Roots are closed by the registry shutdown path.
   Each account has its own roots and policy; cross-account access is
   impossible.
+- `internal/mailcompose` consumes the frozen `[]attachments.File`
+  directly and never reopens a path. No send tool is wired yet.
 
 ### 2.6a Search semantics (`internal/searchspec`)
 
@@ -312,8 +336,8 @@ CA) or a `SSL_CERT_FILE` override at the host level.
 | MCP transport        | `github.com/modelcontextprotocol/go-sdk`       | Official Go SDK; stdio transport; schema-validated tools.       |
 | YAML config          | `gopkg.in/yaml.v3`                              | Mature, widely used; supports strict unknown-key rejection.    |
 | IMAP (Phase 2)       | `github.com/flowbyte-com/go-imap` (fork of `github.com/emersion/go-imap` v1.2.1) | De facto standard; protocol-correct; stable API. The fork adds protocol-level IMAP literal-size enforcement; see `docs/PHASE2_DESIGN.md` §8/§10. |
-| SMTP (planned)       | `github.com/emersion/go-smtp` v0.25.0          | Selected for Phase 2.3 PR 2; not yet a dependency or implemented. |
-| MIME (Phase 2)       | `github.com/emersion/go-message`                | Parser implemented; composer planned for Phase 2.3 PR 2. Charset-aware; handles RFC 2047. |
+| SMTP (planned)       | `github.com/emersion/go-smtp` v0.25.0          | Selected for Phase 2.3 PR 3; not yet a dependency or implemented. |
+| MIME (Phase 2)       | `github.com/emersion/go-message`                | Parser implemented as `internal/mimeparse`; bounded composer implemented as `internal/mailcompose` in Phase 2.3 PR 2. Charset-aware; handles RFC 2047. |
 | Logging              | `log/slog` (stdlib)                             | Go 1.21+; structured logging; no extra dep.                    |
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+)                    | OS-level chroot-style; prevents escape by symlink.             |
 | Testing              | stdlib `testing` + emersion server packages     | Stub-friendly; integration via local in-process servers later.  |
