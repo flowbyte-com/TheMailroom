@@ -11,7 +11,7 @@
 |---|---|---|
 | 1 | Protocol-level IMAP literal-size enforcement | **DONE** — merged in PR #5 (`d28dfa3`) |
 | 2 | IMAP search correctness defects | **DONE** — merged in PR #6 (`21f859b`) |
-| 3 | Secure attachment retrieval | **IN REVIEW** — implementation on `phase2.2-priority3-read-attachment`; not merged |
+| 3 | Secure attachment retrieval | **DONE** — merged in PR #8 (`2690380`) |
 
 ## Scope
 
@@ -239,10 +239,8 @@ attachment retrieval.
 
 ### Priority 3 — Secure attachment retrieval
 
-**Status:** **IN REVIEW**. The implementation is on the
-`phase2.2-priority3-read-attachment` branch and has not been
-merged. Priority 3 must not be marked DONE until HAL reviews the
-implementation PR.
+**Status:** **DONE**. Merged in PR #8 at `2690380` after HAL
+approval at `41430936`.
 
 **Requirements:**
 
