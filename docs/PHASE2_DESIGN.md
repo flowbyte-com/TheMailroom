@@ -622,3 +622,36 @@ fork cannot be upstreamed.
 **Out of scope (deferred, not a blocker):** Outbound IMAP
 operations (`APPEND`, `COPY`) are not in scope for Phase 2.1
 and do not affect this requirement.
+## 11. Phase 2.2 plan
+
+The full plan, including priorities, acceptance criteria,
+deliverables, and out-of-scope items, is in
+`docs/PHASE2.2.md`. The three priorities are, in order:
+
+1. **Protocol-level IMAP literal-size enforcement** —
+   resolves the mandatory pre-production security requirement
+   (§10). **DONE**: merged in PR #5 as `d28dfa3`, using a
+   narrowly scoped fork of `github.com/emersion/go-imap`
+   (`github.com/flowbyte-com/go-imap` v1.2.1-themailroom.4)
+   that exposes `Reader.MaxLiteralSize` as a
+   `client.DialOptions` field. See §8 for the implementation
+   and §10 for the per-criterion status.
+2. **IMAP search correctness defects** — `Flagged`, `Unseen`,
+   `Subject + From + To` OR semantics, `SentSince` /
+   `SentBefore` semantics (§7). **NEXT**: the next
+   development slice.
+3. **Secure attachment retrieval** — new `read_attachment` tool
+   with stable MIME-part references and strict resource
+   limits.
+
+SMTP, outbound attachments, and mutating mailbox operations
+remain out of scope.
+
+TheMailroom is **not** production-hardened. The literal-size
+requirement (§10) is satisfied, but a long-term dependency on a
+personal fork of go-imap is itself a maintenance risk that must
+be resolved (upstream the change, or replace the library) — see
+§8 and the fork's `CHANGES.md`. The search defects (§7) and the
+missing attachment retrieval tool are also still open. The
+remaining production-readiness work is tracked in
+`docs/PHASE2.2.md`.
