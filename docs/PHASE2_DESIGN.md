@@ -233,10 +233,11 @@ now states its resolution.
   `q.Flagged` to `WithFlags = []string{"\\Flagged"}` and
   `q.Unseen` to `WithoutFlags = []string{"\\Seen"}`. The memory
   backend honours the same predicates; the flags of an
-  in-memory message are derived from the RFC 2156 `Status:`
-  header, so a message with no `Status:` header is unseen and
-  not flagged. The shared predicates live in
-  `internal/searchspec`.
+  in-memory message are derived from the conventional mbox
+  `Status:` (`R` = `\Seen`, `O` = old/no flag) and `X-Status:`
+  (`D`/`F`/`A` = `\Deleted`/`\Flagged`/`\Answered`) headers, so
+  a message with neither header is unseen and not flagged. The
+  shared predicates live in `internal/searchspec`.
 - **The tool layer rejected `Flagged` / `Unseen` with a typed
   `NotImplemented` error** rather than silently passing them
   through to backends that ignored them. *Resolved in Phase 2.2
@@ -249,12 +250,13 @@ now states its resolution.
   `subject=foo, from=bar` returned messages containing "foo"
   anywhere OR "bar" anywhere. *Resolved in Phase 2.2 Priority
   2.* The backend now uses the corresponding IMAP header
-  search keys (`Subject`, `From`, `To`, `Cc`) and computes the
-  conjunction in the client: one SEARCH per header criterion
-  (two for `to`, which matches To or Cc) and an intersection
-  of the resulting UID sets. This is server-independent — no
-  provider extensions such as `X-GM-RAW` are used — and gives
-  the caller true AND semantics.
+  search keys (`Subject`, `From`, `To`, `Cc`). RFC 3501 section
+  6.4.4 ANDs multiple SEARCH keys and provides the `OR` key, so
+  one `UID SEARCH` combines `Subject`, `From`, body, flags and
+  dates, with an explicit `OR To Cc` for the recipient filter.
+  This is server-independent — no provider extensions such as
+  `X-GM-RAW` are used — and gives the caller true AND
+  semantics without client-side UID-set intersection.
 - **`SentSince` / `SentBefore` use the RFC 5322 `Date:`
   header,** not the internal date the server records, and the
   IMAP date key carries no time component, so the comparison is

@@ -29,6 +29,7 @@ type memFixture struct {
 	cc      []string
 	date    string
 	status  string
+	xstatus string
 	body    string
 }
 
@@ -46,6 +47,9 @@ func (f memFixture) raw() string {
 	b = append(b, "Date: "+f.date+"\r\n"...)
 	if f.status != "" {
 		b = append(b, "Status: "+f.status+"\r\n"...)
+	}
+	if f.xstatus != "" {
+		b = append(b, "X-Status: "+f.xstatus+"\r\n"...)
 	}
 	b = append(b, "MIME-Version: 1.0\r\n"...)
 	b = append(b, "Content-Type: text/plain; charset=utf-8\r\n"...)
@@ -74,9 +78,9 @@ func memFixtures() []memFixture {
 		{subject: "Beta report", from: "bob@example.test", to: []string{"carol@example.test"},
 			date: "Mon, 12 Aug 2024 10:00:00 +0000", status: "R", body: "beta body"},
 		{subject: "Gamma report", from: "ann@example.test", to: []string{"dave@example.test"}, cc: []string{"eve@example.test"},
-			date: "Tue, 13 Aug 2024 11:00:00 +0000", status: "RF", body: "gamma body"},
+			date: "Tue, 13 Aug 2024 11:00:00 +0000", status: "R", xstatus: "F", body: "gamma body"},
 		{subject: "Delta report", from: "carol@example.test", to: []string{"ann@example.test"},
-			date: "Wed, 14 Aug 2024 12:00:00 +0000", status: "F", body: "delta body"},
+			date: "Wed, 14 Aug 2024 12:00:00 +0000", xstatus: "F", body: "delta body"},
 		{subject: "Epsilon report", from: "ann@example.test", to: []string{"bob@example.test"},
 			date: "Thu, 15 Aug 2024 13:00:00 +0000", body: "epsilon body"},
 	}

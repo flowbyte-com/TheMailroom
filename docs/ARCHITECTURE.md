@@ -173,22 +173,29 @@ holds the parts that must be identical:
 
 - **Date granularity.** An IMAP SEARCH date key carries a date
   with no time component, so date matching is at day
-  granularity. `TruncateDate` reduces a timestamp to the UTC day
-  boundary, which is exactly what the reference server does
-  when it truncates the message's `Date:` header before
-  comparing. Both backends apply it, so they agree.
+  granularity. Query values use `TruncateDate`, which converts
+  the timestamp to UTC and then takes the UTC day. Message
+  `Date:` headers use `CalendarDay`, which keeps the calendar
+  day named by the header's own fields and ignores the time and
+  timezone offset. The reference server compares the header's
+  own calendar day; using `TruncateDate` on the message side
+  would shift non-UTC headers near midnight. Both backends apply
+  the same two rules, so they agree.
 - **Flag predicates.** `MatchesUnseen` and `MatchesFlagged`
   implement the IMAP definitions: unseen means the absence of
   `\Seen`, flagged means the presence of `\Flagged`.
-- **Flag derivation for the in-memory backend.** RFC 2156
-  `Status:` header translation, so an in-memory message can
-  answer the flag filters.
+- **Flag derivation for the in-memory backend.** Conventional
+  mbox `Status:` (`R` = `\Seen`, `O` = old/no flag) and
+  `X-Status:` (`D`/`F`/`A` = `\Deleted`/`\Flagged`/`\Answered`)
+  header translation, so an in-memory message can answer the
+  flag filters.
 
-The header criteria are ANDed. The IMAP backend computes the
-conjunction in the client (one SEARCH per header criterion and
-an intersection of the UID sets) because the IMAP `TEXT` key
-ORs its terms and matches the body as well as the headers.
-The in-memory backend ANDs them natively.
+The header criteria are ANDed. RFC 3501 section 6.4.4 ANDs
+multiple SEARCH keys and provides the `OR` key, so the IMAP
+backend sends one SEARCH with the header keys, body, flags and
+dates combined, and an explicit `OR To Cc` for the recipient
+filter. The in-memory backend ANDs the same criteria natively.
+No client-side UID-set intersection is used.
 
 `internal/imapclient/search_consistency_test.go` runs the same
 query set against both backends over identical fixture

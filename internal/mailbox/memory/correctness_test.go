@@ -169,18 +169,20 @@ func TestAttachmentSizeCap(t *testing.T) {
 // TestSearchFlagFilters verifies that the Flagged and Unseen
 // filters are honoured by the memory backend.
 //
-// The flags come from the RFC 2156 Status: header of the .eml
-// file: "R" means \Seen, "F" means \Flagged, and so on. A
-// message with no Status: header carries no flags, which means
-// it is unseen and not flagged.
+// The flags come from the conventional mbox Status: and
+// X-Status: headers of the .eml file: Status "R" means \Seen;
+// X-Status "D", "F" and "A" mean \Deleted, \Flagged and
+// \Answered. A message with neither header carries no flags,
+// which means it is unseen and not flagged.
 //
 // This replaces the earlier TestPreExistingSearchFlagGap,
 // which documented that the filters were silently ignored.
 func TestSearchFlagFilters(t *testing.T) {
 	b := newBackend(t)
 
-	// The welcome.eml fixture has no Status: header, so it
-	// carries no flags: it is unseen and not flagged.
+	// The welcome.eml fixture has neither Status: nor
+	// X-Status:, so it carries no flags: it is unseen and not
+	// flagged.
 	unseen, err := b.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
 		Subject: "Welcome",
 		Unseen:  true,
@@ -204,9 +206,9 @@ func TestSearchFlagFilters(t *testing.T) {
 		t.Errorf("Flagged filter matched %d messages, want 0 (the fixture has no \\Flagged flag)", len(flagged.Messages))
 	}
 
-	// A message that is both seen and flagged must match
-	// neither the Unseen nor the Flagged filter.
-	b2 := backendWithStatus(t, "RF")
+	// A message that is both seen and flagged must not match
+	// Unseen, but must match Flagged.
+	b2 := backendWithFlagHeaders(t, "R", "F")
 	seen, err := b2.SearchMessages(context.Background(), "any", "INBOX", mailbox.SearchQuery{
 		Unseen: true,
 	})
@@ -227,17 +229,43 @@ func TestSearchFlagFilters(t *testing.T) {
 	}
 }
 
-// backendWithStatus builds a memory backend whose only message
-// carries the given RFC 2156 Status: header value.
-func backendWithStatus(t *testing.T, status string) *Backend {
+// TestStatusAndXStatusHeaders verifies that the memory backend
+// reads both conventional headers: Status R for \Seen and
+// X-Status A/D/F for \Answered, \Deleted and \Flagged. It also
+// verifies that Status O does not invent a \Recent flag.
+func TestStatusAndXStatusHeaders(t *testing.T) {
+	b := backendWithFlagHeaders(t, "RO", "ADF")
+	res, err := b.ListMessages(context.Background(), "any", "INBOX", mailbox.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(res.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(res.Messages))
+	}
+	got := strings.Join(res.Messages[0].Flags, ",")
+	want := `\Seen,\Answered,\Deleted,\Flagged`
+	if got != want {
+		t.Errorf("Flags = %q, want %q", got, want)
+	}
+}
+
+// backendWithFlagHeaders builds a memory backend whose only
+// message carries the given conventional Status: and X-Status:
+// header values. Empty values omit the corresponding header.
+func backendWithFlagHeaders(t *testing.T, status, xstatus string) *Backend {
 	t.Helper()
 	dir := t.TempDir()
 	raw := "From: a@example.test\r\n" +
 		"To: b@example.test\r\n" +
 		"Subject: Status fixture\r\n" +
-		"Date: Mon, 15 Jan 2024 10:11:12 +0000\r\n" +
-		"Status: " + status + "\r\n" +
-		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"Date: Mon, 15 Jan 2024 10:11:12 +0000\r\n"
+	if status != "" {
+		raw += "Status: " + status + "\r\n"
+	}
+	if xstatus != "" {
+		raw += "X-Status: " + xstatus + "\r\n"
+	}
+	raw += "Content-Type: text/plain; charset=utf-8\r\n" +
 		"\r\n" +
 		"body\r\n"
 	if err := os.WriteFile(filepath.Join(dir, "m.eml"), []byte(raw), 0o600); err != nil {

@@ -28,9 +28,9 @@ import (
 // memorySearchBackend builds an in-memory backend whose mailbox
 // contains the same fixtures the IMAP test server uses.
 //
-// The fixtures are written as .eml files with an RFC 2156
-// Status: header so the memory backend derives the same flags
-// the IMAP backend sees.
+// The fixtures are written as .eml files with conventional
+// Status: and X-Status: headers so the memory backend derives
+// the same flags the IMAP backend sees.
 func memorySearchBackend(t *testing.T) *mem.Backend {
 	t.Helper()
 	return memorySearchBackendForFixtures(t, searchFixtures())
@@ -46,22 +46,23 @@ func memorySearchBackendForFixtures(t *testing.T, fixtures []searchFixture) *mem
 		raw := f.raw()
 		if len(f.flags) > 0 {
 			// Translate the IMAP system flags into the
-			// RFC 2156 Status: header so the memory
-			// backend derives the same set.
-			var status string
+			// conventional mbox Status: and X-Status:
+			// headers so the memory backend derives the
+			// same set.
+			var status, xstatus string
 			for _, fl := range f.flags {
 				switch fl {
 				case "\\Seen":
 					status += "R"
 				case "\\Flagged":
-					status += "F"
+					xstatus += "F"
 				case "\\Deleted":
-					status += "D"
+					xstatus += "D"
 				case "\\Answered":
-					status += "A"
+					xstatus += "A"
 				}
 			}
-			raw = injectStatusHeader(raw, status)
+			raw = injectFlagHeaders(raw, status, xstatus)
 		}
 		name := filepath.Join(dir, fmt.Sprintf("%02d.eml", i))
 		if err := os.WriteFile(name, []byte(raw), 0o600); err != nil {
@@ -75,15 +76,26 @@ func memorySearchBackendForFixtures(t *testing.T, fixtures []searchFixture) *mem
 	return b
 }
 
-// injectStatusHeader inserts a Status: header into the header
-// block of a raw message.
-func injectStatusHeader(raw, status string) string {
+// injectFlagHeaders inserts conventional Status: and X-Status:
+// headers into the header block of a raw message. Empty values
+// omit the corresponding header.
+func injectFlagHeaders(raw, status, xstatus string) string {
 	const marker = "\r\nMIME-Version:"
 	i := indexOf(raw, marker)
 	if i < 0 {
 		return raw
 	}
-	return raw[:i] + "\r\nStatus: " + status + raw[i:]
+	var insert string
+	if status != "" {
+		insert += "\r\nStatus: " + status
+	}
+	if xstatus != "" {
+		insert += "\r\nX-Status: " + xstatus
+	}
+	if insert == "" {
+		return raw
+	}
+	return raw[:i] + insert + raw[i:]
 }
 
 // TestBackendsAgreeOnSearch runs the same queries against the IMAP

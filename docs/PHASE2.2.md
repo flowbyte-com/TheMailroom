@@ -148,10 +148,11 @@ safety controls from Priority 1.
    passed in a single `Text` slice, which the IMAP `TEXT` keyword
    ORs together (and which also matches the body). The fix maps
    them to `Subject`, `From` and `To` respectively, and combines
-   the criteria with AND. Because a single IMAP SEARCH command
-   cannot express "Subject=x AND From=y" for arbitrary servers
-   without `OR` chaining, the implementation issues one SEARCH
-   per populated field and intersects the resulting UID sets.
+   the criteria with AND. RFC 3501 section 6.4.4 ANDs multiple
+   SEARCH keys and provides the `OR` key, so one `UID SEARCH`
+   carries `Subject`, `From`, body, flags and dates, with an
+   explicit `OR To Cc` for the recipient filter. No client-side
+   multi-SEARCH/UID-set intersection is needed.
 2. **`q.Flagged` must be honoured** — IMAP `WithFlags =
    []string{"\\Flagged"}`.
 3. **`q.Unseen` must be honoured** — IMAP `WithoutFlags =
@@ -194,8 +195,8 @@ filter is not acceptable.
 - IMAP search criteria translation in
   `internal/imapclient/imapclient.go::SearchMessages` (or a
   new `internal/imapclient/search.go` helper).
-- Per-field SEARCH + UID-set intersection for the AND
-  semantics of `Subject` / `From` / `To`.
+- One IMAP SEARCH combining `Subject` / `From` / body / flags /
+  dates, with `OR To Cc` for the recipient filter.
 - `WithFlags` / `WithoutFlags` for `Flagged` / `Unseen`.
 - Day-granularity date handling, documented, consistent
   between the IMAP and memory backends.
@@ -209,22 +210,29 @@ filter is not acceptable.
   contract, and in `internal/tools/tools_test.go` for the wire
   behaviour.
 
-**Closeout corrections (PR #6).** The initial implementation
-had two backend-parity gaps found in review:
+**Review closeout (PR #6).** HAL review requested these
+corrections:
 
-- Memory date search now reduces the message `Date:` header to
-  the calendar day named by its own fields
+- IMAP search now issues one `UID SEARCH` with the header,
+  body, flag and date keys ANDed by the server, plus an
+  explicit `OR To Cc` for the recipient filter. The client-side
+  multi-SEARCH/UID-set intersection was removed.
+- Memory flags now follow the conventional mbox `Status:`
+  (`R`/`O`) and `X-Status:` (`D`/`F`/`A`) headers. The previous
+  RFC 2156 attribution was incorrect.
+- Memory date search reduces the message `Date:` header to the
+  calendar day named by its own fields
   (`searchspec.CalendarDay`), including non-UTC headers, instead
   of comparing the UTC instant.
-- The memory backend now clamps `Limit` to
-  `max_search_results` itself, matching the IMAP backend and the
-  tool layer.
+- The memory backend clamps `Limit` to `max_search_results`
+  itself, matching the IMAP backend and the tool layer.
 
-Regression tests cover both, including a cross-backend non-UTC
-date-boundary case. Remaining server-dependent matching
-differences and the deferred `has_attachments` metadata for IMAP
-summaries are documented in `docs/PHASE2_DESIGN.md` §7 and
-`docs/TOOLS.md`.
+Regression tests cover the combined SEARCH structure, both
+flag headers, and both date/limit fixes, including a
+cross-backend non-UTC date-boundary case. Remaining
+server-dependent matching differences and the deferred
+`has_attachments` metadata for IMAP summaries are documented in
+`docs/PHASE2_DESIGN.md` §7 and `docs/TOOLS.md`.
 
 **Out of scope for this slice:** SMTP, mailbox modifications,
 attachment retrieval.

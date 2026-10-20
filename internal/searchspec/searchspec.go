@@ -47,8 +47,9 @@
 // Flagged means "the message carries the \Flagged flag". A
 // message with no flags at all is unseen and not flagged. This
 // matches the IMAP definitions (RFC 3501 section 2.3.2) and the
-// memory backend derives its flags from the RFC 2156 Status:
-// header so it can answer the same questions.
+// memory backend derives its flags from the conventional mbox
+// Status: and X-Status: headers so it can answer the same
+// questions.
 package searchspec
 
 import (
@@ -125,30 +126,39 @@ func MatchesFlagged(flags []string, flagged bool) bool {
 	return HasFlag(flags, FlagFlagged)
 }
 
-// FlagsFromStatusHeader derives IMAP system flags from an RFC 2156
-// Status: header value.
+// FlagsFromStatusHeaders derives IMAP system flags from the
+// conventional mbox Status: and X-Status: header values.
 //
-// The Status: header is the standard way for a local store to
-// record message state. Its characters are:
+// The conventions are:
 //
-//	R - the message has been read (\Seen)
-//	O - the message is old (not \Recent)
-//	F - the message is flagged (\Flagged)
-//	D - the message is deleted (\Deleted)
-//	A - the message has been answered (\Answered)
+//	Status:   R - the message has been read (\Seen)
+//	          O - the message is old (no flag; we do not model \Recent)
+//	X-Status: D - the message is deleted (\Deleted)
+//	          F - the message is flagged (\Flagged)
+//	          A - the message has been answered (\Answered)
 //
-// A message with no Status: header has no flags, which means it
-// is unseen and not flagged.
-func FlagsFromStatusHeader(status string) []string {
+// These headers are an mbox convention, not an RFC 2156
+// definition (RFC 2156 defines MIXER, not local mailbox state).
+// A message with neither header has no flags, which means it is
+// unseen and not flagged.
+func FlagsFromStatusHeaders(status, xstatus string) []string {
 	var flags []string
 	for _, r := range status {
 		switch r {
 		case 'R', 'r':
 			flags = append(flags, FlagSeen)
-		case 'F', 'f':
-			flags = append(flags, FlagFlagged)
+		case 'O', 'o':
+			// Old: not \Recent. The memory backend does
+			// not model \Recent, so this contributes no
+			// flag.
+		}
+	}
+	for _, r := range xstatus {
+		switch r {
 		case 'D', 'd':
 			flags = append(flags, FlagDeleted)
+		case 'F', 'f':
+			flags = append(flags, FlagFlagged)
 		case 'A', 'a':
 			flags = append(flags, FlagAnswered)
 		}

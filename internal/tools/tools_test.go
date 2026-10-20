@@ -381,10 +381,10 @@ func TestSearchMessagesLimitPropagated(t *testing.T) {
 // and honoured by the backend, rather than being rejected with
 // a NotImplemented error.
 //
-// The memory backend's fixtures have no RFC 2156 Status: header,
-// so they carry no flags: they are unseen and not flagged. The
-// Unseen filter must therefore match every message in the
-// mailbox, and the Flagged filter must match none of them.
+// The memory backend's fixtures have no Status: or X-Status:
+// header, so they carry no flags: they are unseen and not
+// flagged. The Unseen filter must therefore match every message
+// in the mailbox, and the Flagged filter must match none of them.
 func TestSearchMessagesFlagFiltersAccepted(t *testing.T) {
 	env := setupEnv(t, "full")
 	defer env.cleanup()

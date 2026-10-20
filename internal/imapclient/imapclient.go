@@ -516,13 +516,14 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 			return err
 		}
 		res.UIDValidity = mboxStatus.UidValidity
-		// Run the search. Subject / From / To use the
-		// corresponding IMAP SEARCH header keys with AND
-		// semantics (see internal/imapclient/search.go); the
-		// body, flag and date criteria are combined into
-		// every search. The dates are truncated to the day
-		// boundary because an IMAP search date carries no
-		// time (see internal/searchspec).
+		// Run one search. Subject / From use the
+		// corresponding IMAP SEARCH header keys, To is an
+		// explicit OR over To and Cc, and the body, flag and
+		// date criteria are ANDed into the same command (see
+		// internal/imapclient/search.go). The dates are
+		// truncated to the day boundary because an IMAP
+		// search date carries no time (see
+		// internal/searchspec).
 		uids, err := searchUIDs(c, q)
 		if err != nil {
 			return err

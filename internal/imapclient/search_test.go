@@ -16,6 +16,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"sort"
@@ -23,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/flowbyte-com/go-imap"
 	memuserpkg "github.com/flowbyte-com/go-imap/backend/memory"
 	imapsrv "github.com/flowbyte-com/go-imap/server"
 
@@ -306,6 +308,186 @@ func TestSearchCriteriaAreANDed(t *testing.T) {
 	want = []string{"Alpha report", "Epsilon report"}
 	if !equalSubjects(got, want) {
 		t.Errorf("Subject=report AND From=ann AND To=bob matched %v, want %v", got, want)
+	}
+}
+
+// TestSearchCriteriaFormat verifies that one SearchCriteria is
+// generated with the expected structure: Subject, From, Body,
+// flags and dates as ANDed keys, and the recipient filter as an
+// explicit OR over To and Cc. It also checks that the obsolete
+// TEXT key is not used.
+func TestSearchCriteriaFormat(t *testing.T) {
+	since := time.Date(2024, 8, 12, 23, 45, 0, 0, time.UTC)
+	before := time.Date(2024, 8, 16, 0, 30, 0, 0, time.UTC)
+	crit := searchCriteria(mailbox.SearchQuery{
+		Subject: "report",
+		From:    "ann@example.test",
+		To:      "bob@example.test",
+		Body:    "body text",
+		Flagged: true,
+		Unseen:  true,
+		Since:   &since,
+		Before:  &before,
+	})
+
+	if got := crit.Header.Get("Subject"); got != "report" {
+		t.Errorf("Subject = %q, want %q", got, "report")
+	}
+	if got := crit.Header.Get("From"); got != "ann@example.test" {
+		t.Errorf("From = %q, want %q", got, "ann@example.test")
+	}
+	if got := crit.Header.Get("To"); got != "" {
+		t.Errorf("top-level To = %q, want empty (To/Cc belong in the OR)", got)
+	}
+	if got := crit.Header.Get("Cc"); got != "" {
+		t.Errorf("top-level Cc = %q, want empty (To/Cc belong in the OR)", got)
+	}
+	if len(crit.Body) != 1 || crit.Body[0] != "body text" {
+		t.Errorf("Body = %v, want [body text]", crit.Body)
+	}
+	if len(crit.WithFlags) != 1 || crit.WithFlags[0] != "\\Flagged" {
+		t.Errorf("WithFlags = %v, want [\\Flagged]", crit.WithFlags)
+	}
+	if len(crit.WithoutFlags) != 1 || crit.WithoutFlags[0] != "\\Seen" {
+		t.Errorf("WithoutFlags = %v, want [\\Seen]", crit.WithoutFlags)
+	}
+	wantSince := time.Date(2024, 8, 12, 0, 0, 0, 0, time.UTC)
+	if !crit.SentSince.Equal(wantSince) {
+		t.Errorf("SentSince = %s, want %s", crit.SentSince, wantSince)
+	}
+	wantBefore := time.Date(2024, 8, 16, 0, 0, 0, 0, time.UTC)
+	if !crit.SentBefore.Equal(wantBefore) {
+		t.Errorf("SentBefore = %s, want %s", crit.SentBefore, wantBefore)
+	}
+	if len(crit.Or) != 1 {
+		t.Fatalf("len(Or) = %d, want 1 To/Cc pair", len(crit.Or))
+	}
+	if got := crit.Or[0][0].Header.Get("To"); got != "bob@example.test" {
+		t.Errorf("OR To = %q, want %q", got, "bob@example.test")
+	}
+	if got := crit.Or[0][1].Header.Get("Cc"); got != "bob@example.test" {
+		t.Errorf("OR Cc = %q, want %q", got, "bob@example.test")
+	}
+
+	tokens := flattenSearchTokens(crit.Format())
+	for _, want := range []string{
+		"SUBJECT", "FROM", "BODY", "FLAGGED", "UNSEEN",
+		"SENTSINCE", "SENTBEFORE", "OR", "TO", "CC",
+	} {
+		if !containsToken(tokens, want) {
+			t.Errorf("formatted criteria %v missing %q", tokens, want)
+		}
+	}
+	if containsToken(tokens, "TEXT") {
+		t.Errorf("formatted criteria %v contains obsolete TEXT key", tokens)
+	}
+}
+
+// flattenSearchTokens converts the nested Format result into a
+// token list for structure assertions.
+func flattenSearchTokens(fields []interface{}) []string {
+	var out []string
+	for _, field := range fields {
+		switch v := field.(type) {
+		case imap.RawString:
+			out = append(out, string(v))
+		case string:
+			out = append(out, v)
+		case []interface{}:
+			out = append(out, "(")
+			out = append(out, flattenSearchTokens(v)...)
+			out = append(out, ")")
+		default:
+			out = append(out, fmt.Sprint(v))
+		}
+	}
+	return out
+}
+
+func containsToken(tokens []string, want string) bool {
+	for _, token := range tokens {
+		if token == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSearchCombinedCriteria verifies that a query combining
+// every public criterion is evaluated as one conjunction and
+// still honours the To-or-Cc alternative. Gamma is the only
+// fixture that satisfies all of these conditions.
+func TestSearchCombinedCriteria(t *testing.T) {
+	addr, cleanup := startSearchServer(t)
+	defer cleanup()
+	be := testBackend(t, addr)
+	defer be.Close()
+
+	since := time.Date(2024, 8, 13, 0, 0, 0, 0, time.UTC)
+	before := time.Date(2024, 8, 14, 0, 0, 0, 0, time.UTC)
+	base := mailbox.SearchQuery{
+		Subject: "Gamma",
+		From:    "ann@example.test",
+		To:      "eve@example.test",
+		Body:    "gamma body",
+		Flagged: true,
+		Since:   &since,
+		Before:  &before,
+	}
+
+	got := searchSubjects(t, be, base)
+	want := []string{"Gamma report"}
+	if !equalSubjects(got, want) {
+		t.Errorf("combined criteria matched %v, want %v", got, want)
+	}
+
+	// Each criterion must still constrain the combined query.
+	mutations := []struct {
+		name string
+		q    mailbox.SearchQuery
+	}{
+		{"body mismatch", func() mailbox.SearchQuery {
+			q := base
+			q.Body = "alpha body"
+			return q
+		}()},
+		{"from mismatch", func() mailbox.SearchQuery {
+			q := base
+			q.From = "carol@example.test"
+			return q
+		}()},
+		{"to mismatch", func() mailbox.SearchQuery {
+			q := base
+			q.To = "bob@example.test"
+			return q
+		}()},
+		{"unseen mismatch", func() mailbox.SearchQuery {
+			q := base
+			q.Unseen = true
+			return q
+		}()},
+		{"since after message", func() mailbox.SearchQuery {
+			q := base
+			after := time.Date(2024, 8, 14, 0, 0, 0, 0, time.UTC)
+			q.Since = &after
+			q.Before = nil
+			return q
+		}()},
+		{"before message", func() mailbox.SearchQuery {
+			q := base
+			cutoff := time.Date(2024, 8, 13, 0, 0, 0, 0, time.UTC)
+			q.Before = &cutoff
+			q.Since = nil
+			return q
+		}()},
+	}
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			got := searchSubjects(t, be, tc.q)
+			if len(got) != 0 {
+				t.Errorf("mutated query matched %v, want no results", got)
+			}
+		})
 	}
 }
 

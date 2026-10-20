@@ -159,34 +159,41 @@ func TestHasFlagIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestFlagsFromStatusHeader verifies the RFC 2156 Status: header
-// translation.
-func TestFlagsFromStatusHeader(t *testing.T) {
+// TestFlagsFromStatusHeaders verifies the conventional mbox
+// Status: and X-Status: header translation.
+func TestFlagsFromStatusHeaders(t *testing.T) {
 	cases := []struct {
-		status string
-		want   []string
+		name    string
+		status  string
+		xstatus string
+		want    []string
 	}{
-		{"", nil},
-		{"R", []string{FlagSeen}},
-		{"F", []string{FlagFlagged}},
-		{"RF", []string{FlagSeen, FlagFlagged}},
-		{"D", []string{FlagDeleted}},
-		{"A", []string{FlagAnswered}},
-		{"RFA", []string{FlagSeen, FlagFlagged, FlagAnswered}},
-		// "O" means "old" and has no \Recent counterpart here.
-		{"O", nil},
+		{"neither header", "", "", nil},
+		{"Status R", "R", "", []string{FlagSeen}},
+		{"Status RO", "RO", "", []string{FlagSeen}},
+		{"X-Status F", "", "F", []string{FlagFlagged}},
+		{"Status R, X-Status F", "R", "F", []string{FlagSeen, FlagFlagged}},
+		{"X-Status D", "", "D", []string{FlagDeleted}},
+		{"X-Status A", "", "A", []string{FlagAnswered}},
+		{"X-Status DFA", "", "DFA", []string{FlagDeleted, FlagFlagged, FlagAnswered}},
+		{"Status RO, X-Status ADF", "RO", "ADF", []string{FlagSeen, FlagAnswered, FlagDeleted, FlagFlagged}},
+		// F belongs to X-Status, not Status, and R belongs
+		// to Status, not X-Status. The two headers are not
+		// interchangeable.
+		{"Status F is ignored", "F", "", nil},
+		{"X-Status R is ignored", "", "R", nil},
 		// Lowercase is accepted too.
-		{"rf", []string{FlagSeen, FlagFlagged}},
+		{"lowercase", "ro", "adf", []string{FlagSeen, FlagAnswered, FlagDeleted, FlagFlagged}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.status, func(t *testing.T) {
-			got := FlagsFromStatusHeader(tc.status)
+		t.Run(tc.name, func(t *testing.T) {
+			got := FlagsFromStatusHeaders(tc.status, tc.xstatus)
 			if len(got) != len(tc.want) {
-				t.Fatalf("FlagsFromStatusHeader(%q) = %v, want %v", tc.status, got, tc.want)
+				t.Fatalf("FlagsFromStatusHeaders(%q, %q) = %v, want %v", tc.status, tc.xstatus, got, tc.want)
 			}
 			for i := range got {
 				if got[i] != tc.want[i] {
-					t.Fatalf("FlagsFromStatusHeader(%q) = %v, want %v", tc.status, got, tc.want)
+					t.Fatalf("FlagsFromStatusHeaders(%q, %q) = %v, want %v", tc.status, tc.xstatus, got, tc.want)
 				}
 			}
 		})

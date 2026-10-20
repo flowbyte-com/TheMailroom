@@ -188,14 +188,18 @@ func (b *Backend) parse(data []byte) (*mailbox.Message, error) {
 		Text:        decoded.Text,
 		HTML:        decoded.HTML,
 		Attachments: convertAttachments(decoded.Attachments),
-		// Flags come from the RFC 2156 Status: header, the
-		// standard way for a local store to record message
-		// state. A message with no Status: header has no
-		// flags, which means it is unseen and not flagged.
-		// This is what lets the memory backend answer the
-		// Flagged and Unseen search filters the same way the
-		// IMAP backend does.
-		Flags: searchspec.FlagsFromStatusHeader(rawHeader(data, "Status")),
+		// Flags come from the conventional mbox Status: and
+		// X-Status: headers: Status R means \Seen; X-Status
+		// D/F/A mean \Deleted, \Flagged and \Answered. A
+		// message with neither header has no flags, which
+		// means it is unseen and not flagged. This is what
+		// lets the memory backend answer the Flagged and
+		// Unseen search filters the same way the IMAP backend
+		// does.
+		Flags: searchspec.FlagsFromStatusHeaders(
+			rawHeader(data, "Status"),
+			rawHeader(data, "X-Status"),
+		),
 	}
 	if msg.Headers.Date.IsZero() {
 		msg.Headers.Date = timeNow()
@@ -207,9 +211,9 @@ func (b *Backend) parse(data []byte) (*mailbox.Message, error) {
 // RFC 5322 bytes, or "" if the header is absent. Only the
 // header block is scanned; the body is never read.
 //
-// It is used for the RFC 2156 Status: header, which the MIME
-// parser does not surface because it is not part of the public
-// message view.
+// It is used for the conventional Status: and X-Status: headers,
+// which the MIME parser does not surface because they are not
+// part of the public message view.
 func rawHeader(data []byte, name string) string {
 	// The header block ends at the first empty line.
 	end := len(data)
