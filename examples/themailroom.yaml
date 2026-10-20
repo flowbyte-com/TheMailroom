@@ -71,6 +71,7 @@ accounts:
       - attachment_send
 
     # Optional exact allow-list. Empty/omitted means any recipient.
+    # Local-part case is significant; domain case is normalized.
     allowed_recipients:
       - alice@work.example.test
       - team@work.example.test

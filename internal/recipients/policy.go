@@ -33,6 +33,7 @@ var (
 
 // Policy is an immutable recipient policy. An empty allow-list permits any
 // recipient; a non-empty allow-list permits only exact canonical addresses.
+// Local-part case is significant; domain case is not.
 type Policy struct {
 	allowed map[string]struct{}
 	max     int
@@ -40,7 +41,7 @@ type Policy struct {
 
 // NewPolicy builds a policy from an optional allow-list and a positive
 // recipient limit. Allow-list entries are canonicalised and duplicate
-// addresses are collapsed.
+// canonical addresses are collapsed.
 func NewPolicy(allowed []string, max int) (Policy, error) {
 	if max <= 0 {
 		return Policy{}, fmt.Errorf("recipients: max recipients must be positive")
@@ -64,8 +65,8 @@ func NewPolicy(allowed []string, max int) (Policy, error) {
 func (p Policy) Max() int { return p.max }
 
 // Allows reports whether addr is permitted by the allow-list. addr must be a
-// canonical address returned by Canonical. An empty allow-list permits all
-// canonical addresses.
+// canonical address returned by Canonical. Local-part case is significant;
+// domain case is not. An empty allow-list permits all canonical addresses.
 func (p Policy) Allows(addr string) bool {
 	if p.allowed == nil {
 		return true
@@ -76,9 +77,11 @@ func (p Policy) Allows(addr string) bool {
 
 // Validate canonicalises and validates all recipients in to, cc and bcc.
 //
-// Duplicate addresses across the three fields are collapsed before the count
-// is checked. The returned slice contains canonical envelope addresses in
-// first-seen order. The allow-list and limit are applied to the combined set.
+// Duplicate canonical addresses across the three fields are collapsed before
+// the count is checked. Local-part case is retained, so distinct local-parts
+// that differ only by case are distinct recipients. The returned slice
+// contains canonical envelope addresses in first-seen order. The allow-list
+// and limit are applied to the combined set.
 func (p Policy) Validate(to, cc, bcc []string) ([]string, error) {
 	fields := []struct {
 		name   string
@@ -119,12 +122,13 @@ func (p Policy) Validate(to, cc, bcc []string) ([]string, error) {
 // Canonical parses raw as one RFC 5322 address and returns its canonical
 // addr-spec.
 //
-// The canonical form is the parsed address with surrounding whitespace
-// removed and the entire addr-spec lowercased. Matching is therefore
-// case-insensitive and exact: no substring, prefix or wildcard matching is
-// performed. Display names are accepted but are not part of the canonical
-// value. Control characters are rejected before parsing so addresses cannot
-// carry header or log injection sequences.
+// The canonical form preserves the local-part exactly as parsed and lowercases
+// only the domain. RFC 5321 §2.4 requires SMTP implementations to preserve
+// local-part case, while domain names are case-insensitive. Matching is exact:
+// no substring, prefix or wildcard matching is performed. Display names are
+// accepted but are not part of the canonical value. Control characters are
+// rejected before parsing so addresses cannot carry header or log injection
+// sequences.
 func Canonical(raw string) (string, error) {
 	if raw == "" || strings.TrimSpace(raw) == "" {
 		return "", fmt.Errorf("%w: empty", ErrInvalidAddress)
@@ -143,7 +147,20 @@ func Canonical(raw string) (string, error) {
 	if strings.ContainsAny(addr.Address, " \t\r\n") {
 		return "", fmt.Errorf("%w: whitespace in addr-spec", ErrInvalidAddress)
 	}
-	return strings.ToLower(addr.Address), nil
+
+	// The domain cannot contain an unquoted @, so the final @ separates the
+	// local-part from the domain even when the local-part is a quoted string
+	// containing @. Keep the local-part byte-for-byte; normalize only the
+	// domain for comparison.
+	at := strings.LastIndexByte(addr.Address, '@')
+	if at <= 0 || at == len(addr.Address)-1 {
+		return "", fmt.Errorf("%w: malformed addr-spec", ErrInvalidAddress)
+	}
+	local, domain := addr.Address[:at], addr.Address[at+1:]
+	if local == "" || domain == "" {
+		return "", fmt.Errorf("%w: empty local-part or domain", ErrInvalidAddress)
+	}
+	return local + "@" + strings.ToLower(domain), nil
 }
 
 // HasControl reports whether s contains an ASCII or Unicode control

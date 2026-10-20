@@ -55,10 +55,12 @@ The reusable policy in `internal/recipients`:
 - Parses addresses with `net/mail`; display names are accepted but
   discarded for envelope matching.
 - Rejects empty, malformed and control-character-containing addresses.
-- Canonicalises to a lowercase addr-spec and compares the whole address
-  exactly. Matching is case-insensitive; there is no substring,
-  prefix, suffix or wildcard matching.
-- Collapses duplicate canonical addresses before enforcing the limit.
+- Preserves the parsed local-part case and lowercases only the domain.
+  The whole canonical address is compared exactly: local-part case is
+  significant, while domain case is not. There is no substring, prefix,
+  suffix or wildcard matching.
+- Collapses duplicate canonical addresses before enforcing the limit;
+  local-parts that differ only by case remain distinct recipients.
 - Rejects a message with no recipients when validation is invoked.
 
 The policy is fully testable without SMTP. The future `send_message`

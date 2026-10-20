@@ -173,6 +173,7 @@ Outbound recipient and attachment controls are configured per account:
 ```yaml
 allowed_recipients:              # optional exact allow-list; empty = any
   - alice@example.test
+  - Sales@example.test           # local-part case is significant
 limits:
   max_recipients: 50             # unique To + Cc + Bcc recipients
   max_attachment_bytes: 6291456  # decoded bytes per local attachment
@@ -181,10 +182,11 @@ attachment_send_paths:
   - /srv/themailroom/outbound    # absolute, existing directory
 ```
 
-Recipient matching is case-insensitive after RFC 5322 parsing and is
-exact, with no wildcard or substring rules. Local attachment references
-are relative paths resolved only inside `attachment_send_paths`; absolute
-paths, traversal, symlink escapes and non-regular files are rejected. The
+Recipient matching is exact after RFC 5322 parsing: local-part case is
+preserved and significant, while domain case is not. There are no
+wildcard or substring rules. Local attachment references are relative
+paths resolved only inside `attachment_send_paths`; absolute paths,
+traversal, symlink escapes and non-regular files are rejected. The
 outbound resolver and recipient policy are implemented, but no tool uses
 them to send yet.
 

@@ -79,9 +79,9 @@ type AccountConfig struct {
 	Permissions []string `yaml:"permissions,omitempty"`
 
 	// AllowedRecipients is an optional exact-address allow-list for
-	// outbound recipients. An empty list permits any recipient. Matching
-	// is case-insensitive after RFC 5322 parsing; wildcards are not
-	// supported.
+	// outbound recipients. An empty list permits any recipient. After RFC
+	// 5322 parsing, local-part case is preserved and significant while the
+	// domain is compared case-insensitively; wildcards are not supported.
 	AllowedRecipients []string `yaml:"allowed_recipients,omitempty"`
 
 	// AttachmentSendPaths lists absolute directory paths that may be

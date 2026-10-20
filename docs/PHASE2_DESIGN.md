@@ -215,10 +215,12 @@ accounts:
 ```
 
 If set, each To/Cc/Bcc address must match an entry. Matching uses the
-canonical address: parsed as RFC 5322, trimmed to the addr-spec, and
-lowercased; comparison is exact, with no substring, prefix, suffix or
-wildcard matching. Duplicates are collapsed before the
-`max_recipients` limit is applied. If the list is empty, any recipient
+canonical address: parsed as RFC 5322, trimmed to the addr-spec, with the
+local-part case preserved and only the domain lowercased. Comparison is
+exact: local-part case is significant and domain case is not, with no
+substring, prefix, suffix or wildcard matching. Exact duplicates are
+collapsed before the `max_recipients` limit is applied; local-parts that
+differ only by case remain distinct. If the list is empty, any recipient
 is allowed. The policy is implemented and testable in Phase 2.3 PR 1;
 the future `send_message` handler must call it before opening SMTP and
 must not bypass it.

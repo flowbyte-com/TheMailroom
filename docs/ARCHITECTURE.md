@@ -281,8 +281,8 @@ Validation covers:
   leave SMTP unset.
 - Limits are non-negative; `max_recipients` defaults to 50.
 - Permission names are known capability names.
-- `allowed_recipients` entries parse as addresses; matching is exact
-  and case-insensitive after canonicalisation.
+- `allowed_recipients` entries parse as addresses; matching is exact,
+  preserving local-part case while normalizing domain case.
 - `attachment_send_paths` are absolute, NUL-free paths. When
   `attachment_send` is granted, they must be existing directories and
   duplicates are rejected; the resolver opens them with `os.Root`.

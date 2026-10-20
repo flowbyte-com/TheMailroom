@@ -66,7 +66,7 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 **Mitigations.**
 
 - **(implemented)** The `send` capability is disabled by default. No send tool is registered yet, so no account can send in this slice.
-- **(implemented, not yet wired to a sender)** The recipient policy parses and canonicalises To/Cc/Bcc, rejects empty, malformed and control-character-containing addresses, enforces `max_recipients` (default 50), and supports an optional exact `allowed_recipients` allow-list. Empty allow-list permits any recipient. Matching is exact after canonicalisation; there are no wildcard or substring rules.
+- **(implemented, not yet wired to a sender)** The recipient policy parses and canonicalises To/Cc/Bcc, rejects empty, malformed and control-character-containing addresses, enforces `max_recipients` (default 50), and supports an optional exact `allowed_recipients` allow-list. Empty allow-list permits any recipient. Matching is exact after canonicalisation: local-part case is preserved and significant, domain case is normalized; there are no wildcard or substring rules. Local-parts that differ only by case are distinct recipients.
 - **(planned)** The future `send_message` handler must invoke the recipient policy before opening SMTP and must not bypass it.
 - **(planned)** Rate-limit sending (e.g. max N messages per hour) to bound blast radius.
 - **(planned)** All sends are logged with a structured record including account ID, recipients, message size.
