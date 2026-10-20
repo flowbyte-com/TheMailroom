@@ -3,9 +3,9 @@
 > Status: in progress. Phase 2.1 (read-only IMAP correctness + MIME
 > reading) is implemented in `internal/imapclient` and
 > `internal/mimeparse`. Phase 2.2 Priority 3 (inbound
-> `read_attachment`) is implemented on a review branch and is
-> **IN REVIEW**; it is not merged. This document captures the design
-> decisions for that slice and the remaining work: SMTP submission,
+> `read_attachment`) is implemented and merged on `main` (PR #8).
+> This document captures the design decisions for that slice and the
+> remaining work: SMTP submission,
 > MIME composition, reply / forward, outbound attachments, and
 > protected mailbox modifications.
 
@@ -740,8 +740,8 @@ deliverables, and out-of-scope items, is in
    date-semantics and limit closeout is included.
 3. **Secure attachment retrieval** — new `read_attachment` tool
    with stable MIME-part references and strict resource limits.
-   **IN REVIEW** on `phase2.2-priority3-read-attachment`; not
-   merged. See §2.4.
+   **DONE**: merged in PR #8 (`2690380`) after HAL approval at
+   `41430936`. See §2.4.
 
 SMTP, outbound attachments, and mutating mailbox operations
 remain out of scope.
@@ -751,6 +751,5 @@ requirement (§10) is satisfied, but a long-term dependency on a
 personal fork of go-imap is itself a maintenance risk that must
 be resolved (upstream the change, or replace the library) — see
 §8 and the fork's `CHANGES.md`. The search defects (§7) are fixed;
-attachment retrieval (§2.4) is implemented but awaiting review. The
-remaining production-readiness work is tracked in
-`docs/PHASE2.2.md`.
+attachment retrieval (§2.4) is merged (PR #8). The remaining
+production-readiness work is tracked in `docs/PHASE2.2.md`.

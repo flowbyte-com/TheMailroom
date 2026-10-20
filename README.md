@@ -32,8 +32,7 @@ and `SMTP`. It is designed to be:
 literal-size enforcement) is merged on `main` (PR #5), and
 **Phase 2.2 Priority 2** (IMAP search correctness) is merged on
 `main` (PR #6). **Phase 2.2 Priority 3** (secure attachment
-retrieval) is implemented on a review branch and is **IN REVIEW**;
-it is not merged.
+retrieval) is merged on `main` (PR #8).
 
 TheMailroom is a **development milestone, not a
 production-hardened release**. The IMAP literal-size
@@ -41,7 +40,7 @@ pre-allocation vulnerability is fixed, but the fix depends on a
 fork of go-imap that must still be upstreamed or replaced (see
 [`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §8), the IMAP
 search-correctness work is merged (PR #6), and the
-attachment-retrieval tool is implemented but awaiting review.
+attachment-retrieval tool is merged (PR #8).
 
 Phase 2.1 ships:
 
@@ -67,7 +66,7 @@ Phase 2.1 ships:
 |---|---|---|
 | 1 | Protocol-level IMAP literal-size enforcement (the §10 requirement) | **DONE** (PR #5) |
 | 2 | IMAP search correctness defects | **DONE** (PR #6) |
-| 3 | Secure attachment retrieval | **IN REVIEW** (not merged) |
+| 3 | Secure attachment retrieval | **DONE** (PR #8) |
 
 SMTP, outbound attachments, and mutating mailbox operations
 remain out of scope.
