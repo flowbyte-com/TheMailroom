@@ -52,8 +52,9 @@ accounts:
     attachment_send_paths: []        # empty = no outbound attachment source
 
   # A second account that can send. Phase 2.3 PR 1 validates this
-  # configuration and opens the attachment roots; SMTP submission and
-  # send_message are not implemented yet.
+  # configuration and opens the attachment roots; PR 2 adds a bounded
+  # MIME composer. SMTP submission and send_message are not implemented
+  # yet.
   - id: work
     email: alice@work.example.test
     imap:
