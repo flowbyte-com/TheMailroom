@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/flowbyte-com/themailroom/internal/recipients"
 )
 
 // Default values applied when a field is left blank.
@@ -26,6 +28,7 @@ const (
 	DefaultMaxAttachmentBytes      = 6 * 1024 * 1024  // 6 MiB
 	DefaultMaxTotalAttachmentBytes = 25 * 1024 * 1024 // 25 MiB
 	DefaultMaxAttachments          = 50
+	DefaultMaxRecipients           = 50
 	DefaultMaxSearchResults        = 500
 	DefaultMaxBatchOperations      = 50
 	DefaultMaxMIMENesting          = 16
@@ -75,8 +78,15 @@ type AccountConfig struct {
 	// error.
 	Permissions []string `yaml:"permissions,omitempty"`
 
+	// AllowedRecipients is an optional exact-address allow-list for
+	// outbound recipients. An empty list permits any recipient. After RFC
+	// 5322 parsing, local-part case is preserved and significant while the
+	// domain is compared case-insensitively; wildcards are not supported.
+	AllowedRecipients []string `yaml:"allowed_recipients,omitempty"`
+
 	// AttachmentSendPaths lists absolute directory paths that may be
 	// used as attachment sources. Empty means attachments cannot be sent.
+	// Roots are opened with os.Root when attachment_send is granted.
 	AttachmentSendPaths []string `yaml:"attachment_send_paths,omitempty"`
 
 	// Limits overrides default safety limits. Zero values are replaced
@@ -126,6 +136,7 @@ type LimitsConfig struct {
 	MaxAttachmentBytes      int `yaml:"max_attachment_bytes,omitempty"`
 	MaxTotalAttachmentBytes int `yaml:"max_total_attachment_bytes,omitempty"`
 	MaxAttachments          int `yaml:"max_attachments,omitempty"`
+	MaxRecipients           int `yaml:"max_recipients,omitempty"`
 	MaxSearchResults        int `yaml:"max_search_results,omitempty"`
 	MaxBatchOperations      int `yaml:"max_batch_operations,omitempty"`
 	MaxMIMENesting          int `yaml:"max_mime_nesting,omitempty"`
@@ -175,6 +186,9 @@ func (c AccountConfig) WithDefaults() AccountConfig {
 	}
 	if c.Limits.MaxAttachments == 0 {
 		c.Limits.MaxAttachments = DefaultMaxAttachments
+	}
+	if c.Limits.MaxRecipients == 0 {
+		c.Limits.MaxRecipients = DefaultMaxRecipients
 	}
 	if c.Limits.MaxSearchResults == 0 {
 		c.Limits.MaxSearchResults = DefaultMaxSearchResults
@@ -226,8 +240,8 @@ func validateAccount(idx int, a AccountConfig) error {
 	if strings.ContainsAny(a.ID, " \n") {
 		return fmt.Errorf("accounts[%d].id %q must not contain whitespace", idx, a.ID)
 	}
-	if _, err := mail.ParseAddress(a.Email); err != nil {
-		return fmt.Errorf("accounts[%d].email %q invalid: %w", idx, a.Email, err)
+	if err := validateSenderIdentity(a.Email); err != nil {
+		return fmt.Errorf("accounts[%d].email: %w", idx, err)
 	}
 	if err := validatePermissions(a.Permissions); err != nil {
 		return fmt.Errorf("accounts[%d].%w", idx, err)
@@ -261,10 +275,73 @@ func validateAccount(idx int, a AccountConfig) error {
 	if err := validateLimits(a.Limits); err != nil {
 		return fmt.Errorf("accounts[%d].%w", idx, err)
 	}
-	if err := validateAttachmentPaths(a.AttachmentSendPaths); err != nil {
+	if _, err := recipients.NewPolicy(a.AllowedRecipients, a.Limits.MaxRecipients); err != nil {
+		return fmt.Errorf("accounts[%d].%w", idx, err)
+	}
+	// SMTP settings are only required for accounts that can actually be
+	// asked to send. Read-only accounts retain their previous configuration
+	// requirements and may leave SMTP entirely empty.
+	if hasPermission(a.Permissions, "send") {
+		if err := validateSMTPConfig(a.SMTP); err != nil {
+			return fmt.Errorf("accounts[%d].%w", idx, err)
+		}
+	}
+	if err := validateAttachmentPaths(a.AttachmentSendPaths, hasPermission(a.Permissions, "attachment_send")); err != nil {
 		return fmt.Errorf("accounts[%d].%w", idx, err)
 	}
 	return nil
+}
+
+// validateSMTPConfig validates the submission endpoint for an account with
+// the send capability. It deliberately accepts only implicit TLS or mandatory
+// STARTTLS; no plaintext mode or skip-verification option exists.
+func validateSMTPConfig(s SMTPConfig) error {
+	if s.TLS && s.StartTLS {
+		return fmt.Errorf("smtp: only one of tls or starttls may be enabled")
+	}
+	if !s.TLS && !s.StartTLS {
+		return fmt.Errorf("smtp: one of tls or starttls must be enabled")
+	}
+	if hasControl(s.Host) {
+		return fmt.Errorf("smtp.host contains a control character")
+	}
+	if err := validateEndpoint("smtp", s.Host, s.Port); err != nil {
+		return err
+	}
+	if hasControl(s.Username) {
+		return fmt.Errorf("smtp.username contains a control character")
+	}
+	if err := validateAuth("smtp", s.Username, s.Password, s.PasswordCommand); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateSenderIdentity(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("is required")
+	}
+	if hasControl(raw) {
+		return fmt.Errorf("contains a control character")
+	}
+	addr, err := mail.ParseAddress(raw)
+	if err != nil || addr.Address == "" || hasControl(addr.Address) {
+		return fmt.Errorf("is invalid")
+	}
+	return nil
+}
+
+func hasPermission(names []string, want string) bool {
+	for _, name := range names {
+		if strings.EqualFold(strings.TrimSpace(name), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasControl(s string) bool {
+	return recipients.HasControl(s)
 }
 
 func validateEndpoint(proto, host string, port int) error {
@@ -275,11 +352,14 @@ func validateEndpoint(proto, host string, port int) error {
 		return fmt.Errorf("%s.port %d invalid; want 1..65535", proto, port)
 	}
 	// Best-effort host syntax check; the OS resolver is the final word.
-	if strings.ContainsAny(host, " /") {
+	if hasControl(host) || strings.ContainsAny(host, " /") {
 		return fmt.Errorf("%s.host %q invalid", proto, host)
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		// ok
+	// The schema has a separate port field. Reject a host:port pair rather
+	// than passing an ambiguous value to a future client. Bare IPv6 hosts
+	// contain colons and are accepted when net.ParseIP recognises them.
+	if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+		return fmt.Errorf("%s.host %q invalid; host and port must be separate", proto, host)
 	}
 	return nil
 }
@@ -309,6 +389,9 @@ func validateLimits(l LimitsConfig) error {
 	if l.MaxAttachments < 0 {
 		return fmt.Errorf("limits.max_attachments must be non-negative")
 	}
+	if l.MaxRecipients < 0 {
+		return fmt.Errorf("limits.max_recipients must be non-negative")
+	}
 	if l.MaxSearchResults < 0 {
 		return fmt.Errorf("limits.max_search_results must be non-negative")
 	}
@@ -330,13 +413,31 @@ func validateLimits(l LimitsConfig) error {
 	return nil
 }
 
-func validateAttachmentPaths(paths []string) error {
+func validateAttachmentPaths(paths []string, requireExisting bool) error {
+	seen := make(map[string]struct{}, len(paths))
 	for i, p := range paths {
+		if strings.Contains(p, "\x00") {
+			return fmt.Errorf("attachment_send_paths[%d] contains NUL", i)
+		}
+		if hasControl(p) {
+			return fmt.Errorf("attachment_send_paths[%d] contains a control character", i)
+		}
 		if !filepath.IsAbs(p) {
 			return fmt.Errorf("attachment_send_paths[%d] %q must be absolute", i, p)
 		}
-		if strings.Contains(p, "\x00") {
-			return fmt.Errorf("attachment_send_paths[%d] contains NUL", i)
+		clean := filepath.Clean(p)
+		if _, duplicate := seen[clean]; duplicate {
+			return fmt.Errorf("attachment_send_paths[%d] duplicates another root", i)
+		}
+		seen[clean] = struct{}{}
+		if requireExisting {
+			info, err := os.Stat(clean)
+			if err != nil {
+				return fmt.Errorf("attachment_send_paths[%d]: %w", i, err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("attachment_send_paths[%d] %q is not a directory", i, p)
+			}
 		}
 	}
 	return nil

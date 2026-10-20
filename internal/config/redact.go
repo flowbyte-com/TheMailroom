@@ -62,6 +62,7 @@ func (l LimitsConfig) redacted() string {
 		", max_attachment_bytes=" + itoa(l.MaxAttachmentBytes) +
 		", max_total_attachment_bytes=" + itoa(l.MaxTotalAttachmentBytes) +
 		", max_attachments=" + itoa(l.MaxAttachments) +
+		", max_recipients=" + itoa(l.MaxRecipients) +
 		", max_search_results=" + itoa(l.MaxSearchResults) +
 		", max_batch_operations=" + itoa(l.MaxBatchOperations) +
 		", max_mime_nesting=" + itoa(l.MaxMIMENesting) +

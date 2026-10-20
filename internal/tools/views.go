@@ -13,12 +13,12 @@ import (
 // the runtime representation; if we ever need to add a field that must
 // not be exposed, we cannot accidentally leak it through MCP.
 type accountView struct {
-	ID                  string     `json:"id"`
-	Email               string     `json:"email"`
-	Provider            string     `json:"provider,omitempty"`
-	Permissions         []string   `json:"permissions"`
-	Limits              limitsView `json:"limits"`
-	AttachmentSendPaths []string   `json:"attachment_send_paths"`
+	ID                    string     `json:"id"`
+	Email                 string     `json:"email"`
+	Provider              string     `json:"provider,omitempty"`
+	Permissions           []string   `json:"permissions"`
+	Limits                limitsView `json:"limits"`
+	AttachmentSendEnabled bool       `json:"attachment_send_enabled"`
 }
 
 type limitsView struct {
@@ -26,6 +26,7 @@ type limitsView struct {
 	MaxAttachmentBytes      int `json:"max_attachment_bytes"`
 	MaxTotalAttachmentBytes int `json:"max_total_attachment_bytes"`
 	MaxAttachments          int `json:"max_attachments"`
+	MaxRecipients           int `json:"max_recipients"`
 	MaxSearchResults        int `json:"max_search_results"`
 	MaxBatchOperations      int `json:"max_batch_operations"`
 	MaxMIMENesting          int `json:"max_mime_nesting"`
@@ -38,17 +39,13 @@ func accountViewFrom(a *accounts.Account) accountView {
 	for i, c := range perms {
 		permStrs[i] = string(c)
 	}
-	paths := a.AttachmentSendDirs
-	if paths == nil {
-		paths = []string{}
-	}
 	return accountView{
-		ID:                  a.ID,
-		Email:               a.Email,
-		Provider:            a.Provider,
-		Permissions:         permStrs,
-		Limits:              limitsFrom(a.Limits),
-		AttachmentSendPaths: paths,
+		ID:                    a.ID,
+		Email:                 a.Email,
+		Provider:              a.Provider,
+		Permissions:           permStrs,
+		Limits:                limitsFrom(a.Limits),
+		AttachmentSendEnabled: a.AttachmentSendEnabled(),
 	}
 }
 
@@ -58,6 +55,7 @@ func limitsFrom(l config.LimitsConfig) limitsView {
 		MaxAttachmentBytes:      l.MaxAttachmentBytes,
 		MaxTotalAttachmentBytes: l.MaxTotalAttachmentBytes,
 		MaxAttachments:          l.MaxAttachments,
+		MaxRecipients:           l.MaxRecipients,
 		MaxSearchResults:        l.MaxSearchResults,
 		MaxBatchOperations:      l.MaxBatchOperations,
 		MaxMIMENesting:          l.MaxMIMENesting,

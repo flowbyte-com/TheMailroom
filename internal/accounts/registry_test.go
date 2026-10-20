@@ -2,8 +2,10 @@ package accounts
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/flowbyte-com/themailroom/internal/config"
@@ -147,5 +149,138 @@ accounts:
 	}
 	if _, err := r.Get("nonexistent"); err != mailbox.ErrAccountNotFound {
 		t.Errorf("err = %v, want ErrAccountNotFound", err)
+	}
+}
+
+func TestAttachmentResolverLifecycle(t *testing.T) {
+	mbx := writeTempMemory(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `
+accounts:
+  - id: a
+    backend: memory
+    email: a@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [attachment_send]
+    attachment_send_paths:
+      - ` + root + `
+    limits:
+      max_attachment_bytes: 10
+      max_total_attachment_bytes: 20
+      max_attachments: 2
+`
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a, err := r.Get("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.AttachmentSendEnabled() {
+		t.Error("AttachmentSendEnabled = false, want true")
+	}
+	resolver := a.AttachmentResolver()
+	if resolver == nil {
+		t.Fatal("AttachmentResolver = nil")
+	}
+	files, err := resolver.Resolve([]string{"note.txt"})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(files) != 1 || string(files[0].Data) != "hello" {
+		t.Errorf("files = %+v", files)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := resolver.Resolve([]string{"note.txt"}); err == nil {
+		t.Error("resolver still usable after registry Close")
+	}
+}
+
+func TestAccountViewHidesAttachmentRoots(t *testing.T) {
+	mbx := writeTempMemory(t)
+	root := t.TempDir()
+	yaml := `
+accounts:
+  - id: a
+    backend: memory
+    email: a@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [attachment_send]
+    attachment_send_paths:
+      - ` + root + `
+`
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer r.Close()
+	views := r.Views()
+	if len(views) != 1 || !views[0].AttachmentSendEnabled {
+		t.Fatalf("views = %+v", views)
+	}
+	// The View has no path field; the JSON encoding must not contain the
+	// configured host root.
+	data, err := json.Marshal(views[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), root) {
+		t.Errorf("view leaked attachment root: %s", data)
+	}
+	if !strings.Contains(string(data), `"attachment_send_enabled":true`) {
+		t.Errorf("view = %s, want attachment_send_enabled", data)
+	}
+}
+
+func TestAccountRecipientPolicy(t *testing.T) {
+	mbx := writeTempMemory(t)
+	yaml := `
+accounts:
+  - id: a
+    backend: memory
+    email: a@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [send]
+    allowed_recipients: [alice@example.test]
+    smtp:
+      host: smtp.example.test
+      username: a@example.test
+      password: secret
+`
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer r.Close()
+	a, err := r.Get("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RecipientPolicy.Validate([]string{"alice@example.test"}, nil, nil); err != nil {
+		t.Errorf("allowed recipient rejected: %v", err)
+	}
+	if _, err := a.RecipientPolicy.Validate([]string{"eve@example.test"}, nil, nil); err == nil {
+		t.Error("disallowed recipient accepted")
 	}
 }

@@ -80,6 +80,7 @@ accounts:
 		client:   session,
 		cleanup: func() {
 			session.Close()
+			_ = reg.Close()
 		},
 	}
 }
@@ -521,7 +522,7 @@ func TestListAccountsHasNoSecrets(t *testing.T) {
 		// future refactor adds a password-looking field on Account,
 		// this test still compiles but the wire-format list_accounts
 		// test above will catch a leak.
-		_ = a.AttachmentSendDirs
+		_ = a.AttachmentSendEnabled()
 		_ = a.Permissions.Has(permissions.CapRead)
 	}
 }
@@ -662,10 +663,13 @@ func TestListAccountsExposesExpectedFields(t *testing.T) {
 	first := arr[0].(map[string]any)
 
 	// Fields that MUST be present.
-	for _, want := range []string{"id", "email", "permissions", "limits", "attachment_send_paths"} {
+	for _, want := range []string{"id", "email", "permissions", "limits", "attachment_send_enabled"} {
 		if _, ok := first[want]; !ok {
 			t.Errorf("missing required field %q", want)
 		}
+	}
+	if enabled, ok := first["attachment_send_enabled"].(bool); !ok || enabled {
+		t.Errorf("attachment_send_enabled = %v, want false for a read-only test account", first["attachment_send_enabled"])
 	}
 	// Fields that MUST NOT be present. If any of these leak into the
 	// wire view, the agent could exfiltrate credentials or internal
@@ -673,6 +677,7 @@ func TestListAccountsExposesExpectedFields(t *testing.T) {
 	for _, banned := range []string{
 		"password", "password_command", "imap", "smtp",
 		"backend", "mailbox_root", "insecure_skip_verify",
+		"attachment_send_paths", "attachment_send_dirs",
 	} {
 		if _, ok := first[banned]; ok {
 			t.Errorf("forbidden field %q is exposed by list_accounts", banned)

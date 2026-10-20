@@ -1,13 +1,13 @@
 # Phase 2 Design Notes
 
-> Status: in progress. Phase 2.1 (read-only IMAP correctness + MIME
-> reading) is implemented in `internal/imapclient` and
-> `internal/mimeparse`. Phase 2.2 Priority 3 (inbound
-> `read_attachment`) is implemented and merged on `main` (PR #8).
-> This document captures the design decisions for that slice and the
-> remaining work: SMTP submission,
-> MIME composition, reply / forward, outbound attachments, and
-> protected mailbox modifications.
+> Status: Phase 2.3 PR 1 is **IN REVIEW**. Phase 2.1 (read-only IMAP
+> correctness + MIME reading) is implemented in `internal/imapclient`
+> and `internal/mimeparse`. Phase 2.2 is complete, including inbound
+> `read_attachment` (PR #8). Phase 2.3 PR 1 implements the recipient
+> policy, conditional SMTP configuration validation, and the confined
+> outbound attachment resolver. SMTP submission, MIME composition,
+> reply/forward, and protected mailbox modifications are **not**
+> implemented.
 
 ## 1. Library selection (post-research)
 
@@ -15,8 +15,8 @@
 |----------------------|--------------------------------------|----------|
 | IMAP client          | `github.com/emersion/go-imap` v1.2.1 | **Selected.** v1 is the stable, production-tracked line. v2 is parallel development, not yet marked stable. TheMailroom will move to v2 only when upstream tags a stable release. |
 | IMAP server (tests)  | `github.com/emersion/go-imap/server` + `backend/memory` | **Selected.** Spin up a real IMAP4rev1 server in-process for tests. |
-| SMTP client          | `github.com/emersion/go-smtp` v0.25.0 | **Selected.** Mature submission client; STARTTLS, AUTH (PLAIN, LOGIN, CRAM-MD5). |
-| MIME parser/composer | `github.com/emersion/go-message` v0.18.2 | **Selected.** Charset-aware, multipart-aware, RFC 2047 handling. **Implemented in Phase 2.1** as `internal/mimeparse`. |
+| SMTP client          | `github.com/emersion/go-smtp` v0.25.0 | **Selected for Phase 2.3 PR 2.** Not yet a dependency or implemented. |
+| MIME parser/composer | `github.com/emersion/go-message` v0.18.2 | **Selected.** Charset-aware, multipart-aware, RFC 2047 handling. **Parser implemented in Phase 2.1** as `internal/mimeparse`; composer is planned for Phase 2.3 PR 2. |
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+) | **Selected.** OS-level confinement; prevents symlink escape. |
 | Self-signed test CA  | `crypto/rsa`, `crypto/x509`, `crypto/tls` (stdlib) | **Selected.** Generate certs in tests; trust via `InsecureSkipVerify` only in the test-only `Options.TLSConfig` knob. |
 
@@ -34,9 +34,10 @@ The MCP tool surface accepts two attachment references:
 1. **Path reference** — a string. The path is resolved against the
    account's `attachment_send_paths` roots. Allowed only when the
    account has the `attachment_send` capability. Refused outright if
-   the resolved path escapes any root.
+   the resolved path escapes any root. The resolver is implemented in
+   Phase 2.3 PR 1; no send tool accepts a reference yet.
 
-2. **Inline reference** (Phase 2.5) — a base64 blob supplied by the
+2. **Inline reference** (future) — a base64 blob supplied by the
    tool. Refused for any account without the `attachment_send`
    capability and rate-limited per `LimitsConfig`.
 
@@ -45,46 +46,55 @@ working files are the typical attachment source.
 
 ### 2.2 Filesystem confinement
 
-Each `attachment_send_path` becomes an `*os.Root` at startup. The
-resolver opens any path through one of the roots:
+Each `attachment_send_path` is opened once as an `*os.Root` at startup
+(Phase 2.3 PR 1). The resolver checks every root rather than returning
+the first success:
 
 ```go
 type Resolver struct {
-    roots []*os.Root
+    roots  []*os.Root
+    limits Limits
 }
 
-func (r *Resolver) Open(name string) (*os.File, error) {
-    for _, root := range r.roots {
-        f, err := root.Open(name)
-        if err == nil {
-            return f, nil
-        }
-    }
-    return nil, ErrAttachmentNotFound
+type File struct {
+    Filename string
+    Data     []byte
 }
+
+func (r *Resolver) Resolve(refs []string) ([]File, error)
 ```
 
-`os.Root.Open` rejects:
-- Absolute paths.
-- Paths with `..` segments.
-- Symlinks that escape the root.
-- Anything not under the root.
+Agent references are relative path strings. The resolver rejects:
+- Empty or whitespace-only references.
+- Absolute, drive-qualified and UNC-style paths.
+- Paths containing NUL or other control characters.
+- Any `..` segment (even one that `path.Clean` would collapse).
+- Paths that resolve in more than one root (`ErrAmbiguous`).
+- Non-regular files (`ErrNotRegular`).
 
-`os.Root.Stat` and `os.Root.Lstat` provide additional introspection
-without exposing the kernel-level errors. Any escape attempt is
-returned as a generic `ErrPathEscape`; we do not leak the resolved
-path back to the agent.
+`os.Root.Open` additionally rejects symlinks that escape the root and
+anything not under the root. Resolution errors are returned as generic
+typed errors (`ErrInvalidPath`, `ErrNotFound`, `ErrAmbiguous`,
+`ErrNotRegular`, `ErrTooLarge`, `ErrTotalTooLarge`, `ErrTooMany`)
+without leaking the configured root or resolved host path. Reads are
+bounded by actual bytes read and frozen in memory.
 
 ### 2.3 Limits
 
 Each account has:
 - `max_attachments` (default 50): hard cap on attachments per send.
-- Per-attachment size cap: `max_message_bytes / 4` (default 6.25 MiB).
-- Total size cap: `max_message_bytes` (default 25 MiB).
-- MIME nesting depth cap: 16 (rejects `message/rfc822` bombs).
+- `max_attachment_bytes` (default 6 MiB): decoded bytes per local
+  attachment.
+- `max_total_attachment_bytes` (default 25 MiB): decoded bytes across
+  all local attachments.
+- `max_recipients` (default 50): unique To + Cc + Bcc envelope
+  recipients.
+- `max_message_bytes` (default 25 MiB): eventual serialized RFC 5322
+  message size, including transfer-encoding expansion.
 
-These are enforced in the SMTP submission path before any DATA is
-written.
+The attachment and recipient limits are implemented in Phase 2.3 PR 1.
+`max_message_bytes` must be enforced by the future MIME composer because
+only it knows the final serialized size. No send path exists yet.
 
 ### 2.4 Inbound attachment retrieval (Phase 2.2 Priority 3)
 
@@ -204,9 +214,16 @@ accounts:
     ...
 ```
 
-If set, the SMTP `RCPT TO` must match. Otherwise the SMTP backend
-returns `RecipientNotAllowed` and the message is not sent. If the
-list is empty, any recipient is allowed.
+If set, each To/Cc/Bcc address must match an entry. Matching uses the
+canonical address: parsed as RFC 5322, trimmed to the addr-spec, with the
+local-part case preserved and only the domain lowercased. Comparison is
+exact: local-part case is significant and domain case is not, with no
+substring, prefix, suffix or wildcard matching. Exact duplicates are
+collapsed before the `max_recipients` limit is applied; local-parts that
+differ only by case remain distinct. If the list is empty, any recipient
+is allowed. The policy is implemented and testable in Phase 2.3 PR 1;
+the future `send_message` handler must call it before opening SMTP and
+must not bypass it.
 
 ### 3.5 Sender identity enforcement
 

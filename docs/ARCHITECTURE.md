@@ -1,6 +1,10 @@
 # TheMailroom Architecture
 
-> Status: Phase 1 (Foundation). This document describes the design as implemented in Phase 1 and the planned layering for Phases 2 and 3.
+> Status: Phase 2.3 PR 1 is **IN REVIEW**. The read-only IMAP path,
+> inbound attachment retrieval, recipient policy, conditional SMTP
+> validation, and the confined outbound attachment resolver are
+> implemented. SMTP submission and MIME composition are planned and are
+> **not** implemented.
 
 ## 1. Goals and non-goals
 
@@ -34,9 +38,10 @@ The module is split into focused internal packages. Each layer depends only on t
 |  internal/mailbox         (Backend interface)           |
 |  internal/mailbox/memory  (in-memory Backend)           |
 |  internal/imapclient      (IMAP Backend — read slice)   |
-|  internal/smtpclient      (SMTP submission — future)    |
-|  internal/mailmime        (MIME parse/compose — future) |
-|  internal/attachments     (os.Root confinement)         |
+|  internal/smtpclient      (SMTP submission — planned)   |
+|  internal/mimeparse       (MIME parse; composer planned)|
+|  internal/attachments     (os.Root outbound confinement)|
+|  internal/recipients      (outbound recipient policy)   |
 +---------------------------------------------------------+
 |  internal/accounts        (Account registry, conns.)    |
 |  internal/permissions     (caps, enforcement)           |
@@ -67,7 +72,7 @@ Tools are the public surface. They are grouped by capability:
 - Sending (future): `send_message`, `reply_message`, `forward_message`
 - Modification (future): `move_message`, `flag_message`, `archive_message`, `delete_message`
 
-Tools return structured payloads (JSON) and never include credentials or arbitrary raw protocol output. Errors are typed (`PermissionDenied`, `AccountNotFound`, `InvalidInput`, `BackendError`, `RateLimited`, etc.) and serialised without leaking internal details.
+Tools return structured payloads (JSON) and never include credentials or arbitrary raw protocol output. Errors are typed (`PermissionDenied`, `AccountNotFound`, `InvalidInput`, `RateLimited`, etc.) and serialised without leaking internal details. Unknown internal failures map to `InternalError`; `BackendError` remains a reserved code that is not currently emitted.
 
 ### 2.3 Mailbox abstraction (`internal/mailbox`)
 
@@ -90,14 +95,16 @@ Three implementations exist or are planned:
 2. `internal/imapclient` — the production IMAP4rev1 implementation.
    **Read-only** in this slice. Sends, modifications and deletions land
    in subsequent slices.
-3. SMTP and an `os.Root`-confined attachment source — future work.
+3. `internal/attachments` — the `os.Root`-confined outbound attachment
+   resolver. It is implemented, but no SMTP sender or send tool uses it
+   yet.
 
 A new test fixture in `internal/imapclient` runs the production client
 against an in-process go-imap server over TLS, exercising the full
 real-protocol path. The end-to-end test in `internal/tools` exercises
 the same backend through the MCP tool layer.
 
-### 2.4 IMAP and SMTP (`internal/imapclient`, `internal/smtpclient`)
+### 2.4 IMAP and SMTP (`internal/imapclient`; `internal/smtpclient` planned)
 
 **Status (this slice):** `internal/imapclient` ships the read-only
 IMAP4rev1 backend. It uses a narrow fork of
@@ -134,16 +141,19 @@ IMAP4rev1 backend. It uses a narrow fork of
 - Refusal to dial without TLS or STARTTLS — plain IMAP is never
   accepted.
 
-SMTP submission and MIME composition are deliberately not in this
-slice. They are documented in `docs/PHASE2_DESIGN.md` and will land in
-subsequent PRs.
+SMTP submission and MIME composition are deliberately not implemented
+yet. Phase 2.3 PR 1 validates SMTP configuration only when an account
+has the `send` capability; it does not instantiate an SMTP client. The
+future sender is documented in `docs/PHASE2_DESIGN.md` and
+`docs/PHASE2.3.md`.
 
 ### 2.5 MIME (`internal/mimeparse`)
 
 Wrapping `github.com/emersion/go-message` (parser + composer).
 `internal/mimeparse` is the read-only parser that both backends use
-so memory and IMAP expose the same structured view. The composer
-lands with `send_message` in Phase 2.2. The parser:
+so memory and IMAP expose the same structured view. The outbound
+composer is planned for Phase 2.3 PR 2 and is not implemented. The
+parser:
 
 - Decodes text/* and html/* bodies, applying the declared
   Content-Transfer-Encoding and charset (RFC 2047) automatically.
@@ -166,13 +176,25 @@ lands with `send_message` in Phase 2.2. The parser:
 
 ### 2.6 Attachments (`internal/attachments`)
 
-The single most security-sensitive path for outbound email. Uses Go 1.24+ `os.Root` for filesystem confinement:
+The single most security-sensitive path for outbound email. Implemented
+in Phase 2.3 PR 1; no send tool is wired yet. It uses Go 1.24+ `os.Root`
+for filesystem confinement:
 
-- `SendDir` per account restricts lookups to a directory tree.
-- Symlink resolution is checked before any read.
-- Path canonicalisation prevents `..` escape.
-- Files larger than the configured limit are rejected.
-- Per-account `attachment_send_paths` allow-list is enforced regardless of agent input.
+- Every `attachment_send_paths` entry is opened once as an `*os.Root`.
+  Empty paths mean no resolver and therefore no attachment source.
+- Agent references are relative paths only. Absolute paths, drive
+  qualifiers, NUL/control characters, `..` segments and empty paths are
+  rejected before any filesystem access.
+- A reference is checked against every root. If it resolves in more
+  than one root, the request is rejected as ambiguous instead of
+  silently selecting one.
+- Only regular files are accepted. Reads use the root's file descriptor,
+  are capped by `max_attachment_bytes` on actual bytes read, and are
+  counted against `max_total_attachment_bytes`.
+- Resolved data is frozen in memory before return; resolved host paths
+  are never returned. Roots are closed by the registry shutdown path.
+  Each account has its own roots and policy; cross-account access is
+  impossible.
 
 ### 2.6a Search semantics (`internal/searchspec`)
 
@@ -216,10 +238,17 @@ messages and requires identical results.
 A registry of configured accounts. Each entry holds:
 
 - `id` — opaque, stable identifier exposed to tools.
-- Provider, IMAP/SMTP endpoints, authentication method.
-- Permissions, limits, attachment paths.
+- Provider label and the account's configured email identity. Runtime
+  endpoint and credential settings remain in `config`; the account does
+  not expose them.
+- Permissions and limits.
+- A parsed recipient policy for outbound validation.
+- An optional `internal/attachments` resolver for `attachment_send`
+  accounts. Absolute roots are not copied into the MCP view.
 
-Connections are created lazily and pooled per-request (one IMAP connection per active operation in Phase 2; pooling later). Credentials are never copied into MCP-visible data structures.
+The IMAP backend uses a single shared connection per account under a
+mutex; there is no connection pool yet. Credentials are never copied
+into MCP-visible data structures.
 
 ### 2.8 Permissions (`internal/permissions`)
 
@@ -229,7 +258,9 @@ A small, explicit capability set:
 - `send` — compose/send/reply/forward.
 - `modify` — flag, move, archive (without deletion).
 - `delete` — explicit deletion.
-- `attachment_send` — sending requires this capability *and* a path attachment to `attachment_send_paths`.
+- `attachment_send` — sending with a local attachment requires this
+  capability *and* a configured `attachment_send_paths` root. The
+  capability is declared but no send tool is registered yet.
 
 Each tool handler calls `permissions.Check(account, capability)` first. The check returns `PermissionDenied` if missing, and the tool refuses the operation. The check is server-side; we do not trust the MCP client.
 
@@ -243,12 +274,18 @@ silent overrides that would otherwise mask a misconfiguration.
 Validation covers:
 
 - Account IDs unique.
-- IMAP/SMTP endpoints sane (host required, port in 1..65535, no whitespace).
-- IMAP/SMTP credentials: exactly one of `password` or `password_command`
-  must be set.
-- Limits are non-negative.
+- IMAP endpoints and credentials are required for `backend: imap`.
+- SMTP endpoints, TLS mode and credentials are required only for
+  accounts with `send`. Exactly one of `tls` or `starttls` must be
+  enabled; plaintext submission is rejected. Read-only accounts may
+  leave SMTP unset.
+- Limits are non-negative; `max_recipients` defaults to 50.
 - Permission names are known capability names.
-- `attachment_send_paths` are absolute paths without NUL bytes.
+- `allowed_recipients` entries parse as addresses; matching is exact,
+  preserving local-part case while normalizing domain case.
+- `attachment_send_paths` are absolute, NUL-free paths. When
+  `attachment_send` is granted, they must be existing directories and
+  duplicates are rejected; the resolver opens them with `os.Root`.
 
 Password fields in `IMAPConfig` and `SMTPConfig` are tagged `json:"-"`
 so that an accidental JSON serialisation never leaks the resolved
@@ -275,8 +312,8 @@ CA) or a `SSL_CERT_FILE` override at the host level.
 | MCP transport        | `github.com/modelcontextprotocol/go-sdk`       | Official Go SDK; stdio transport; schema-validated tools.       |
 | YAML config          | `gopkg.in/yaml.v3`                              | Mature, widely used; supports strict unknown-key rejection.    |
 | IMAP (Phase 2)       | `github.com/flowbyte-com/go-imap` (fork of `github.com/emersion/go-imap` v1.2.1) | De facto standard; protocol-correct; stable API. The fork adds protocol-level IMAP literal-size enforcement; see `docs/PHASE2_DESIGN.md` §8/§10. |
-| SMTP (Phase 2)       | `github.com/emersion/go-smtp`                  | Pair with go-imap; covers submission, STARTTLS, AUTH.           |
-| MIME (Phase 2)       | `github.com/emersion/go-message`                | Parser + composer; charset-aware; handles RFC 2047.             |
+| SMTP (planned)       | `github.com/emersion/go-smtp` v0.25.0          | Selected for Phase 2.3 PR 2; not yet a dependency or implemented. |
+| MIME (Phase 2)       | `github.com/emersion/go-message`                | Parser implemented; composer planned for Phase 2.3 PR 2. Charset-aware; handles RFC 2047. |
 | Logging              | `log/slog` (stdlib)                             | Go 1.21+; structured logging; no extra dep.                    |
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+)                    | OS-level chroot-style; prevents escape by symlink.             |
 | Testing              | stdlib `testing` + emersion server packages     | Stub-friendly; integration via local in-process servers later.  |
@@ -328,7 +365,7 @@ At no point does the response contain credentials, raw IMAP wire bytes, or files
 - `go build ./...` — produces `bin/themailroom` via `cmd/themailroom`.
 - `go test ./...` — unit tests across all packages.
 - `go vet ./...` — required clean.
-- `go test -race ./...` — Phase 2 onward.
+- `go test -race ./...` — required by CI.
 - GitHub Actions CI runs the above on push and PR.
 - `golangci-lint` (Phase 3 hardening) with a focused lint set.
 

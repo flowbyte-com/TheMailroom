@@ -455,3 +455,339 @@ accounts:
 		t.Errorf("Redacted() leaked credential: %s", s)
 	}
 }
+
+// --- Phase 2.3 PR 1: outbound foundations ---
+
+func TestReadOnlyAccountDoesNotRequireSMTP(t *testing.T) {
+	mbx := t.TempDir()
+	yaml := `
+accounts:
+  - id: read-only
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [read]
+`
+	if _, err := Parse([]byte(yaml)); err != nil {
+		t.Fatalf("read-only account without SMTP rejected: %v", err)
+	}
+}
+
+func TestReadOnlyAccountIgnoresIncompleteSMTP(t *testing.T) {
+	mbx := t.TempDir()
+	yaml := `
+accounts:
+  - id: read-only
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [read]
+    smtp:
+      host: smtp.example.test
+      port: 25
+`
+	if _, err := Parse([]byte(yaml)); err != nil {
+		t.Fatalf("read-only account with incomplete SMTP rejected: %v", err)
+	}
+}
+
+func TestSendAccountRequiresSMTP(t *testing.T) {
+	mbx := t.TempDir()
+	yaml := `
+accounts:
+  - id: sender
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [send]
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected SMTP validation error")
+	}
+	if !strings.Contains(err.Error(), "smtp.host") {
+		t.Errorf("err = %q, want smtp.host", err.Error())
+	}
+}
+
+func TestSendAccountValidSMTP(t *testing.T) {
+	mbx := t.TempDir()
+	yaml := `
+accounts:
+  - id: sender
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [send]
+    smtp:
+      host: smtp.example.test
+      username: user@example.test
+      password: secret
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	smtp := cfg.Accounts[0].SMTP
+	if !smtp.StartTLS || smtp.TLS {
+		t.Errorf("TLS mode = tls:%v starttls:%v, want mandatory STARTTLS", smtp.TLS, smtp.StartTLS)
+	}
+	if smtp.Port != DefaultSMTPPort {
+		t.Errorf("port = %d, want %d", smtp.Port, DefaultSMTPPort)
+	}
+}
+
+func TestSendAccountRejectsUnsafeTLSModes(t *testing.T) {
+	mbx := t.TempDir()
+	cases := []struct {
+		name    string
+		smtp    string
+		wantSub string
+	}{
+		{
+			name: "both modes",
+			smtp: `
+      host: smtp.example.test
+      tls: true
+      starttls: true
+      username: user@example.test
+      password: secret`,
+			wantSub: "only one of tls or starttls",
+		},
+		{
+			name: "neither mode",
+			smtp: `
+      host: smtp.example.test
+      port: 587
+      username: user@example.test
+      password: secret`,
+			wantSub: "one of tls or starttls",
+		},
+		{
+			name: "missing auth",
+			smtp: `
+      host: smtp.example.test
+      username: user@example.test`,
+			wantSub: "password or password_command",
+		},
+		{
+			name: "bad port",
+			smtp: `
+      host: smtp.example.test
+      port: 70000
+      starttls: true
+      username: user@example.test
+      password: secret`,
+			wantSub: "port",
+		},
+		{
+			name: "host with port",
+			smtp: `
+      host: smtp.example.test:587
+      starttls: true
+      username: user@example.test
+      password: secret`,
+			wantSub: "host and port must be separate",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := `
+accounts:
+  - id: sender
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [send]
+    smtp:` + tc.smtp + `
+`
+			_, err := Parse([]byte(yaml))
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("err = %q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestSMTPValidationDoesNotLeakCredentials(t *testing.T) {
+	mbx := t.TempDir()
+	const secret = "very-secret-password-value"
+	yaml := `
+accounts:
+  - id: sender
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [send]
+    smtp:
+      host: smtp.example.test
+      tls: true
+      starttls: true
+      username: user@example.test
+      password: ` + secret + `
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected TLS mode error")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error leaked SMTP password: %q", err.Error())
+	}
+	cfg, err := Parse([]byte(strings.Replace(yaml, "      starttls: true\n", "", 1)))
+	if err != nil {
+		t.Fatalf("Parse valid config: %v", err)
+	}
+	if redacted := cfg.Redacted(); strings.Contains(redacted, secret) {
+		t.Errorf("redacted config leaked SMTP password: %q", redacted)
+	}
+}
+
+func TestRecipientPolicyConfig(t *testing.T) {
+	mbx := t.TempDir()
+	yaml := `
+accounts:
+  - id: sender
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [send]
+    allowed_recipients:
+      - Alice@Example.Test
+      - bob@example.test
+    smtp:
+      host: smtp.example.test
+      username: user@example.test
+      password: secret
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Accounts[0].Limits.MaxRecipients; got != DefaultMaxRecipients {
+		t.Errorf("MaxRecipients = %d, want default %d", got, DefaultMaxRecipients)
+	}
+	if got := len(cfg.Accounts[0].AllowedRecipients); got != 2 {
+		t.Errorf("AllowedRecipients length = %d, want 2", got)
+	}
+}
+
+func TestBadRecipientPolicyConfig(t *testing.T) {
+	mbx := t.TempDir()
+	cases := []struct {
+		name    string
+		policy  string
+		wantSub string
+	}{
+		{name: "malformed allow-list", policy: "    allowed_recipients: [not-an-address]\n", wantSub: "allowed_recipients"},
+		{name: "negative limit", policy: "    limits: {max_recipients: -1}\n", wantSub: "max_recipients"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := `
+accounts:
+  - id: sender
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [send]
+` + tc.policy + `    smtp:
+      host: smtp.example.test
+      username: user@example.test
+      password: secret
+`
+			_, err := Parse([]byte(yaml))
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("err = %q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestAttachmentRootValidation(t *testing.T) {
+	mbx := t.TempDir()
+	root := t.TempDir()
+	validYAML := func(paths string) string {
+		return `
+accounts:
+  - id: sender
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [attachment_send]
+    attachment_send_paths:
+` + paths + `
+`
+	}
+	if _, err := Parse([]byte(validYAML("      - " + root))); err != nil {
+		t.Fatalf("valid attachment root rejected: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		paths   string
+		wantSub string
+	}{
+		{name: "missing", paths: "      - " + filepath.Join(root, "missing"), wantSub: "attachment_send_paths[0]"},
+		{name: "file", paths: "      - " + filepath.Join(root, "file"), wantSub: "not a directory"},
+		{name: "duplicate", paths: "      - " + root + "\n      - " + root, wantSub: "duplicates"},
+	}
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(validYAML(tc.paths)))
+			if err == nil {
+				t.Fatalf("expected error containing %q", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("err = %q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestReadOnlyAccountMayHaveUnusedMissingAttachmentRoot(t *testing.T) {
+	mbx := t.TempDir()
+	yaml := `
+accounts:
+  - id: read-only
+    backend: memory
+    email: user@example.test
+    mailbox_root: ` + mbx + `
+    permissions: [read]
+    attachment_send_paths:
+      - /does/not/exist/but/is/unused
+`
+	if _, err := Parse([]byte(yaml)); err != nil {
+		t.Fatalf("read-only account with unused attachment root rejected: %v", err)
+	}
+}
+
+func TestSenderIdentityRejectsControlCharacters(t *testing.T) {
+	mbx := t.TempDir()
+	yaml := `
+accounts:
+  - id: a
+    backend: memory
+    email: "user@example.test\nBcc: evil@example.test"
+    mailbox_root: ` + mbx + `
+    permissions: [read]
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected sender identity error")
+	}
+	if !strings.Contains(err.Error(), "email") {
+		t.Errorf("err = %q, want email field", err.Error())
+	}
+	if strings.Contains(err.Error(), "evil") {
+		t.Errorf("error reflected header-injection input: %q", err.Error())
+	}
+}
