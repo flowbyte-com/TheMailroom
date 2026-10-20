@@ -48,6 +48,9 @@ func TestExtractAttachmentNestedInlineAndMetadata(t *testing.T) {
 	if !bytes.HasPrefix(got.Content, []byte("\x89PNG\r\n\x1a\n")) {
 		t.Errorf("logo content does not start with a PNG signature: %q", got.Content[:8])
 	}
+	if got.Index != 0 {
+		t.Errorf("logo index = %d, want 0", got.Index)
+	}
 	if len(got.Content) != int(logo.Size) || got.Filename != logo.Filename || got.MimeType != logo.MimeType {
 		t.Errorf("extracted logo metadata/content mismatch: %+v len=%d", got.Attachment, len(got.Content))
 	}
@@ -63,6 +66,9 @@ func TestExtractAttachmentNestedInlineAndMetadata(t *testing.T) {
 	if !bytes.HasPrefix(got.Content, []byte("%PDF-1.4")) || len(got.Content) != 296 {
 		t.Errorf("pdf content = %q len=%d", got.Content[:8], len(got.Content))
 	}
+	if got.Index != 1 {
+		t.Errorf("pdf index = %d, want 1", got.Index)
+	}
 
 	csv := attachmentByFilename(t, d, "data.csv")
 	if csv.Part != "3" || csv.MimeType != "text/csv" || !csv.IsText {
@@ -76,6 +82,9 @@ func TestExtractAttachmentNestedInlineAndMetadata(t *testing.T) {
 		!strings.Contains(string(got.Content), "a,1") ||
 		!strings.Contains(string(got.Content), "b,2") {
 		t.Errorf("csv content = %q", got.Content)
+	}
+	if got.Index != 2 {
+		t.Errorf("csv index = %d, want 2", got.Index)
 	}
 }
 

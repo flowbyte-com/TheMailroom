@@ -34,14 +34,18 @@ All tools take `account_id` as a required string field. There is no implicit "cu
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
 - `NotImplemented` — capability exists in the schema but is not yet wired.
-- `MessageTooLarge` — the raw message exceeds `max_message_bytes`.
+- `MessageTooLarge` — the raw message exceeds `max_message_bytes`, or an
+  ordinary body part exceeds the per-part cap during `read_attachment`
+  validation.
 - `NestingTooDeep` — the MIME nesting exceeds `max_mime_nesting`.
 - `TooManyParts` — the MIME part count exceeds `max_mime_parts`.
 - `TooManyAttachments` — the attachment count exceeds `max_attachments`.
 - `AttachmentTooLarge` — a single attachment exceeds `max_attachment_bytes`,
   or the decoded total exceeds `max_total_attachment_bytes`.
 - `AttachmentNotFound` — the requested part is not an exposed attachment.
-- `Malformed` — the message could not be parsed.
+- `Malformed` — the message could not be parsed, or attachment
+  extraction could not complete because a part or transfer encoding
+  could not be decoded.
 
 ## Read-only tools
 
@@ -311,10 +315,17 @@ the payload by roughly one third; a default maximum-size attachment
 - The complete message is parsed and all configured MIME and size
   limits are applied, including siblings of the requested part. If a
   later part fails a limit, no content is returned.
+- Extraction is fail-closed. A malformed sibling, a body read or
+  transfer-decoding failure, an unknown transfer encoding, or an
+  oversized ordinary body part returns `Malformed` or
+  `MessageTooLarge`; previously captured content is discarded.
 - Transfer encodings are decoded. Text parts are charset-decoded to
   UTF-8 where possible, so text attachment bytes may be normalised
   rather than byte-identical to the sender's original file. Binary
-  transfer-encoded content is decoded to its original bytes.
+  transfer-encoded content is decoded to its original bytes. A
+  charset warning on an unrelated part is non-fatal, but a selected
+  text attachment with an unknown charset returns `Malformed` rather
+  than undecoded bytes.
 - The IMAP backend uses the same read-only `EXAMINE` and
   `UID FETCH BODY.PEEK[]` path as `read_message`; fetching an
   attachment never sets `\Seen`. The memory backend uses a private

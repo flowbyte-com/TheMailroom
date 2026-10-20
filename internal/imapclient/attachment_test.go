@@ -106,6 +106,9 @@ func TestFetchAttachmentIMAP(t *testing.T) {
 	if got.UID != uid || got.UIDValidity != uv {
 		t.Errorf("UID/UIDVALIDITY = %d/%d, want %d/%d", got.UID, got.UIDValidity, uid, uv)
 	}
+	if got.Attachment.Index != 0 {
+		t.Errorf("attachment index = %d, want 0", got.Attachment.Index)
+	}
 	if got.Attachment.Part != "2" || got.Attachment.Filename != "a.bin" ||
 		got.Attachment.MimeType != "application/octet-stream" {
 		t.Errorf("metadata = %+v", got.Attachment)
@@ -157,6 +160,92 @@ func TestFetchAttachmentIMAP(t *testing.T) {
 	}
 }
 
+func TestFetchAttachmentIMAPFailsClosedOnMalformedSibling(t *testing.T) {
+	raw := "From: a@example.test\r\n" +
+		"Subject: Malformed Sibling\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain\r\n\r\nb\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"good.bin\"\r\n\r\nGOOD\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"bad.bin\"\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n!!!!\r\n" +
+		"--B--\r\n"
+	addr, cleanup := startCustomServer(t, injectINBOXMessage(t, raw))
+	defer cleanup()
+	be := testBackend(t, addr)
+	defer be.Close()
+
+	uid, uv := findSubject(t, be, "Malformed Sibling")
+	got, err := be.FetchAttachment(context.Background(), "test", "INBOX", uid, uv, "2")
+	if !errors.Is(err, mailbox.ErrMalformed) {
+		t.Fatalf("FetchAttachment err = %v, want ErrMalformed", err)
+	}
+	if got != nil {
+		t.Fatalf("FetchAttachment returned content despite malformed sibling: %+v", got)
+	}
+}
+
+func TestFetchAttachmentIMAPPreservesIndex(t *testing.T) {
+	raw := "From: a@example.test\r\n" +
+		"Subject: Attachment Index\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain\r\n\r\nbody\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"a.bin\"\r\n\r\nA\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"b.bin\"\r\n\r\nB\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"c.bin\"\r\n\r\nC\r\n" +
+		"--B--\r\n"
+	addr, cleanup := startCustomServer(t, injectINBOXMessage(t, raw))
+	defer cleanup()
+	be := testBackend(t, addr)
+	defer be.Close()
+
+	uid, uv := findSubject(t, be, "Attachment Index")
+	msg, err := be.FetchMessage(context.Background(), "test", "INBOX", uid, uv)
+	if err != nil {
+		t.Fatalf("FetchMessage: %v", err)
+	}
+
+	cases := []struct {
+		part      string
+		filename  string
+		wantIndex int
+	}{
+		{"3", "b.bin", 1},
+		{"4", "c.bin", 2},
+	}
+	for _, tc := range cases {
+		got, err := be.FetchAttachment(context.Background(), "test", "INBOX", uid, uv, tc.part)
+		if err != nil {
+			t.Fatalf("FetchAttachment(%s): %v", tc.part, err)
+		}
+		if got.Attachment.Index != tc.wantIndex {
+			t.Errorf("FetchAttachment(%s) index = %d, want %d", tc.part, got.Attachment.Index, tc.wantIndex)
+		}
+		if got.Attachment.Filename != tc.filename {
+			t.Errorf("FetchAttachment(%s) filename = %q, want %q", tc.part, got.Attachment.Filename, tc.filename)
+		}
+		var listed *mailbox.Attachment
+		for i := range msg.Attachments {
+			if msg.Attachments[i].Part == tc.part {
+				listed = &msg.Attachments[i]
+				break
+			}
+		}
+		if listed == nil {
+			t.Fatalf("FetchMessage has no part %s", tc.part)
+		}
+		if listed.Index != got.Attachment.Index {
+			t.Errorf("FetchMessage(%s) index = %d, FetchAttachment index = %d", tc.part, listed.Index, got.Attachment.Index)
+		}
+	}
+}
+
 func TestFetchAttachmentIMAPOpaqueRFC822(t *testing.T) {
 	raw := "From: a@example.test\r\n" +
 		"Subject: Opaque IMAP\r\n" +
@@ -189,7 +278,7 @@ func TestFetchAttachmentIMAPLimits(t *testing.T) {
 		"Subject: Attachment Limits\r\n" +
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
-		"--B\r\nContent-Type: text/plain\r\n\r\nbody\r\n" +
+		"--B\r\nContent-Type: text/plain\r\n\r\nb\r\n" +
 		"--B\r\nContent-Type: application/octet-stream\r\n" +
 		"Content-Disposition: attachment; filename=\"a.bin\"\r\n" +
 		"Content-Transfer-Encoding: base64\r\n\r\nQUJD\r\n" +

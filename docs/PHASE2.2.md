@@ -287,7 +287,15 @@ exact part membership shared with `read_message`.
 - `mimeparse.ExtractAttachment`, sharing the existing
   `Parse` traversal, classification and resource limits. It
   captures at most the selected attachment and returns it only
-  after the complete traversal succeeds.
+  after the complete traversal succeeds. Extraction is
+  fail-closed: malformed siblings, body read or transfer-decoding
+  failures, unknown transfer encodings and oversized ordinary body
+  parts return typed errors instead of partial content, while
+  unrelated non-fatal charset warnings remain warnings. `Parse`
+  retains its existing best-effort behaviour.
+- The returned backend metadata preserves the selected
+  attachment's zero-based ordinal, matching the index exposed by
+  `read_message`.
 - IMAP `FetchAttachment` reusing the refactored read-only
   `EXAMINE` + `UID FETCH BODY.PEEK[]` path, live UIDVALIDITY and
   exact UID validation, protocol literal cap and MIME limits.
@@ -302,7 +310,10 @@ exact part membership shared with `read_message`.
 - Tests for exact content/metadata, nested and inline parts,
   opaque `message/rfc822`, non-attachment and invalid-part
   rejection, stale UIDVALIDITY/missing UID, size limits including
-  a failure after the target was captured, unchanged `\Seen`
+  a failure after the target was captured, malformed/truncated
+  siblings after the target, unknown transfer encodings,
+  non-fatal charset warnings, selected-text charset failure,
+  selected-attachment index preservation, unchanged `\Seen`
   flags, memory retrieval after source deletion, MCP permissions,
   base64 round-trip and existing `read_message` regressions.
 

@@ -154,7 +154,10 @@ lands with `send_message` in Phase 2.2. The parser:
   attachment body in the wire response.
 - `ExtractAttachment` shares that traversal to return exactly one
   selected exposed attachment, after the complete message and all
-  limits have been validated. It never returns partial content.
+  limits have been validated. It never returns partial content:
+  malformed siblings, body read/transfer-decoding failures, unknown
+  transfer encodings and oversized ordinary body parts are typed
+  errors. `Parse` keeps its best-effort warning behaviour.
 - Rejects multipart containers, ordinary body parts, missing parts
   and hidden descendants of opaque `message/rfc822` attachments.
 - Enforces per-message, per-attachment, total-attachment, nesting,

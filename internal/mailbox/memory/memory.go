@@ -456,7 +456,7 @@ func (b *Backend) FetchAttachment(ctx context.Context, accountID, mbx string, ui
 		return &mailbox.AttachmentData{
 			UID:         rec.msg.UID,
 			UIDValidity: 1,
-			Attachment:  convertAttachment(ac.Attachment, 0),
+			Attachment:  convertAttachment(ac.Attachment, ac.Index),
 			Content:     ac.Content,
 			Warnings:    ac.Warnings,
 		}, nil

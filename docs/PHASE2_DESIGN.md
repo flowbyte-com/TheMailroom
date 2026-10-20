@@ -120,8 +120,17 @@ Security properties of the chosen approach:
   exposed attachment; containers, body parts, missing parts and
   descendants hidden inside an opaque `message/rfc822` attachment
   are rejected with `ErrAttachmentNotFound`.
+- Extraction is fail-closed: malformed siblings, body read or
+  transfer-decoding failures, unknown transfer encodings and
+  oversized ordinary body parts return typed errors and discard any
+  captured content. Unrelated charset warnings remain non-fatal;
+  a selected text attachment with an unknown charset is rejected.
+  `Parse` and `read_message` retain their existing best-effort
+  warning behaviour.
 - `ExtractAttachment` shares the `Parse` traversal rather than
-  introducing a second parser.
+  introducing a second parser. It reports the selected attachment's
+  actual ordinal so `FetchAttachment` metadata stays consistent
+  with `read_message`.
 - The memory backend retains a private raw snapshot only for
   messages with exposed attachments, so retrieval does not re-read
   the source file. The snapshot is not exposed to callers and adds

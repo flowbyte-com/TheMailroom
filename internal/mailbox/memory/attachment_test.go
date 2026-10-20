@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,9 @@ func TestFetchAttachment(t *testing.T) {
 	if got.UID != 1 || got.UIDValidity != 1 {
 		t.Errorf("UID/UIDVALIDITY = %d/%d", got.UID, got.UIDValidity)
 	}
+	if got.Attachment.Index != 0 {
+		t.Errorf("attachment index = %d, want 0", got.Attachment.Index)
+	}
 	if got.Attachment.Part != "2" || got.Attachment.Filename != "hello.txt" ||
 		got.Attachment.MimeType != "application/octet-stream" {
 		t.Errorf("attachment metadata = %+v", got.Attachment)
@@ -28,6 +32,91 @@ func TestFetchAttachment(t *testing.T) {
 	}
 	if got.Attachment.Size != int64(len(got.Content)) {
 		t.Errorf("metadata size = %d, content len = %d", got.Attachment.Size, len(got.Content))
+	}
+}
+
+func TestFetchAttachmentFailsClosedOnMalformedSibling(t *testing.T) {
+	root := t.TempDir()
+	raw := "From: a@example.test\r\n" +
+		"Subject: Malformed Sibling\r\n" +
+		"Content-Type: multipart/mixed; boundary=B\r\n\r\n" +
+		"--B\r\nContent-Type: text/plain\r\n\r\nb\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"good.bin\"\r\n\r\nGOOD\r\n" +
+		"--B\r\nContent-Type: application/octet-stream\r\n" +
+		"Content-Disposition: attachment; filename=\"bad.bin\"\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n!!!!\r\n" +
+		"--B--\r\n"
+	if err := os.WriteFile(filepath.Join(root, "msg.eml"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := b.FetchAttachment(context.Background(), "any", "INBOX", 1, 1, "2")
+	if !errors.Is(err, mailbox.ErrMalformed) {
+		t.Fatalf("FetchAttachment err = %v, want ErrMalformed", err)
+	}
+	if got != nil {
+		t.Fatalf("FetchAttachment returned content despite malformed sibling: %+v", got)
+	}
+}
+
+func TestFetchAttachmentPreservesIndex(t *testing.T) {
+	b := newBackend(t)
+	ctx := context.Background()
+	res, err := b.ListMessages(ctx, "any", "INBOX", mailbox.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	var uid uint32
+	for _, m := range res.Messages {
+		if m.Subject == "Multi-part: alternative + related + mixed" {
+			uid = m.UID
+			break
+		}
+	}
+	if uid == 0 {
+		t.Fatal("multipart fixture message not found")
+	}
+	msg, err := b.FetchMessage(ctx, "any", "INBOX", uid, res.UIDValidity)
+	if err != nil {
+		t.Fatalf("FetchMessage: %v", err)
+	}
+
+	cases := []struct {
+		part      string
+		filename  string
+		wantIndex int
+	}{
+		{"2", "report.pdf", 1},
+		{"3", "data.csv", 2},
+	}
+	for _, tc := range cases {
+		got, err := b.FetchAttachment(ctx, "any", "INBOX", uid, res.UIDValidity, tc.part)
+		if err != nil {
+			t.Fatalf("FetchAttachment(%s): %v", tc.part, err)
+		}
+		if got.Attachment.Index != tc.wantIndex {
+			t.Errorf("FetchAttachment(%s) index = %d, want %d", tc.part, got.Attachment.Index, tc.wantIndex)
+		}
+		if got.Attachment.Filename != tc.filename {
+			t.Errorf("FetchAttachment(%s) filename = %q, want %q", tc.part, got.Attachment.Filename, tc.filename)
+		}
+		var listed *mailbox.Attachment
+		for i := range msg.Attachments {
+			if msg.Attachments[i].Part == tc.part {
+				listed = &msg.Attachments[i]
+				break
+			}
+		}
+		if listed == nil {
+			t.Fatalf("FetchMessage has no part %s", tc.part)
+		}
+		if listed.Index != got.Attachment.Index {
+			t.Errorf("FetchMessage(%s) index = %d, FetchAttachment index = %d", tc.part, listed.Index, got.Attachment.Index)
+		}
 	}
 }
 
