@@ -1,0 +1,201 @@
+package searchspec
+
+import (
+	"testing"
+	"time"
+)
+
+// TestTruncateDate verifies the UTC day-granularity truncation
+// that both backends apply to the date criteria.
+func TestTruncateDate(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"midnight stays", "2024-08-12T00:00:00Z", "2024-08-12T00:00:00Z"},
+		{"end of day truncates down", "2024-08-12T23:59:59Z", "2024-08-12T00:00:00Z"},
+		{"midday truncates down", "2024-08-12T12:34:56Z", "2024-08-12T00:00:00Z"},
+		{"one second past midnight truncates down", "2024-08-12T00:00:01Z", "2024-08-12T00:00:00Z"},
+		{"month boundary", "2024-09-01T08:00:00Z", "2024-09-01T00:00:00Z"},
+		{"year boundary", "2025-01-01T08:00:00Z", "2025-01-01T00:00:00Z"},
+		{"leap day", "2024-02-29T10:00:00Z", "2024-02-29T00:00:00Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in, err := time.Parse(time.RFC3339, tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := time.Parse(time.RFC3339, tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := TruncateDate(in)
+			if !got.Equal(want) {
+				t.Errorf("TruncateDate(%s) = %s, want %s", tc.in, got.Format(time.RFC3339), tc.want)
+			}
+		})
+	}
+}
+
+// TestTruncateDateUsesUTC verifies that the truncation is in
+// UTC regardless of the input's location, so the value the client
+// puts on the wire and the value the server parses agree.
+func TestTruncateDateUsesUTC(t *testing.T) {
+	loc := time.FixedZone("UTC+7", 7*3600)
+	in := time.Date(2024, 8, 12, 2, 0, 0, 0, loc) // 2024-08-11T19:00Z in UTC
+	got := TruncateDate(in)
+	want := time.Date(2024, 8, 11, 0, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Errorf("TruncateDate = %s, want %s", got.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
+// TestCalendarDay verifies the message-side normalisation: the
+// calendar day named by the timestamp's own date fields is
+// preserved, regardless of the timezone offset.
+func TestCalendarDay(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"UTC midday", "2024-08-15T12:34:56Z", "2024-08-15T00:00:00Z"},
+		{"just after local midnight in +0200", "2024-08-15T00:30:00+02:00", "2024-08-15T00:00:00Z"},
+		{"late local evening in -0500", "2024-08-14T23:30:00-05:00", "2024-08-14T00:00:00Z"},
+		{"late local evening in +1400", "2024-08-15T23:30:00+14:00", "2024-08-15T00:00:00Z"},
+		{"leap day", "2024-02-29T08:00:00Z", "2024-02-29T00:00:00Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in, err := time.Parse(time.RFC3339, tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := time.Parse(time.RFC3339, tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := CalendarDay(in)
+			if !got.Equal(want) {
+				t.Errorf("CalendarDay(%s) = %s, want %s", tc.in, got.Format(time.RFC3339), tc.want)
+			}
+		})
+	}
+}
+
+// TestCalendarDayDiffersFromTruncateDate records why the two
+// helpers are not interchangeable: converting a message date to
+// UTC before truncating can move it to the previous day.
+func TestCalendarDayDiffersFromTruncateDate(t *testing.T) {
+	in, err := time.Parse(time.RFC3339, "2024-08-15T00:30:00+02:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDay := CalendarDay(in)
+	gotUTC := TruncateDate(in)
+	wantDay := time.Date(2024, 8, 15, 0, 0, 0, 0, time.UTC)
+	wantUTC := time.Date(2024, 8, 14, 0, 0, 0, 0, time.UTC)
+	if !gotDay.Equal(wantDay) {
+		t.Errorf("CalendarDay = %s, want %s", gotDay, wantDay)
+	}
+	if !gotUTC.Equal(wantUTC) {
+		t.Errorf("TruncateDate = %s, want %s", gotUTC, wantUTC)
+	}
+}
+
+// TestFlagPredicates verifies the flag semantics.
+func TestFlagPredicates(t *testing.T) {
+	seen := []string{FlagSeen}
+	flagged := []string{FlagFlagged}
+	both := []string{FlagSeen, FlagFlagged}
+	none := []string{}
+
+	cases := []struct {
+		name        string
+		flags       []string
+		unseen      bool
+		flagged     bool
+		wantUnseen  bool
+		wantFlagged bool
+	}{
+		{"no filters, no flags", none, false, false, true, true},
+		{"no filters, seen", seen, false, false, true, true},
+		{"unseen filter, seen message", seen, true, false, false, true},
+		{"unseen filter, unseen message", none, true, false, true, true},
+		{"unseen filter, flagged but not seen", flagged, true, false, true, true},
+		{"flagged filter, flagged message", flagged, false, true, true, true},
+		{"flagged filter, not flagged", none, false, true, true, false},
+		{"flagged filter, seen but not flagged", seen, false, true, true, false},
+		{"both filters, flagged and not seen", flagged, true, true, true, true},
+		{"both filters, seen and flagged", both, true, true, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MatchesUnseen(tc.flags, tc.unseen); got != tc.wantUnseen {
+				t.Errorf("MatchesUnseen(%v, %v) = %v, want %v", tc.flags, tc.unseen, got, tc.wantUnseen)
+			}
+			if got := MatchesFlagged(tc.flags, tc.flagged); got != tc.wantFlagged {
+				t.Errorf("MatchesFlagged(%v, %v) = %v, want %v", tc.flags, tc.flagged, got, tc.wantFlagged)
+			}
+		})
+	}
+}
+
+// TestHasFlagIsCaseInsensitive verifies that the flag comparison
+// tolerates a server that uses a different case for the flag
+// names.
+func TestHasFlagIsCaseInsensitive(t *testing.T) {
+	flags := []string{"\\SEEN", "\\flagged"}
+	if !HasFlag(flags, FlagSeen) {
+		t.Error("HasFlag did not match \\SEEN against \\Seen")
+	}
+	if !HasFlag(flags, FlagFlagged) {
+		t.Error("HasFlag did not match \\flagged against \\Flagged")
+	}
+	if HasFlag(flags, FlagDeleted) {
+		t.Error("HasFlag matched \\Deleted, which is absent")
+	}
+}
+
+// TestFlagsFromStatusHeaders verifies the conventional mbox
+// Status: and X-Status: header translation.
+func TestFlagsFromStatusHeaders(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  string
+		xstatus string
+		want    []string
+	}{
+		{"neither header", "", "", nil},
+		{"Status R", "R", "", []string{FlagSeen}},
+		{"Status RO", "RO", "", []string{FlagSeen}},
+		{"X-Status F", "", "F", []string{FlagFlagged}},
+		{"Status R, X-Status F", "R", "F", []string{FlagSeen, FlagFlagged}},
+		{"X-Status D", "", "D", []string{FlagDeleted}},
+		{"X-Status A", "", "A", []string{FlagAnswered}},
+		{"X-Status DFA", "", "DFA", []string{FlagDeleted, FlagFlagged, FlagAnswered}},
+		{"Status RO, X-Status ADF", "RO", "ADF", []string{FlagSeen, FlagAnswered, FlagDeleted, FlagFlagged}},
+		// F belongs to X-Status, not Status, and R belongs
+		// to Status, not X-Status. The two headers are not
+		// interchangeable.
+		{"Status F is ignored", "F", "", nil},
+		{"X-Status R is ignored", "", "R", nil},
+		// Lowercase is accepted too.
+		{"lowercase", "ro", "adf", []string{FlagSeen, FlagAnswered, FlagDeleted, FlagFlagged}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FlagsFromStatusHeaders(tc.status, tc.xstatus)
+			if len(got) != len(tc.want) {
+				t.Fatalf("FlagsFromStatusHeaders(%q, %q) = %v, want %v", tc.status, tc.xstatus, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("FlagsFromStatusHeaders(%q, %q) = %v, want %v", tc.status, tc.xstatus, got, tc.want)
+				}
+			}
+		})
+	}
+}

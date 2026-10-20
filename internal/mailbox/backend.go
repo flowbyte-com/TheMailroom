@@ -80,7 +80,9 @@ type ListOptions struct {
 }
 
 // SearchQuery holds the supported search criteria. Empty fields are
-// ignored; an all-empty query returns no messages.
+// ignored; an all-empty query returns every message in the mailbox,
+// bounded by Limit or the account's max_search_results. All populated
+// criteria are ANDed.
 type SearchQuery struct {
 	Subject string     `json:"subject,omitempty"`
 	From    string     `json:"from,omitempty"`

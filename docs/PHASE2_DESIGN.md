@@ -222,53 +222,87 @@ and an `oauth2` sub-block containing `token_command` (analogous to
 `password_command`). The token is refreshed on 401 responses. The
 implementation is intentionally deferred to a separate slice.
 
-## 7. Pre-existing deficiencies carried into Phase 2.1
+## 7. Search correctness: deficiencies and their resolution
 
-The following are pre-Phase-2.1 gaps documented during the PR #3
-review. They are reported here for visibility and are tracked
-separately from the Phase 2.1 corrections.
+The following were pre-Phase-2.2 gaps, documented during the
+PR #3 review. They are recorded here for visibility; each one
+now states its resolution.
 
-- **IMAP SEARCH does not honour `Flagged` or `Unseen`.** The
-  `SearchQuery` struct exposes `Flagged` and `Unseen`; the IMAP
-  backend never translates them into `WithFlags` /
-  `WithoutFlags` on the search criteria. The memory backend
-  honours `Unseen` by definition (all memory messages are
-  `\\Seen`) and ignores `Flagged`. The wire schema marks both
-  fields `omitempty` so callers that do not set them see no
-  behaviour change. The fix is mechanical: map `q.Flagged` to
-  `crit.WithFlags = []string{"\\Flagged"}` and `q.Unseen` to
-  `crit.WithoutFlags = []string{"\\Seen"}` in
-  `internal/imapclient/imapclient.go::SearchMessages`. Tracked
-  for Phase 2.2.
-- **Tool layer: `Flagged` / `Unseen` are rejected, not silently
-  ignored.** As of PR #3 follow-up #2, the tool layer
-  rejects `Flagged` and `Unseen` with a typed `NotImplemented`
-  error rather than silently passing them through. The
-  caller must either omit the field or wait for Phase 2.2
-  to land the IMAP filter implementation.
-- **IMAP SEARCH `Text` field conflates Subject + From + To.**
-  The IMAP `TEXT` keyword matches *any* text in headers or
-  body; populating it with multiple terms makes them OR, not
-  AND. A query for `subject=foo, from=bar` returns messages
-  containing "foo" anywhere OR "bar" anywhere. The right fix
-  is server-dependent: either issue multiple searches and
-  intersect, or use provider extensions (`OR` chaining,
-  `X-GM-RAW` on Gmail). Tracked for Phase 2.2.
+- **IMAP SEARCH did not honour `Flagged` or `Unseen`.**
+  *Resolved in Phase 2.2 Priority 2.* The IMAP backend now maps
+  `q.Flagged` to `WithFlags = []string{"\\Flagged"}` and
+  `q.Unseen` to `WithoutFlags = []string{"\\Seen"}`. The memory
+  backend honours the same predicates; the flags of an
+  in-memory message are derived from the conventional mbox
+  `Status:` (`R` = `\Seen`, `O` = old/no flag) and `X-Status:`
+  (`D`/`F`/`A` = `\Deleted`/`\Flagged`/`\Answered`) headers, so
+  a message with neither header is unseen and not flagged. The
+  shared predicates live in `internal/searchspec`.
+- **The tool layer rejected `Flagged` / `Unseen` with a typed
+  `NotImplemented` error** rather than silently passing them
+  through to backends that ignored them. *Resolved in Phase 2.2
+  Priority 2.* Now that both backends honour the filters, the
+  rejection has been removed and the fields are passed
+  through.
+- **IMAP SEARCH used the generic `Text` keyword for
+  Subject + From + To,** which matches any text in the headers
+  or the body and ORs the terms together. A query for
+  `subject=foo, from=bar` returned messages containing "foo"
+  anywhere OR "bar" anywhere. *Resolved in Phase 2.2 Priority
+  2.* The backend now uses the corresponding IMAP header
+  search keys (`Subject`, `From`, `To`, `Cc`). RFC 3501 section
+  6.4.4 ANDs multiple SEARCH keys and provides the `OR` key, so
+  one `UID SEARCH` combines `Subject`, `From`, body, flags and
+  dates, with an explicit `OR To Cc` for the recipient filter.
+  This is server-independent — no provider extensions such as
+  `X-GM-RAW` are used — and gives the caller true AND
+  semantics without client-side UID-set intersection.
 - **`SentSince` / `SentBefore` use the RFC 5322 `Date:`
-  header.** The IMAP criteria maps to the date the message
-  was sent, not the internal date the server records. Some
-  servers only support the latter; behaviour on those
-  servers is unspecified. The right fix is to expose both
-  `since_date` and `since_internal` to the caller. Tracked
-  for Phase 2.2.
-- **`Query.Limit` ignored at the tool layer (fixed in PR #3
-  follow-up).** The tool handler for `search_messages`
-  previously built a `mailbox.SearchQuery` without copying
-  `args.Query.Limit`, so the caller's `limit` was silently
-  dropped on the floor and replaced with the per-account
-  max. Fixed in the same follow-up; the tool handler now
-  propagates the value. The memory and IMAP backends
-  continue to honour `q.Limit` as before.
+  header,** not the internal date the server records, and the
+  IMAP date key carries no time component, so the comparison is
+  at day granularity. *Resolved in Phase 2.2 Priority 2.* The
+  day granularity is now explicit in the public contract: the
+  search value is truncated to its UTC day before it is
+  applied. The message side is reduced to the calendar day
+  named by the `Date:` header's own fields, ignoring its time
+  and timezone offset, which is what the reference server
+  compares. The memory backend uses the same two
+  normalisations (`TruncateDate` for the query, `CalendarDay`
+  for the message), so the two backends agree for `Date:`
+  headers in any timezone. A server that interprets the bare
+  search date in its own local timezone can still differ by up
+  to one day; that is inherent to IMAP's date-only search keys
+  and is documented rather than papered over.
+- **`Query.Limit` was ignored at the tool layer.** *Fixed in the
+  PR #3 follow-up.* The tool handler now copies
+  `args.Query.Limit` into the backend query, and both backends
+  honour and clamp it to the per-account `max_search_results`.
+  An empty query returns every message in the mailbox, bounded
+  by the per-account limit; this is now documented in
+  `docs/TOOLS.md`.
+- **Search limits and empty-query behaviour** are now
+  specified and covered by tests in both backends.
+- **Server-dependent search matching remains.** Header
+  substring/case matching and RFC 2047 encoded-header handling
+  are delegated to the IMAP server; the memory backend matches
+  decoded headers. IMAP `BODY` is server-side and may match
+  HTML, attachments or raw MIME content, while the memory
+  backend searches decoded plain text only. These differences
+  are inherent to delegating search to the server and are
+  documented in `docs/TOOLS.md`.
+- **Attachment metadata in list/search summaries is deferred.**
+  The IMAP backend's list and search summaries do not populate
+  `has_attachments` (it is always false); the memory backend
+  does. Populating it requires `BODYSTRUCTURE` parsing and is
+  deferred to Phase 2.2 Priority 3 (`read_attachment`).
+
+Cross-backend agreement on the tested criteria is asserted
+directly: `internal/imapclient/search_consistency_test.go` runs
+the same seventeen query combinations against the IMAP backend
+and the memory backend over the same fixture messages and
+requires identical results. It also has a dedicated non-UTC
+date-boundary case that exercises a `+0200` and a `-0500` `Date:`
+header.
 
 ## 8. IMAP literal memory allocation: enforced at the protocol layer
 
@@ -638,8 +672,9 @@ deliverables, and out-of-scope items, is in
    and §10 for the per-criterion status.
 2. **IMAP search correctness defects** — `Flagged`, `Unseen`,
    `Subject + From + To` OR semantics, `SentSince` /
-   `SentBefore` semantics (§7). **NEXT**: the next
-   development slice.
+   `SentBefore` semantics (§7). **IN REVIEW**: implemented in
+   PR #6, with the date-semantics and limit closeout applied;
+   awaiting review before merge.
 3. **Secure attachment retrieval** — new `read_attachment` tool
    with stable MIME-part references and strict resource
    limits.

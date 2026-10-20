@@ -497,26 +497,6 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	if limit <= 0 {
 		limit = 50
 	}
-	crit := &imap.SearchCriteria{
-		Body: []string{q.Body},
-		Text: []string{q.Subject, q.From, q.To},
-	}
-	if q.Since != nil {
-		crit.SentSince = *q.Since
-	}
-	if q.Before != nil {
-		crit.SentBefore = *q.Before
-	}
-	// Pre-existing deficiency: q.Flagged and q.Unseen are
-	// declared in the SearchQuery type but are NOT translated
-	// into IMAP SEARCH criteria here. The criteria map to
-	// the on-wire WithFlags / WithoutFlags fields but the
-	// current code does not set them. Documented as a known
-	// limitation; the fix is mechanical. The memory backend
-	// honours q.Unseen by definition (all memory messages
-	// are \\Seen) and ignores q.Flagged.
-	crit.Text = compactStrings(crit.Text)
-	crit.Body = compactStrings(crit.Body)
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
@@ -536,7 +516,15 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 			return err
 		}
 		res.UIDValidity = mboxStatus.UidValidity
-		uids, err := c.UidSearch(crit)
+		// Run one search. Subject / From use the
+		// corresponding IMAP SEARCH header keys, To is an
+		// explicit OR over To and Cc, and the body, flag and
+		// date criteria are ANDed into the same command (see
+		// internal/imapclient/search.go). The dates are
+		// truncated to the day boundary because an IMAP
+		// search date carries no time (see
+		// internal/searchspec).
+		uids, err := searchUIDs(c, q)
 		if err != nil {
 			return err
 		}

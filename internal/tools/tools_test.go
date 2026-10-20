@@ -376,35 +376,59 @@ func TestSearchMessagesLimitPropagated(t *testing.T) {
 	}
 }
 
-// TestSearchMessagesUnsupportedFilterRejected verifies
-// that Flagged and Unseen are rejected with a typed
-// NotImplemented error rather than silently ignored. The
-// IMAP and memory backends do not yet implement these
-// filters; the tool layer must not mislead the caller.
-func TestSearchMessagesUnsupportedFilterRejected(t *testing.T) {
+// TestSearchMessagesFlagFiltersAccepted verifies that the
+// Flagged and Unseen filters are now accepted by the tool layer
+// and honoured by the backend, rather than being rejected with
+// a NotImplemented error.
+//
+// The memory backend's fixtures have no Status: or X-Status:
+// header, so they carry no flags: they are unseen and not
+// flagged. The Unseen filter must therefore match every message
+// in the mailbox, and the Flagged filter must match none of them.
+func TestSearchMessagesFlagFiltersAccepted(t *testing.T) {
 	env := setupEnv(t, "full")
 	defer env.cleanup()
-	cases := []struct {
-		name  string
-		query map[string]any
-	}{
-		{"flagged", map[string]any{"flagged": true}},
-		{"unseen", map[string]any{"unseen": true}},
+
+	// The unfiltered count is the baseline.
+	all, err := env.call(t, "search_messages", map[string]any{
+		"account_id": "full",
+		"mailbox":    "INBOX",
+		"query":      map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("search_messages(all): %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := env.call(t, "search_messages", map[string]any{
-				"account_id": "full",
-				"mailbox":    "INBOX",
-				"query":      tc.query,
-			})
-			if err == nil {
-				t.Fatalf("expected %s filter to be rejected", tc.name)
-			}
-			if !strings.Contains(err.Error(), "not yet supported") {
-				t.Errorf("err = %v, want mention of 'not yet supported'", err)
-			}
-		})
+	allMatches := all["matches"].([]any)
+	if len(allMatches) == 0 {
+		t.Fatal("the unfiltered search returned no messages")
+	}
+
+	// Unseen matches every flagless message.
+	got, err := env.call(t, "search_messages", map[string]any{
+		"account_id": "full",
+		"mailbox":    "INBOX",
+		"query":      map[string]any{"unseen": true},
+	})
+	if err != nil {
+		t.Fatalf("search_messages(unseen): %v", err)
+	}
+	matches := got["matches"].([]any)
+	if len(matches) != len(allMatches) {
+		t.Errorf("unseen matched %d messages, want %d (all fixtures are flagless)", len(matches), len(allMatches))
+	}
+
+	// Flagged matches none of them.
+	got, err = env.call(t, "search_messages", map[string]any{
+		"account_id": "full",
+		"mailbox":    "INBOX",
+		"query":      map[string]any{"flagged": true},
+	})
+	if err != nil {
+		t.Fatalf("search_messages(flagged): %v", err)
+	}
+	matches = got["matches"].([]any)
+	if len(matches) != 0 {
+		t.Errorf("flagged matched %d messages, want 0 (no fixture carries \\Flagged)", len(matches))
 	}
 }
 

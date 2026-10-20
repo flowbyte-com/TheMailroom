@@ -41,6 +41,7 @@ The module is split into focused internal packages. Each layer depends only on t
 |  internal/accounts        (Account registry, conns.)    |
 |  internal/permissions     (caps, enforcement)           |
 |  internal/config          (load + validate config)      |
+|  internal/searchspec      (shared search semantics)     |
 +---------------------------------------------------------+
 |  internal/version         (build metadata)              |
 +---------------------------------------------------------+
@@ -162,6 +163,43 @@ The single most security-sensitive path for outbound email. Uses Go 1.24+ `os.Ro
 - Path canonicalisation prevents `..` escape.
 - Files larger than the configured limit are rejected.
 - Per-account `attachment_send_paths` allow-list is enforced regardless of agent input.
+
+### 2.6a Search semantics (`internal/searchspec`)
+
+The IMAP backend delegates matching to the IMAP server; the
+in-memory backend matches locally. For the public API contract
+to mean anything, the two must agree. `internal/searchspec`
+holds the parts that must be identical:
+
+- **Date granularity.** An IMAP SEARCH date key carries a date
+  with no time component, so date matching is at day
+  granularity. Query values use `TruncateDate`, which converts
+  the timestamp to UTC and then takes the UTC day. Message
+  `Date:` headers use `CalendarDay`, which keeps the calendar
+  day named by the header's own fields and ignores the time and
+  timezone offset. The reference server compares the header's
+  own calendar day; using `TruncateDate` on the message side
+  would shift non-UTC headers near midnight. Both backends apply
+  the same two rules, so they agree.
+- **Flag predicates.** `MatchesUnseen` and `MatchesFlagged`
+  implement the IMAP definitions: unseen means the absence of
+  `\Seen`, flagged means the presence of `\Flagged`.
+- **Flag derivation for the in-memory backend.** Conventional
+  mbox `Status:` (`R` = `\Seen`, `O` = old/no flag) and
+  `X-Status:` (`D`/`F`/`A` = `\Deleted`/`\Flagged`/`\Answered`)
+  header translation, so an in-memory message can answer the
+  flag filters.
+
+The header criteria are ANDed. RFC 3501 section 6.4.4 ANDs
+multiple SEARCH keys and provides the `OR` key, so the IMAP
+backend sends one SEARCH with the header keys, body, flags and
+dates combined, and an explicit `OR To Cc` for the recipient
+filter. The in-memory backend ANDs the same criteria natively.
+No client-side UID-set intersection is used.
+
+`internal/imapclient/search_consistency_test.go` runs the same
+query set against both backends over identical fixture
+messages and requires identical results.
 
 ### 2.7 Accounts (`internal/accounts`)
 

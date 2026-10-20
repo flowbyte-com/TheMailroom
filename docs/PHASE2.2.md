@@ -10,7 +10,7 @@
 | Priority | Scope | Status |
 |---|---|---|
 | 1 | Protocol-level IMAP literal-size enforcement | **DONE** — merged in PR #5 (`d28dfa3`) |
-| 2 | IMAP search correctness defects | **NEXT** |
+| 2 | IMAP search correctness defects | **IN REVIEW** — PR #6; corrective closeout applied, awaiting HAL review |
 | 3 | Secure attachment retrieval | Not started |
 
 ## Scope
@@ -28,7 +28,9 @@ Phase 2.1 from being production-hardened:
    `Flagged` and `Unseen` filters are accepted by the schema but
    silently ignored. `Subject + From + To` are OR'd via the
    IMAP `TEXT` keyword. `SentSince` / `SentBefore` use the RFC
-   5322 `Date:` header, not the server's internal date. **NEXT.**
+   5322 `Date:` header, not the server's internal date.
+   **IN REVIEW** — implemented in PR #6; not complete until the
+   corrective closeout passes review.
 3. **Secure attachment retrieval** with stable MIME-part
    references and strict resource limits. The new `read_attachment`
    tool reads a single MIME part by stable part reference
@@ -133,10 +135,11 @@ production-hardened.
 
 ### Priority 2 — IMAP search correctness defects
 
-**Status:** **NEXT**. This is the next development slice after
-Priority 1. It must be a separate, narrowly scoped PR, and it
-must not weaken the `EXAMINE` / UIDVALIDITY pairing or the
-literal-size safety controls from Priority 1.
+**Status:** **IN REVIEW** — implemented in PR #6, with the
+corrective closeout applied; not complete until HAL review and
+merge. It is a separate, narrowly scoped PR, and it must not
+weaken the `EXAMINE` / UIDVALIDITY pairing or the literal-size
+safety controls from Priority 1.
 
 **Defects to fix (PHASE2_DESIGN.md §7):**
 
@@ -145,10 +148,11 @@ literal-size safety controls from Priority 1.
    passed in a single `Text` slice, which the IMAP `TEXT` keyword
    ORs together (and which also matches the body). The fix maps
    them to `Subject`, `From` and `To` respectively, and combines
-   the criteria with AND. Because a single IMAP SEARCH command
-   cannot express "Subject=x AND From=y" for arbitrary servers
-   without `OR` chaining, the implementation issues one SEARCH
-   per populated field and intersects the resulting UID sets.
+   the criteria with AND. RFC 3501 section 6.4.4 ANDs multiple
+   SEARCH keys and provides the `OR` key, so one `UID SEARCH`
+   carries `Subject`, `From`, body, flags and dates, with an
+   explicit `OR To Cc` for the recipient filter. No client-side
+   multi-SEARCH/UID-set intersection is needed.
 2. **`q.Flagged` must be honoured** — IMAP `WithFlags =
    []string{"\\Flagged"}`.
 3. **`q.Unseen` must be honoured** — IMAP `WithoutFlags =
@@ -191,8 +195,8 @@ filter is not acceptable.
 - IMAP search criteria translation in
   `internal/imapclient/imapclient.go::SearchMessages` (or a
   new `internal/imapclient/search.go` helper).
-- Per-field SEARCH + UID-set intersection for the AND
-  semantics of `Subject` / `From` / `To`.
+- One IMAP SEARCH combining `Subject` / `From` / body / flags /
+  dates, with `OR To Cc` for the recipient filter.
 - `WithFlags` / `WithoutFlags` for `Flagged` / `Unseen`.
 - Day-granularity date handling, documented, consistent
   between the IMAP and memory backends.
@@ -205,6 +209,30 @@ filter is not acceptable.
 - Tests in `internal/mailbox/memory/` for the same
   contract, and in `internal/tools/tools_test.go` for the wire
   behaviour.
+
+**Review closeout (PR #6).** HAL review requested these
+corrections:
+
+- IMAP search now issues one `UID SEARCH` with the header,
+  body, flag and date keys ANDed by the server, plus an
+  explicit `OR To Cc` for the recipient filter. The client-side
+  multi-SEARCH/UID-set intersection was removed.
+- Memory flags now follow the conventional mbox `Status:`
+  (`R`/`O`) and `X-Status:` (`D`/`F`/`A`) headers. The previous
+  RFC 2156 attribution was incorrect.
+- Memory date search reduces the message `Date:` header to the
+  calendar day named by its own fields
+  (`searchspec.CalendarDay`), including non-UTC headers, instead
+  of comparing the UTC instant.
+- The memory backend clamps `Limit` to `max_search_results`
+  itself, matching the IMAP backend and the tool layer.
+
+Regression tests cover the combined SEARCH structure, both
+flag headers, and both date/limit fixes, including a
+cross-backend non-UTC date-boundary case. Remaining
+server-dependent matching differences and the deferred
+`has_attachments` metadata for IMAP summaries are documented in
+`docs/PHASE2_DESIGN.md` §7 and `docs/TOOLS.md`.
 
 **Out of scope for this slice:** SMTP, mailbox modifications,
 attachment retrieval.

@@ -200,20 +200,11 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 				err = mapError(&permissions.ErrPermissionDenied{Account: acc.ID, Capability: permissions.CapRead})
 				return
 			}
-			// Phase 2.1: the IMAP and memory backends do not
-			// honour Flagged or Unseen. Reject these fields
-			// explicitly so the caller is not silently
-			// misled by a filter that is ignored. The fix
-			// is tracked in PHASE2_DESIGN.md and lands in
-			// Phase 2.2.
-			if args.Query.Flagged {
-				err = typed(codeNotImplemented, "Flagged filter is not yet supported; tracked for Phase 2.2", nil)
-				return
-			}
-			if args.Query.Unseen {
-				err = typed(codeNotImplemented, "Unseen filter is not yet supported; tracked for Phase 2.2", nil)
-				return
-			}
+			// Phase 2.2: both backends now honour the
+			// Flagged and Unseen filters, so the tool layer
+			// passes them through instead of rejecting
+			// them. The rejection added in the Phase 2.1
+			// follow-up is removed.
 			q := mailbox.SearchQuery{
 				Subject: args.Query.Subject,
 				From:    args.Query.From,
