@@ -100,6 +100,7 @@ func loadAndServe(cfgPath string) error {
 	if err != nil {
 		return err
 	}
+	defer registry.Close()
 
 	server, err := mcpserver.New(registry, mcpserver.Options{
 		Logger: logger,

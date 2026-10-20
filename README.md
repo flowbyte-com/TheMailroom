@@ -28,19 +28,26 @@ and `SMTP`. It is designed to be:
 
 **Phase 2 (Mail functionality)** is in progress. **Phase 2.1**
 (read-only IMAP correctness + MIME reading) is merged on `main`
-(PR #3), **Phase 2.2 Priority 1** (protocol-level IMAP
-literal-size enforcement) is merged on `main` (PR #5), and
-**Phase 2.2 Priority 2** (IMAP search correctness) is merged on
-`main` (PR #6). **Phase 2.2 Priority 3** (secure attachment
-retrieval) is merged on `main` (PR #8).
+(PR #3), and all three **Phase 2.2** priorities are complete:
+protocol-level IMAP literal-size enforcement (PR #5), IMAP search
+correctness (PR #6), and secure inbound attachment retrieval (PR #8).
+The Phase 2.2 documentation closeout is merged as PR #9.
+
+**Phase 2.3 (Outbound submission foundations)** is in progress.
+PR 1 adds conditional SMTP configuration validation, the recipient
+policy, the confined outbound attachment resolver, and safer
+`list_accounts` output. **PR 1 is IN REVIEW.** It does not send email,
+compose MIME messages, or register `send_message`; those remain future
+work. The plan is in
+[`docs/PHASE2.3.md`](docs/PHASE2.3.md).
 
 TheMailroom is a **development milestone, not a
 production-hardened release**. The IMAP literal-size
 pre-allocation vulnerability is fixed, but the fix depends on a
 fork of go-imap that must still be upstreamed or replaced (see
-[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §8), the IMAP
-search-correctness work is merged (PR #6), and the
-attachment-retrieval tool is merged (PR #8).
+[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §8). Inbound
+attachment retrieval is merged (PR #8); outbound SMTP submission and
+MIME composition are not implemented.
 
 Phase 2.1 ships:
 
@@ -58,7 +65,7 @@ Phase 2.1 ships:
 - Reconnect safety: a fresh EXAMINE re-validates UIDVALIDITY; no
   mutating operation is silently retried.
 
-**Phase 2.2** is in progress. The plan is in
+**Phase 2.2** is complete. The plan and acceptance criteria are in
 [`docs/PHASE2.2.md`](docs/PHASE2.2.md); the design is in
 [`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §11.
 
@@ -68,11 +75,15 @@ Phase 2.1 ships:
 | 2 | IMAP search correctness defects | **DONE** (PR #6) |
 | 3 | Secure attachment retrieval | **DONE** (PR #8) |
 
-SMTP, outbound attachments, and mutating mailbox operations
-remain out of scope.
+Outbound SMTP submission, MIME composition, reply/forward, and
+mutating mailbox operations remain unimplemented. Phase 2.3 PR 1 only
+prepares the configuration, recipient-policy, and confined
+attachment-resolution foundations.
 
-**Phase 3 (Hardening)** will add race tests, fuzz tests,
-installation docs, and a cross-platform release.
+**Phase 3 (Hardening)** will cover the remaining production gates,
+including bounded IMAP list/search workloads, explicit IMAP command
+timeouts, `has_attachments` for IMAP summaries, response-size limits,
+fuzz tests, installation docs, and a cross-platform release.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and
@@ -142,14 +153,40 @@ add it explicitly:
 ```yaml
 permissions:
   - read
-  - send           # compose and send new messages (Phase 2)
+  - send           # required for outbound submission (not yet implemented)
   - modify         # flag, move, archive
   - delete         # move to Trash or expunge
-  - attachment_send  # required to send messages that include attachments
+  - attachment_send  # required to send messages that include local attachments
 ```
 
 The server refuses any operation whose capability is missing,
 independently of what the MCP client requests.
+
+Accounts with `send` must have a complete, secure SMTP configuration:
+host, port, exactly one of `password` / `password_command`, and either
+`tls: true` (implicit TLS) or `starttls: true` (mandatory STARTTLS).
+Plaintext SMTP is rejected. Read-only accounts are not forced to
+configure SMTP.
+
+Outbound recipient and attachment controls are configured per account:
+
+```yaml
+allowed_recipients:              # optional exact allow-list; empty = any
+  - alice@example.test
+limits:
+  max_recipients: 50             # unique To + Cc + Bcc recipients
+  max_attachment_bytes: 6291456  # decoded bytes per local attachment
+  max_total_attachment_bytes: 26214400
+attachment_send_paths:
+  - /srv/themailroom/outbound    # absolute, existing directory
+```
+
+Recipient matching is case-insensitive after RFC 5322 parsing and is
+exact, with no wildcard or substring rules. Local attachment references
+are relative paths resolved only inside `attachment_send_paths`; absolute
+paths, traversal, symlink escapes and non-regular files are rejected. The
+outbound resolver and recipient policy are implemented, but no tool uses
+them to send yet.
 
 ## Run
 

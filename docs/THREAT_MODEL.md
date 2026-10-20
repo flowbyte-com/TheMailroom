@@ -1,6 +1,9 @@
 # TheMailroom Threat Model
 
-> Status: Phase 1 (Foundation). Controls marked **(implemented)** are present in the current code; controls marked **(planned)** will land in Phase 2 or 3.
+> Status: Phase 2.3 PR 1 is **IN REVIEW**. Controls marked
+> **(implemented)** are present in the current code; controls marked
+> **(planned)** are not. In particular, SMTP submission, MIME
+> composition, and `send_message` are not implemented.
 
 ## 1. Trust boundaries
 
@@ -52,7 +55,7 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 - **(implemented)** `panic` recovery in `cmd/themailroom` logs a redacted diagnostic and exits; it does not print a stack trace with secrets.
 - **(implemented)** `password_command` (pass, secret-tool) is the recommended credential source so secrets never live in the config file.
 - **(implemented)** `validateAuth` rejects configurations with neither `password` nor `password_command`, and rejects configurations that set both.
-- **(planned)** `os.Root` keeps any cached attachment file inside the configured directory; no path escapes.
+- **(implemented for the outbound resolver)** `os.Root` confines local attachment reads to the configured roots; symlink escapes, traversal, absolute paths and ambiguous matches are rejected. No SMTP sender or send tool uses the resolver yet.
 
 **Residual risk.** Misconfigured logging at the host can capture secrets; documented in README.
 
@@ -62,9 +65,9 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 **Mitigations.**
 
-- **(implemented)** Sending requires the `send` capability, which is disabled by default. A misconfigured account cannot send.
-- **(implemented)** Recipients are not validated against an allow-list by default, but the **caller** is the agent — TheMailroom does not silently allow exfiltration. The `send` capability itself is the gate.
-- **(planned)** Optional `allowed_recipients` allow-list per account (defence in depth; default empty = allow any).
+- **(implemented)** The `send` capability is disabled by default. No send tool is registered yet, so no account can send in this slice.
+- **(implemented, not yet wired to a sender)** The recipient policy parses and canonicalises To/Cc/Bcc, rejects empty, malformed and control-character-containing addresses, enforces `max_recipients` (default 50), and supports an optional exact `allowed_recipients` allow-list. Empty allow-list permits any recipient. Matching is exact after canonicalisation; there are no wildcard or substring rules.
+- **(planned)** The future `send_message` handler must invoke the recipient policy before opening SMTP and must not bypass it.
 - **(planned)** Rate-limit sending (e.g. max N messages per hour) to bound blast radius.
 - **(planned)** All sends are logged with a structured record including account ID, recipients, message size.
 
@@ -84,7 +87,7 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   - A MIME part-count cap (`max_mime_parts`, default 500).
   - An attachment count cap (`max_attachments`, default 50).
   - Filename sanitisation in attachment metadata (no path separators, no NULs).
-- **(implemented)** Attachments are read from a confined directory; MIME parsing is in-memory, never writes to disk.
+- **(implemented for inbound retrieval)** Attachment content is returned in memory; MIME parsing never writes to disk. Outbound local attachments are read through the `os.Root` resolver described in T5, but no sender uses it yet.
 - **(implemented)** For `read_message`/`Parse`, unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide. `read_attachment` fails closed on unknown transfer encodings and on a selected text attachment with an unknown charset; unrelated charset warnings remain non-fatal.
 - **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. The `read_attachment` tool materialises exactly one explicitly requested part after validating the complete message and its limits. It rejects containers, body parts, missing parts and hidden descendants of opaque `message/rfc822` attachments. Extraction is fail-closed: a malformed sibling, body read or transfer-decoding failure, unknown transfer encoding, or oversized ordinary body part returns a typed error and no content, even if the requested part was already captured. Unrelated charset warnings remain non-fatal; a selected text attachment with an unknown charset is rejected rather than returned undecoded. Text parts are charset-decoded to UTF-8 where possible, so text content may be normalised; binary transfer-encoded content is decoded to its original bytes. Base64 output expands the response by roughly one third, and default maximum-size attachments can produce very large tool responses; this is a documented operational consideration, not an automatic fetch.
 - **(implemented)** `read_attachment` accepts no filesystem path. Its only reference inputs are account, mailbox, UID, UIDVALIDITY and the `read_message` part path; part syntax, length, depth and component bounds are validated before retrieval. Retrieved filenames and MIME types remain untrusted metadata and are never opened, executed or written to disk.
@@ -152,11 +155,27 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 **Mitigations.**
 
 - **(implemented)** The in-memory mailbox backend rejects any symlink entry (file or directory) in `mailbox_root`. The path is `EvalSymlinks`-resolved at startup and a containment check is performed per file. This is regression-tested in `TestRejectsSymlinkInRoot` and `TestRejectsSymlinkedDirectory`.
-- **(implemented)** `attachment_send_paths` validation requires absolute paths and rejects NUL bytes.
-- **(implemented)** Phase 2.1 does not yet wire `os.Root` for outbound attachment sources (that lands with `send_message` in Phase 2.2). Phase 2.1 introduces the *plan* and the safety review below.
-- **(implemented)** Symlink resolution inside the attachment root returns `ErrPathEscape` for any path that does not stay under the root.
-- **(implemented)** Empty or `attachment_send_paths` not configured rejects all attachment sends.
-- **(implemented)** Each account has its own allow-list; cross-account access is impossible because the allow-list is per-account.
+- **(implemented)** `attachment_send_paths` validation requires absolute,
+  NUL-free, control-free paths. When `attachment_send` is granted,
+  each path must be an existing directory and duplicates are rejected.
+- **(implemented, PR 1)** `internal/attachments` opens each configured root
+  as an `*os.Root`. Agent references must be relative paths; empty
+  paths, absolute paths, drive qualifiers, NUL/control characters and
+  `..` segments are rejected before access. Only regular files are
+  accepted.
+- **(implemented, PR 1)** A reference that opens successfully in more
+  than one configured root is rejected as ambiguous; the resolver never
+  silently picks a root. Symlink escapes and other `os.Root` resolution
+  failures are rejected without returning the host path.
+- **(implemented, PR 1)** Reads use the opened file descriptor and are
+  bounded by actual bytes read, not a prior metadata size. Per-file and
+  aggregate decoded limits are enforced, and the returned content is
+  frozen in memory. No host path is returned to the agent.
+- **(implemented, PR 1)** Empty `attachment_send_paths` means no resolver
+  is created, so there is no attachment source. There is still no send
+  tool to invoke either path.
+- **(implemented)** Each account has its own roots and allow-list;
+  cross-account access is impossible because both are per-account.
 
 **Memory backend TOCTOU.** The `load()` path uses
 `filepath.EvalSymlinks` to canonicalise the root and then performs
@@ -167,9 +186,10 @@ per-file `EvalSymlinks` and the subsequent `ReadFile` — in this
 window an attacker who can write to the directory tree could swap
 a regular file for a symlink. The window is short and the
 attacker must already be able to write to the directory; this is
-documented as a residual risk. `os.Root` (Go 1.24+) is the
-intended hardening for Phase 2.2: its `OpenFile` rejects
-symlink-to-escape at the OS level, narrowing the window further.
+documented as a residual risk. `os.Root` (Go 1.24+) is used for the
+outbound attachment resolver; it rejects symlink-to-escape at the OS
+level. The memory backend's inbound load path still uses the
+double-resolution approach described here.
 
 ### T6. Cross-account access
 

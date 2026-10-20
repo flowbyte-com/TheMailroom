@@ -1,17 +1,20 @@
 # TheMailroom Tools
 
-> Status: Phase 1 implements the read-only tools below. Phase 2.2 adds
-> `read_attachment`; sending, modification and deletion remain future
+> Status: Phase 2.3 PR 1 is **IN REVIEW**. The read-only tools below are
+> implemented and `read_attachment` is merged. PR 1 adds the recipient
+> policy, SMTP configuration validation, and the confined attachment
+> resolver; it does **not** add `send_message` or any SMTP/MIME
+> submission path. Sending, modification and deletion remain future
 > work.
 
 Every tool:
 
 - Validates input against a JSON Schema.
 - Returns a structured JSON result.
-- Enforces a permission capability server-side.
-- Returns typed errors (`PermissionDenied`, `AccountNotFound`, `InvalidInput`, `BackendError`, `NotImplemented`, etc.) without leaking credentials or wire details.
+- Enforces a permission capability server-side for account-scoped operations.
+- Returns typed errors without leaking credentials or wire details. Unknown internal failures map to `InternalError`. `BackendError` is reserved for future protocol mapping and is not currently emitted.
 
-All tools take `account_id` as a required string field. There is no implicit "current account".
+All account-scoped tools take `account_id` as a required string field. There is no implicit "current account"; `list_accounts` is the only account metadata tool.
 
 ## Common error model
 
@@ -30,7 +33,6 @@ All tools take `account_id` as a required string field. There is no implicit "cu
 - `InvalidInput` — schema or business validation failed.
 - `AccountNotFound` — `account_id` not configured.
 - `PermissionDenied` — capability not granted.
-- `BackendError` — IMAP/SMTP operation failed; details are redacted.
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
 - `NotImplemented` — capability exists in the schema but is not yet wired.
@@ -51,7 +53,8 @@ All tools take `account_id` as a required string field. There is no implicit "cu
 
 ### `list_accounts`
 
-Lists the IDs and metadata of configured accounts. **No credentials** are returned.
+Lists the IDs and metadata of configured accounts. **No credentials or
+absolute host filesystem paths** are returned.
 
 **Input.**
 
@@ -69,8 +72,18 @@ Lists the IDs and metadata of configured accounts. **No credentials** are return
       "email": "user@example.test",
       "provider": "generic",
       "permissions": ["read"],
-      "limits": { "max_message_bytes": 26214400, "max_attachments": 50, "max_search_results": 500, "max_batch_operations": 50 },
-      "attachment_send_paths": []
+      "limits": {
+        "max_message_bytes": 26214400,
+        "max_attachment_bytes": 6291456,
+        "max_total_attachment_bytes": 26214400,
+        "max_attachments": 50,
+        "max_recipients": 50,
+        "max_search_results": 500,
+        "max_batch_operations": 50,
+        "max_mime_nesting": 16,
+        "max_mime_parts": 500
+      },
+      "attachment_send_enabled": false
     }
   ]
 }
@@ -257,6 +270,14 @@ Violations return a typed error (`MessageTooLarge`, `AttachmentTooLarge`,
 `NestingTooDeep`, `TooManyParts`, `TooManyAttachments`) without reading
 the rest of the message.
 
+**Outbound policy limits (Phase 2.3 PR 1, no send tool yet):**
+
+- `max_recipients` — caps unique outbound To + Cc + Bcc recipients (default 50).
+- `max_attachment_bytes` / `max_total_attachment_bytes` — bound decoded
+  bytes for path attachments resolved by `internal/attachments`.
+- `max_message_bytes` — reserved for the future MIME composer's final
+  serialized-size check.
+
 ### `read_attachment`
 
 Reads exactly one attachment selected by the part path returned by
@@ -425,6 +446,10 @@ slice.
 
 These names and shapes are sketches, not current contracts.
 
+PR 1 implements the configuration and attachment-resolution foundations
+for these tools, but none of them is registered yet. In particular,
+there is no SMTP client and no MIME composer.
+
 - `send_message` — compose and send a new message. Requires `send` and `attachment_send` if attachments are included.
 - `reply_message` — reply, optionally quoting the original. Requires `send`. Honours `reply_all`.
 - `forward_message` — forward an existing message including its attachments. Requires `send` and `attachment_send`.
@@ -438,4 +463,6 @@ These names and shapes are sketches, not current contracts.
 - Raw IMAP command pass-through (would defeat the abstraction and break the permission model).
 - Credential fields in any output.
 - Filesystem write paths outside the configured attachment roots.
+- Absolute attachment roots in `list_accounts`; only an
+  `attachment_send_enabled` boolean is exposed.
 - Provider administration endpoints.
