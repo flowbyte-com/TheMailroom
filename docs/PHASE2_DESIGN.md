@@ -672,9 +672,9 @@ deliverables, and out-of-scope items, is in
    and §10 for the per-criterion status.
 2. **IMAP search correctness defects** — `Flagged`, `Unseen`,
    `Subject + From + To` OR semantics, `SentSince` /
-   `SentBefore` semantics (§7). **IN REVIEW**: implemented in
-   PR #6, with the date-semantics and limit closeout applied;
-   awaiting review before merge.
+   `SentBefore` semantics (§7). **DONE**: merged in PR #6
+   (`21f859b`) after HAL approval at `38b0bf4`; the
+   date-semantics and limit closeout is included.
 3. **Secure attachment retrieval** — new `read_attachment` tool
    with stable MIME-part references and strict resource
    limits.
