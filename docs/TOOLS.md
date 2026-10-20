@@ -1,12 +1,11 @@
 # TheMailroom Tools
 
-> Status: Phase 2.3 PR 2 is **IN REVIEW**. The read-only tools below are
-> implemented and `read_attachment` is merged. PR 1 (merged as PR #10)
-> adds the recipient policy, SMTP configuration validation, and the
-> confined attachment resolver. PR 2 adds an internal bounded MIME
-> composer, but does **not** add `send_message`, an SMTP client or any
-> submission path. Sending, modification and deletion remain future
-> work.
+> Status: Phase 2.3 PR 1 is **MERGED** (PR #10) and PR 2 is **MERGED**
+> (PR #11). PR 3 (authenticated SMTP submission and `send_message`) is
+> **IN REVIEW**. The read-only tools below and `send_message` are
+> implemented. Reply/forward, mailbox modification and deletion remain
+> future work. TheMailroom is a development milestone, not a
+> production-hardened release; Phase 2.3 is **not** done.
 
 Every tool:
 
@@ -49,6 +48,158 @@ All account-scoped tools take `account_id` as a required string field. There is 
 - `Malformed` — the message could not be parsed, or attachment
   extraction could not complete because a part or transfer encoding
   could not be decoded.
+- `RecipientNotAllowed` — an outbound recipient is outside the
+  account's exact `allowed_recipients` policy.
+- `TooManyRecipients` — unique To + Cc + Bcc recipients exceed
+  `max_recipients`.
+- `SmtpAuthFailed` — SMTP credential resolution failed, the server does
+  not advertise AUTH PLAIN, or authentication was rejected.
+- `SmtpTLSFailed` — verified TLS could not be established, including a
+  missing or refused mandatory STARTTLS.
+- `SenderRejected` — the SMTP server rejected `MAIL FROM`.
+- `RecipientRejected` — the SMTP server rejected a `RCPT TO`. No
+  message data was sent.
+- `SmtpMessageRejected` — the server rejected the DATA command or
+  returned an explicit final 4xx/5xx response after DATA.
+- `SmtpConnectionFailed` — a pre-DATA DNS/TCP/connection or SMTP
+  command failure occurred for a reason other than timeout/cancellation.
+- `SmtpTimeout` — a submission stage timed out or was cancelled before
+  message data began. After DATA begins, an uncertain outcome is
+  reported as `SmtpAmbiguousFailure` instead.
+- `SmtpAmbiguousFailure` — message-data transmission began, but no
+  definitive final response was received. The error carries
+  `details.message_id` (the original Message-ID) and
+  `details.may_have_been_sent: true`; the same identity and flag appear
+  in the error text. The message may have been accepted and must not be
+  retried automatically.
+
+## Sending tools
+
+### `send_message`
+
+Submits a new message through one account's authenticated SMTP server.
+It does not reply, forward, mutate a mailbox, create a Sent copy, or
+retry an uncertain submission.
+
+**Required capabilities:** `send`. If any attachment is present,
+`attachment_send` is also required, and the account must have a
+configured `attachment_send_paths` root.
+
+**Input.**
+
+```json
+{
+  "account_id": "work",
+  "to": ["alice@example.test"],
+  "cc": ["carol@example.test"],
+  "bcc": ["audit@example.test"],
+  "subject": "Quarterly report",
+  "text": "Plain body",
+  "html": "<p>HTML body</p>",
+  "attachments": ["reports/q3.pdf"]
+}
+```
+
+`account_id` is required. At least one To/Cc/Bcc recipient is required
+after canonicalisation and duplicate collapsing. `attachments` entries
+are relative paths understood only by the account's confined resolver;
+absolute paths, traversal, symlink escapes, non-regular files and
+ambiguous roots are rejected.
+
+There is deliberately no caller-controlled `from`, header map, raw MIME
+field, credential field, SMTP command, or filesystem-root field. Unknown
+input properties are rejected by the JSON Schema. `From` is always the
+account's configured email identity. `Bcc` addresses go into the SMTP
+envelope but never appear in serialized MIME headers.
+
+**Output.**
+
+```json
+{
+  "account_id": "work",
+  "message_id": "generated@example.test",
+  "status": "submitted",
+  "recipient_count": 3,
+  "attachment_count": 1,
+  "total_attachment_bytes": 123456
+}
+```
+
+`message_id` is the bare Message-ID embedded in the prepared message.
+`recipient_count` is the number of unique envelope recipients across
+To, Cc and Bcc. `status: "submitted"` is returned **only after the SMTP
+server explicitly accepted the message after DATA**. SMTP acceptance is
+not proof of final mailbox delivery to every recipient.
+
+**Preflight and authorization.** The handler performs all of the
+following before opening any SMTP connection:
+
+1. Look up `account_id`.
+2. Require `send`.
+3. Canonicalise To, Cc and Bcc.
+4. Enforce the exact recipient allow-list, at least one recipient, and
+   the unique `max_recipients` limit.
+5. Require `attachment_send` when attachments are present.
+6. Resolve and freeze attachments inside the account's configured
+   roots.
+7. Compose the complete RFC 5322/MIME message with the account identity
+   as `From`.
+8. Enforce `max_message_bytes` on the final serialized message.
+9. Retain that Message-ID and those bytes for the sender.
+
+Any preflight error means no SMTP connection or submission attempt.
+
+**Outbound controls (enforced by `send_message`):**
+
+- `max_recipients` — caps unique outbound To + Cc + Bcc recipients
+  (default 50). Duplicates across To/Cc/Bcc collapse before the count is
+  checked.
+- `allowed_recipients` — optional exact allow-list. An empty list permits
+  any canonical recipient.
+- `max_attachment_bytes` / `max_total_attachment_bytes` /
+  `max_attachments` — bound frozen attachments resolved by
+  `internal/attachments`.
+- `max_message_bytes` — enforced by `internal/mailcompose` on the final
+  serialized message and re-checked by the tool before SMTP.
+
+**SMTP transport.** Exactly one short-lived connection is used per call;
+there is no pooling, queue, background worker or retry. The client
+supports implicit TLS or mandatory STARTTLS, verifies the configured
+hostname and certificate, requires TLS 1.2 or newer, and never falls
+back to plaintext or disabled verification. Authentication is AUTH
+PLAIN only and happens only after verified TLS. Envelope addresses must
+be ASCII; SMTPUTF8 is not requested. Both `password` and
+`password_command` are supported for SMTP credentials; command execution
+is direct (no shell), bounded and cancellable.
+
+**Transaction and outcomes.** After authentication the client issues
+`MAIL FROM`, then one `RCPT TO` for every unique policy-approved
+envelope recipient. DATA is issued only if every recipient was
+accepted. Any MAIL or RCPT rejection is a definite failure and no
+message data is sent; RSET is attempted after a rejected recipient.
+
+- An explicit final 2xx response after DATA is the only success path.
+- TLS, authentication, connection, MAIL, RCPT, DATA-command and
+  pre-data timeout/cancellation failures are definite failures.
+- An explicit final 4xx/5xx response after DATA is a definite
+  rejection.
+- A lost connection, timeout or cancellation after DATA begins but
+  before a definitive response returns `SmtpAmbiguousFailure` with the
+  original Message-ID and `may_have_been_sent: true`. No retry is made.
+  Because there is no prepared-message replay API, the caller must
+  verify server state before composing a new message.
+
+All network stages have finite internal deadlines: DNS/TCP connect, TLS
+handshake, greeting/EHLO, STARTTLS, authentication, MAIL, RCPT, DATA
+writing and the final response. MCP request cancellation closes the
+active connection. The tool does not return raw SMTP transcripts or
+server response text.
+
+**Audit logging.** Structured audit logs may contain the account ID,
+Message-ID, recipient count, attachment count, total attachment bytes,
+outcome category and typed error code. They never contain message
+bodies, attachment contents, credentials, raw SMTP transcripts or the
+full recipient list.
 
 ## Read-only tools
 
@@ -271,14 +422,6 @@ Violations return a typed error (`MessageTooLarge`, `AttachmentTooLarge`,
 `NestingTooDeep`, `TooManyParts`, `TooManyAttachments`) without reading
 the rest of the message.
 
-**Outbound policy limits (Phase 2.3 PR 1/PR 2, no send tool yet):**
-
-- `max_recipients` — caps unique outbound To + Cc + Bcc recipients (default 50).
-- `max_attachment_bytes` / `max_total_attachment_bytes` — bound decoded
-  bytes for path attachments resolved by `internal/attachments`.
-- `max_message_bytes` — enforced by `internal/mailcompose` on the final
-  serialized message. No send tool calls the composer yet.
-
 ### `read_attachment`
 
 Reads exactly one attachment selected by the part path returned by
@@ -445,14 +588,9 @@ slice.
 
 ## Future tools (not implemented)
 
-These names and shapes are sketches, not current contracts.
+These names and shapes are sketches, not current contracts. `send_message`
+is implemented; reply/forward, mailbox mutation and deletion are not.
 
-PR 1 (merged as PR #10) implements the configuration and
-attachment-resolution foundations, and PR 2 implements the internal
-bounded MIME composer. None of these tools is registered yet. In
-particular, there is no SMTP client and no submission path.
-
-- `send_message` — compose and send a new message. Requires `send` and `attachment_send` if attachments are included.
 - `reply_message` — reply, optionally quoting the original. Requires `send`. Honours `reply_all`.
 - `forward_message` — forward an existing message including its attachments. Requires `send` and `attachment_send`.
 - `move_message` — move to another mailbox. Requires `modify`.
@@ -462,7 +600,7 @@ particular, there is no SMTP client and no submission path.
 
 ## What will never be exposed
 
-- Raw IMAP command pass-through (would defeat the abstraction and break the permission model).
+- Raw IMAP or SMTP command pass-through (would defeat the abstraction and break the permission model).
 - Credential fields in any output.
 - Filesystem write paths outside the configured attachment roots.
 - Absolute attachment roots in `list_accounts`; only an

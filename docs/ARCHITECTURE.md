@@ -1,11 +1,12 @@
 # TheMailroom Architecture
 
-> Status: Phase 2.3 PR 2 is **IN REVIEW**. The read-only IMAP path,
-> inbound attachment retrieval, recipient policy, conditional SMTP
-> validation, the confined outbound attachment resolver, and the
-> bounded MIME composer are implemented. SMTP submission,
-> `send_message`, reply/forward and mailbox mutation are **not**
-> implemented.
+> Status: Phase 2.3 PR 1 is **MERGED** (PR #10) and PR 2 is **MERGED**
+> (PR #11). PR 3 (authenticated SMTP submission and `send_message`) is
+> **IN REVIEW**. The read-only IMAP path, inbound attachment retrieval,
+> recipient policy, conditional SMTP validation, confined outbound
+> attachment resolver, bounded MIME composer, SMTP submission client and
+> `send_message` are implemented. Reply/forward and mailbox mutation are
+> **not** implemented, and Phase 2.3 is **not** done.
 
 ## 1. Goals and non-goals
 
@@ -39,10 +40,10 @@ The module is split into focused internal packages. Each layer depends only on t
 |  internal/mailbox         (Backend interface)           |
 |  internal/mailbox/memory  (in-memory Backend)           |
 |  internal/imapclient      (IMAP Backend — read slice)   |
-|  internal/smtpclient      (SMTP submission — planned)   |
+|  internal/smtpclient      (authenticated SMTP sender)   |
 |  internal/mailcompose     (bounded MIME composer)       |
 |  internal/mimeparse       (read-only MIME parser)       |
-|  internal/attachments     (os.Root outbound confinement)|
+|  internal/attachments     (os.Root outbound confinement) |
 |  internal/recipients      (outbound recipient policy)   |
 +---------------------------------------------------------+
 |  internal/accounts        (Account registry, conns.)    |
@@ -71,7 +72,8 @@ Tools are the public surface. They are grouped by capability:
   - `read_message`
   - `read_attachment`
   - `search_messages`
-- Sending (future): `send_message`, `reply_message`, `forward_message`
+- Sending: `send_message` (implemented); `reply_message` and
+  `forward_message` remain future
 - Modification (future): `move_message`, `flag_message`, `archive_message`, `delete_message`
 
 Tools return structured payloads (JSON) and never include credentials or arbitrary raw protocol output. Errors are typed (`PermissionDenied`, `AccountNotFound`, `InvalidInput`, `RateLimited`, etc.) and serialised without leaking internal details. Unknown internal failures map to `InternalError`; `BackendError` remains a reserved code that is not currently emitted.
@@ -90,23 +92,25 @@ type Backend interface {
 }
 ```
 
-Three implementations exist or are planned:
+Two mailbox backends exist:
 
 1. `internal/mailbox/memory` — loads `.eml` files from a directory. Used
    for development and tests. Rejects symlink entries.
 2. `internal/imapclient` — the production IMAP4rev1 implementation.
-   **Read-only** in this slice. Sends, modifications and deletions land
-   in subsequent slices.
-3. `internal/attachments` — the `os.Root`-confined outbound attachment
-   resolver. It is implemented, but no SMTP sender or send tool uses it
-   yet.
+   **Read-only** in this slice. Modifications and deletions land in
+   subsequent slices.
+
+Outbound submission is deliberately separate from `mailbox.Backend`.
+`internal/smtpclient` owns the short-lived SMTP transaction, and
+`internal/attachments` supplies confined, frozen attachment data. No
+sending method was added to the mailbox abstraction.
 
 A new test fixture in `internal/imapclient` runs the production client
 against an in-process go-imap server over TLS, exercising the full
 real-protocol path. The end-to-end test in `internal/tools` exercises
 the same backend through the MCP tool layer.
 
-### 2.4 IMAP and SMTP (`internal/imapclient`; `internal/smtpclient` planned)
+### 2.4 IMAP (`internal/imapclient`)
 
 **Status (this slice):** `internal/imapclient` ships the read-only
 IMAP4rev1 backend. It uses a narrow fork of
@@ -143,12 +147,41 @@ IMAP4rev1 backend. It uses a narrow fork of
 - Refusal to dial without TLS or STARTTLS — plain IMAP is never
   accepted.
 
-SMTP submission is deliberately not implemented yet. Phase 2.3 PR 1
-validates SMTP configuration only when an account has the `send`
-capability; it does not instantiate an SMTP client. PR 2 provides a
-standalone composer, but nothing calls it from a send path. The future
-sender is documented in `docs/PHASE2_DESIGN.md` and
-`docs/PHASE2.3.md`.
+### 2.4a SMTP submission (`internal/smtpclient`)
+
+Phase 2.3 PR 3 implements authenticated submission in
+`internal/smtpclient`. The tool layer supplies a fully prepared message,
+the account's configured envelope identity and the policy-approved
+envelope recipient list. The sender has no mailbox methods and no
+sending method is added to `mailbox.Backend`.
+
+The sender is deliberately minimal:
+
+- One short-lived TCP connection per submission; no pool, queue,
+  background worker, retry or pipelining.
+- Implicit TLS or mandatory STARTTLS only. Certificates and hostnames
+  are verified against the configured SMTP host, TLS 1.2 is the
+  minimum, and there is no plaintext or disabled-verification mode.
+- AUTH PLAIN after verified TLS. Servers that do not advertise PLAIN
+  are rejected before credentials are sent.
+- `MAIL FROM` uses only the account's configured `email`. All unique
+  policy-approved To/Cc/Bcc addresses become `RCPT TO` envelope
+  recipients; Bcc never appears in MIME headers.
+- `DATA` is issued only after every recipient is accepted. Any RCPT
+  rejection aborts before DATA and attempts RSET. There is no partial
+  recipient send.
+- The prepared bytes are written unchanged. Only an explicit final 2xx
+  response after DATA is success. A final 4xx/5xx is a definite
+  rejection; a lost connection, timeout or cancellation after DATA
+  begins is reported as an ambiguous submission with the original
+  Message-ID and is never retried.
+- DNS/TCP, TLS, greeting/EHLO, STARTTLS, authentication, MAIL, RCPT,
+  DATA writing and final-response stages have finite deadlines. MCP
+  cancellation closes the active connection.
+
+SMTP acceptance is not final mailbox delivery. The tool does not create
+an automatic Sent copy. The full semantics are in
+`docs/PHASE2_DESIGN.md` §3 and `docs/PHASE2.3.md` PR 3.
 
 ### 2.5 MIME (`internal/mimeparse`, `internal/mailcompose`)
 
@@ -199,8 +232,8 @@ The parser:
 ### 2.6 Attachments (`internal/attachments`)
 
 The single most security-sensitive path for outbound email. Implemented
-in Phase 2.3 PR 1; no send tool is wired yet. It uses Go 1.24+ `os.Root`
-for filesystem confinement:
+in Phase 2.3 PR 1 and wired into `send_message` in PR 3. It uses Go
+1.24+ `os.Root` for filesystem confinement:
 
 - Every `attachment_send_paths` entry is opened once as an `*os.Root`.
   Empty paths mean no resolver and therefore no attachment source.
@@ -217,8 +250,9 @@ for filesystem confinement:
   are never returned. Roots are closed by the registry shutdown path.
   Each account has its own roots and policy; cross-account access is
   impossible.
-- `internal/mailcompose` consumes the frozen `[]attachments.File`
-  directly and never reopens a path. No send tool is wired yet.
+- `send_message` resolves and freezes `[]attachments.File` before
+  opening SMTP. `internal/mailcompose` consumes that data directly and
+  never reopens a path.
 
 ### 2.6a Search semantics (`internal/searchspec`)
 
@@ -262,17 +296,19 @@ messages and requires identical results.
 A registry of configured accounts. Each entry holds:
 
 - `id` — opaque, stable identifier exposed to tools.
-- Provider label and the account's configured email identity. Runtime
-  endpoint and credential settings remain in `config`; the account does
-  not expose them.
+- Provider label and the account's configured email identity.
 - Permissions and limits.
+- An unexported copy of the account's SMTP submission settings for the
+  sender. These settings can contain credentials but are never part of
+  `View`, `list_accounts`, logs or any other MCP-visible shape.
 - A parsed recipient policy for outbound validation.
 - An optional `internal/attachments` resolver for `attachment_send`
   accounts. Absolute roots are not copied into the MCP view.
 
 The IMAP backend uses a single shared connection per account under a
-mutex; there is no connection pool yet. Credentials are never copied
-into MCP-visible data structures.
+mutex; there is no connection pool yet. SMTP submission creates one
+short-lived connection per call. Credentials are never copied into
+MCP-visible data structures.
 
 ### 2.8 Permissions (`internal/permissions`)
 
@@ -283,8 +319,8 @@ A small, explicit capability set:
 - `modify` — flag, move, archive (without deletion).
 - `delete` — explicit deletion.
 - `attachment_send` — sending with a local attachment requires this
-  capability *and* a configured `attachment_send_paths` root. The
-  capability is declared but no send tool is registered yet.
+  capability *and* a configured `attachment_send_paths` root.
+  `send_message` enforces it whenever the attachment list is non-empty.
 
 Each tool handler calls `permissions.Check(account, capability)` first. The check returns `PermissionDenied` if missing, and the tool refuses the operation. The check is server-side; we do not trust the MCP client.
 
@@ -336,7 +372,7 @@ CA) or a `SSL_CERT_FILE` override at the host level.
 | MCP transport        | `github.com/modelcontextprotocol/go-sdk`       | Official Go SDK; stdio transport; schema-validated tools.       |
 | YAML config          | `gopkg.in/yaml.v3`                              | Mature, widely used; supports strict unknown-key rejection.    |
 | IMAP (Phase 2)       | `github.com/flowbyte-com/go-imap` (fork of `github.com/emersion/go-imap` v1.2.1) | De facto standard; protocol-correct; stable API. The fork adds protocol-level IMAP literal-size enforcement; see `docs/PHASE2_DESIGN.md` §8/§10. |
-| SMTP (planned)       | `github.com/emersion/go-smtp` v0.25.0          | Selected for Phase 2.3 PR 3; not yet a dependency or implemented. |
+| SMTP (Phase 2.3)     | `github.com/emersion/go-smtp` v0.25.0 + `github.com/emersion/go-sasl` | Implemented in `internal/smtpclient`; low-level `Mail`/`Rcpt`/`Data`/`CloseWithResponse` are used so the client can abort before DATA and classify ambiguity. |
 | MIME (Phase 2)       | `github.com/emersion/go-message`                | Parser implemented as `internal/mimeparse`; bounded composer implemented as `internal/mailcompose` in Phase 2.3 PR 2. Charset-aware; handles RFC 2047. |
 | Logging              | `log/slog` (stdlib)                             | Go 1.21+; structured logging; no extra dep.                    |
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+)                    | OS-level chroot-style; prevents escape by symlink.             |
@@ -383,6 +419,30 @@ internal/mcpserver     -- serialises, returns to agent
 ```
 
 At no point does the response contain credentials, raw IMAP wire bytes, or filesystem paths beyond what the tool explicitly returns.
+
+## 4a. Data flow (send example)
+
+```
+AI agent
+  |
+  | MCP tool call: send_message { account_id, to, cc, bcc, subject, text, html, attachments }
+  v
+internal/tools         -- account lookup, send/attachment_send checks,
+  |                       recipient policy, confined attachment resolve,
+  |                       MIME composition, max_message_bytes
+  v
+internal/smtpclient    -- one connection: TLS -> AUTH PLAIN -> MAIL FROM ->
+  |                       all RCPT TO -> DATA -> prepared bytes -> final response
+  v
+SMTP submission server
+```
+
+The sender receives only the prepared message, envelope From and
+envelope recipients. It never sees caller-selected headers or a raw
+filesystem path. The MCP response contains the account ID, original
+Message-ID, submitted status, recipient count and attachment counts; it
+never contains raw server responses, credentials or the full recipient
+list.
 
 ## 5. Build, test, lint
 

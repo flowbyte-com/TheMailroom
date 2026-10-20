@@ -22,7 +22,13 @@ import (
 // All handlers are inlined so the literal return signatures exactly
 // match mcp.ToolHandlerFor (which uses named returns). Tool definitions
 // and arg/result types live in the per-tool files.
-func Register(server *mcp.Server, registry *accounts.Registry) {
+func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterOption) {
+	cfg := defaultRegisterConfig()
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
 
 	// list_accounts -- no input, no permission check (the tool itself
 	// only returns non-sensitive account metadata).
@@ -298,6 +304,9 @@ func Register(server *mcp.Server, registry *accounts.Registry) {
 			}
 			return
 		})
+
+	// send_message
+	registerSendMessage(server, registry, cfg)
 }
 
 // truncateRunes is the only remaining helper; the previous

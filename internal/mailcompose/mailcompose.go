@@ -4,7 +4,7 @@
 // accepts already-frozen attachments, never opens files, never talks to an
 // SMTP server, and never writes to disk. The output is a complete serialized
 // message and the generated Message-ID. The SMTP envelope is assembled
-// separately by the future sender; Bcc recipients are accepted for validation
+// separately by the SMTP sender; Bcc recipients are accepted for validation
 // but are never serialized into the message headers.
 package mailcompose
 
