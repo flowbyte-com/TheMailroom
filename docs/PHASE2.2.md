@@ -10,7 +10,7 @@
 | Priority | Scope | Status |
 |---|---|---|
 | 1 | Protocol-level IMAP literal-size enforcement | **DONE** — merged in PR #5 (`d28dfa3`) |
-| 2 | IMAP search correctness defects | **IN REVIEW** — PR #6; corrective closeout applied, awaiting HAL review |
+| 2 | IMAP search correctness defects | **DONE** — merged in PR #6 (`21f859b`) |
 | 3 | Secure attachment retrieval | Not started |
 
 ## Scope
@@ -29,8 +29,8 @@ Phase 2.1 from being production-hardened:
    silently ignored. `Subject + From + To` are OR'd via the
    IMAP `TEXT` keyword. `SentSince` / `SentBefore` use the RFC
    5322 `Date:` header, not the server's internal date.
-   **IN REVIEW** — implemented in PR #6; not complete until the
-   corrective closeout passes review.
+   **DONE** — merged in PR #6 (`21f859b`) after HAL approval at
+   `38b0bf4`.
 3. **Secure attachment retrieval** with stable MIME-part
    references and strict resource limits. The new `read_attachment`
    tool reads a single MIME part by stable part reference
@@ -135,11 +135,10 @@ production-hardened.
 
 ### Priority 2 — IMAP search correctness defects
 
-**Status:** **IN REVIEW** — implemented in PR #6, with the
-corrective closeout applied; not complete until HAL review and
-merge. It is a separate, narrowly scoped PR, and it must not
-weaken the `EXAMINE` / UIDVALIDITY pairing or the literal-size
-safety controls from Priority 1.
+**Status:** **DONE** — merged in PR #6 as `21f859b` after HAL
+approval at `38b0bf4`. The change is narrowly scoped and
+preserves the `EXAMINE` / UIDVALIDITY pairing and the
+literal-size safety controls from Priority 1.
 
 **Defects to fix (PHASE2_DESIGN.md §7):**
 
@@ -210,8 +209,9 @@ filter is not acceptable.
   contract, and in `internal/tools/tools_test.go` for the wire
   behaviour.
 
-**Review closeout (PR #6).** HAL review requested these
-corrections:
+**Review closeout (PR #6).** HAL approved the corrected head
+`38b0bf4`; the PR squash-merged as `21f859b`. The review
+requested these corrections:
 
 - IMAP search now issues one `UID SEARCH` with the header,
   body, flag and date keys ANDed by the server, plus an
