@@ -225,6 +225,15 @@ expansion. Exactly-at-limit succeeds; one byte larger returns
 `ErrMessageTooLarge`. All failures return the zero `Result`, never
 partial bytes. No temporary files or disk spooling are used.
 
+Before header encoding, the composer uses `max_message_bytes` as a
+preparation budget: oversized subjects and filenames are rejected before
+RFC 2047/RFC 2231 expansion, aggregate raw address input and address
+counts are bounded, and the canonical `From`/`To`/`Cc` values must fit
+the same budget. This bounds temporary allocations under a small
+serialized limit without enforcing the recipient allow-list or changing
+recipient canonicalisation. The bounded writer still determines the
+exact final-size boundary.
+
 Typed errors distinguish invalid message/header input, invalid
 attachment metadata, too many attachments, per-attachment size, total
 attachment size, serialized size, MIME failure and invalid limits. They

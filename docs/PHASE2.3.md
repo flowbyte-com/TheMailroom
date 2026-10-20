@@ -227,6 +227,16 @@ Serialization uses a bounded in-memory writer. Exactly
 `ErrMessageTooLarge`. On any error the zero `Result` is returned, never
 partial bytes. No temporary files or disk spooling are used.
 
+`max_message_bytes` is also the budget for header preparation, so a
+small serialized limit cannot be bypassed by a huge subject or filename
+that expands during RFC 2047/RFC 2231 encoding. Raw subject and filename
+bytes, the number of address values and the aggregate raw address input
+are checked before encoding; after canonicalisation, aggregate
+`From`/`To`/`Cc` header values must fit the same budget. These checks
+bound temporary allocations without changing recipient-policy
+semantics, and the bounded writer remains authoritative for the exact
+final serialized size.
+
 Typed errors distinguish invalid message/header input, invalid
 attachment metadata, too many attachments, per-attachment size, total
 attachment size, serialized message size, MIME composition failure and
@@ -243,7 +253,8 @@ round-trips, zero-byte attachments, UTF-8 subjects and filenames,
 special-character and long RFC 2231 continuation filenames, duplicate
 basenames, header injection, Bcc absence, local-part case,
 Date/MIME-Version/Message-ID, exact size boundaries, base64 expansion,
-no partial results, repeated composition and concurrent composition.
+oversized header-preparation inputs under small limits, no partial
+results, repeated composition and concurrent composition.
 
 ### Known limitations
 

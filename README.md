@@ -191,8 +191,9 @@ traversal, symlink escapes and non-regular files are rejected. The
 outbound resolver, recipient policy and standalone MIME composer are
 implemented, but no send tool is registered. The composer enforces
 `max_message_bytes` on the final serialized message (including MIME
-boundaries and base64 expansion), omits Bcc from headers, and returns a
-generated Message-ID for a future sender.
+boundaries and base64 expansion), bounds header preparation by the same
+limit before encoding, omits Bcc from headers, and returns a generated
+Message-ID for a future sender.
 
 ## Run
 

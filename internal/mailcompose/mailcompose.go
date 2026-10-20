@@ -108,6 +108,9 @@ func compose(req Request, limits config.LimitsConfig, now func() time.Time, next
 	if err := validateLimits(limits); err != nil {
 		return Result{}, err
 	}
+	if err := validateHeaderPreparation(req, limits.MaxMessageBytes); err != nil {
+		return Result{}, err
+	}
 
 	from, err := canonicalAddress("from", req.From)
 	if err != nil {
@@ -137,6 +140,9 @@ func compose(req Request, limits config.LimitsConfig, now func() time.Time, next
 
 	files, err := validateAttachments(req.Attachments, limits)
 	if err != nil {
+		return Result{}, err
+	}
+	if err := validatePreparedHeaders(from, to, cc, req.Subject, files, limits.MaxMessageBytes); err != nil {
 		return Result{}, err
 	}
 
@@ -192,6 +198,114 @@ func validateLimits(limits config.LimitsConfig) error {
 	}
 	if limits.MaxAttachments < 0 {
 		return fmt.Errorf("%w: max_attachments must not be negative", ErrInvalidLimits)
+	}
+	return nil
+}
+
+// validateHeaderPreparation bounds agent-controlled header input before any
+// MIME, RFC 2047 or RFC 2231 encoding allocates expanded values. The final
+// serialized-message limit is the budget: raw subject/filename bytes, the
+// number of address values and the aggregate raw address input may not exceed
+// it. Display names are included in the raw address input because parsing them
+// is part of header preparation; recipient authorization remains in the
+// existing recipient policy and is not reimplemented here.
+func validateHeaderPreparation(req Request, maxMessageBytes int) error {
+	max := int64(maxMessageBytes)
+
+	if int64(len(req.Subject)) > max {
+		return fmt.Errorf("%w: subject exceeds max_message_bytes", ErrMessageTooLarge)
+	}
+	if int64(len(req.Attachments)) > max {
+		return fmt.Errorf("%w: attachment count exceeds max_message_bytes", ErrMessageTooLarge)
+	}
+
+	var filenameBytes int64
+	for i, file := range req.Attachments {
+		n := int64(len(file.Filename))
+		if n > max-filenameBytes {
+			return fmt.Errorf("%w: attachment[%d] filename exceeds max_message_bytes", ErrMessageTooLarge, i)
+		}
+		filenameBytes += n
+	}
+
+	addressCount := int64(1) // From
+	addressCount += int64(len(req.To))
+	addressCount += int64(len(req.Cc))
+	addressCount += int64(len(req.Bcc))
+	if addressCount > max {
+		return fmt.Errorf("%w: address count exceeds max_message_bytes", ErrMessageTooLarge)
+	}
+
+	var addressBytes int64
+	addAddresses := func(field string, values []string) error {
+		for _, value := range values {
+			n := int64(len(value))
+			if n > max-addressBytes {
+				return fmt.Errorf("%w: %s address input exceeds max_message_bytes", ErrMessageTooLarge, field)
+			}
+			addressBytes += n
+		}
+		return nil
+	}
+	if err := addAddresses("from", []string{req.From}); err != nil {
+		return err
+	}
+	if err := addAddresses("to", req.To); err != nil {
+		return err
+	}
+	if err := addAddresses("cc", req.Cc); err != nil {
+		return err
+	}
+	if err := addAddresses("bcc", req.Bcc); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePreparedHeaders checks the canonical and decoded header values that
+// will actually be handed to the MIME writer. Encoded subjects and RFC 2231
+// filenames may expand further, but the writer still enforces the exact final
+// serialized-message boundary. This pass bounds the list joins and ensures the
+// prepared values alone cannot exceed the message budget.
+func validatePreparedHeaders(from string, to, cc []string, subject string, files []attachmentInfo, maxMessageBytes int) error {
+	max := int64(maxMessageBytes)
+	total := int64(0)
+	add := func(n int64) error {
+		if n > max-total {
+			return fmt.Errorf("%w: prepared header values exceed max_message_bytes", ErrMessageTooLarge)
+		}
+		total += n
+		return nil
+	}
+
+	if err := add(int64(len(from)) + 2); err != nil { // From is always emitted as <addr>.
+		return err
+	}
+	if err := add(int64(len(subject))); err != nil {
+		return err
+	}
+	for _, file := range files {
+		if err := add(int64(len(file.filename))); err != nil {
+			return err
+		}
+	}
+	addList := func(addrs []string) error {
+		for i, addr := range addrs {
+			n := int64(len(addr)) + 2 // <addr>
+			if i > 0 {
+				n += 2 // ", "
+			}
+			if err := add(n); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := addList(to); err != nil {
+		return err
+	}
+	if err := addList(cc); err != nil {
+		return err
 	}
 	return nil
 }

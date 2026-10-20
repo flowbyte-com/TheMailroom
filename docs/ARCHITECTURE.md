@@ -170,8 +170,10 @@ child first followed by attachments in request order. Attachments use
 base64 and RFC 2231 filenames. A bounded writer enforces
 `max_message_bytes` on the final serialized message; per-file, total
 attachment and attachment-count limits are re-checked defensively.
-Exactly-at-limit succeeds and any overage returns a typed error with no
-partial result.
+The same limit bounds header preparation before RFC 2047/RFC 2231
+encoding and address-list joins, so a small serialized limit also bounds
+temporary header allocations. Exactly-at-limit succeeds and any overage
+returns a typed error with no partial result.
 
 The parser:
 
