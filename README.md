@@ -35,27 +35,31 @@ protocol-level IMAP literal-size enforcement (PR #5), IMAP search
 correctness (PR #6), and secure inbound attachment retrieval (PR #8).
 The Phase 2.2 documentation closeout is merged as PR #9.
 
-**Phase 2.3 (Outbound submission)** implementation is complete on
-`main`; the documentation closeout is GitHub PR #13; see that PR for its
-current merge status. PR 1 added conditional SMTP configuration
-validation, the recipient policy, the confined outbound attachment
-resolver, and safer `list_accounts` output. PR 2 added the standalone,
-bounded MIME composer. PR 3 added authenticated SMTP submission and the
-`send_message` tool.
+**Phase 2.3 (Outbound submission)** implementation and documentation
+closeout are complete on `main`. PR 1 added conditional SMTP
+configuration validation, the recipient policy, the confined outbound
+attachment resolver, and safer `list_accounts` output. PR 2 added the
+standalone, bounded MIME composer. PR 3 added authenticated SMTP
+submission and the `send_message` tool. PR 4 was the documentation-only
+closeout.
 
 | PR | Scope | Squash commit |
 |---|---|---|
 | #10 | Outbound security foundations | `bf3618f247928ea1f1d2c687aac1cffd96a89070` |
 | #11 | Bounded MIME composer | `ab928c3a33ac5b760ca714c6f915fcbfe4366212` |
 | #12 | Authenticated SMTP submission and `send_message` | `d1ecf774809681b2795a01f91182eec15a4b2f3f` |
+| #13 | Documentation closeout | `a4851e9159af63026e5593f30988c114d7117261` |
 
 Reply/forward, mailbox mutation and automatic Sent copies remain
-future work. Controlled external SMTP testing has **not** been
-performed, and Phase 2.3 is not a production-hardened outbound system.
-The plan and explicit limitations are in
-[`docs/PHASE2.3.md`](docs/PHASE2.3.md); the not-yet-executed operator
-runbook is
-[`docs/LIVE_SMTP_SMOKE_TEST.md`](docs/LIVE_SMTP_SMOKE_TEST.md).
+future work. The controlled Purelymail smoke-test campaign was executed
+on 2026-10-21 and passed. It exercised authenticated SMTP/TLS, MIME and
+attachment delivery, Bcc privacy, Message-ID/IMAP interoperability and
+preflight controls; the authoritative record and qualifications are in
+[`docs/LIVE_SMTP_SMOKE_TEST.md`](docs/LIVE_SMTP_SMOKE_TEST.md). The
+campaign is interoperability/smoke-test evidence, not exhaustive
+security testing or production certification. Phase 2.3 is not a
+production-hardened outbound system; the plan and explicit limitations
+are in [`docs/PHASE2.3.md`](docs/PHASE2.3.md).
 
 TheMailroom is a **development milestone, not a
 production-hardened release**. The IMAP literal-size
@@ -63,9 +67,9 @@ pre-allocation vulnerability is fixed, but the fix depends on a
 fork of go-imap that must still be upstreamed or replaced (see
 [`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §8). Inbound
 attachment retrieval is merged (PR #8). MIME composition and
-authenticated SMTP submission are implemented for `send_message`, but
-the sender has not been exercised against a controlled external SMTP
-service and production hardening remains outstanding.
+authenticated SMTP submission are implemented for `send_message` and
+were exercised against Purelymail; production hardening remains
+outstanding.
 
 Phase 2.1 ships:
 
@@ -102,9 +106,10 @@ composer; PR 3 added the authenticated SMTP sender.
 **Phase 3 (Hardening)** will cover the remaining production gates,
 including bounded IMAP list/search workloads, explicit IMAP command
 timeouts, `has_attachments` for IMAP summaries, response-size limits,
-fuzz tests, installation docs, and a cross-platform release. Controlled
-external SMTP testing of the Phase 2.3 sender is tracked separately and
-has not been performed.
+fuzz tests, installation docs, and a cross-platform release. The
+Purelymail smoke test completed on 2026-10-21; transport-level request
+sizing, IMAP credential-command buffering, and other hardening items
+remain Phase 3 work. The smoke test is not production certification.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and
@@ -162,9 +167,50 @@ TheMailroom supports two credential sources, in order of preference:
    resort; the file should be unreadable to other users
    (`chmod 600 themailroom.yaml`).
 
-No matter which mechanism is used, the server will **never** print a
-resolved password. Errors are redacted. Logs go to stderr so they do not
-contaminate the stdio JSON-RPC stream.
+No matter which mechanism is used, the server does not print a resolved
+password. SMTP credential-command output is bounded and excluded from
+errors and logs. The pre-existing IMAP `password_command` path is
+pending hardening: it uses unbounded stdout/stderr buffers and includes
+truncated stderr in internal errors, although tool errors are
+mapped to generic messages. Logs go to stderr so they do not contaminate
+the stdio JSON-RPC stream.
+
+### App passwords and 2FA
+
+Provider-issued app passwords are accepted as ordinary opaque password
+strings. Use the provider's app password as the value of `password`, or
+return it from `password_command`; there is no separate `app_password`
+field. Use the exact provider-issued value. `password_command` output has
+trailing CR/LF trimmed but preserves internal spaces and punctuation.
+
+IMAP and SMTP credentials are independent. They may use different
+usernames, different app passwords, or different credential sources:
+
+```yaml
+imap:
+  username: user@example.test
+  password_command: ["pass", "email/imap"]
+smtp:
+  username: user@example.test
+  password_command: ["pass", "email/smtp"]
+```
+
+App passwords are compatible with TheMailroom's supported mechanisms:
+IMAP uses `LOGIN` over verified TLS, and SMTP uses AUTH PLAIN after
+verified TLS. Providers that require OAuth2/XOAUTH2 or another
+unsupported mechanism are not usable with app passwords alone. This
+includes, for example, Microsoft 365 tenants where basic authentication
+is disabled and Google Workspace domains where app passwords are
+disabled by policy. IMAP servers that require `AUTHENTICATE` instead of
+`LOGIN`, SMTP servers that do not advertise AUTH PLAIN, and passkey-only
+accounts without an app-password feature are likewise unsupported.
+OAuth2 remains deferred (see
+[`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §6).
+
+A literal `password` is stored in plaintext in the config file. Prefer
+`password_command`, and restrict the config file (`chmod 600
+themailroom.yaml`). TheMailroom does not provide a keyring or enforce
+file permissions.
 
 ### Permissions
 
@@ -265,6 +311,13 @@ never placed in tool responses or logs, SMTP server responses are mapped
 to typed errors, and ambiguous post-DATA outcomes are never reported as
 definite non-delivery or retried. The full threat catalogue and
 mitigations are in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+
+`max_message_bytes` bounds message composition and post-decode
+preprocessing; it is not a JSON-RPC request-size cap. A hostile or
+misbehaving MCP client can therefore force allocation of large `text`,
+`html` or attachment-list arguments before those checks run. A
+transport-level request cap is Phase 3 hardening. The IMAP
+credential-command buffering issue noted above is also Phase 3 work.
 
 **IMAP client dependency.** TheMailroom depends on
 `github.com/flowbyte-com/go-imap` `v1.2.1-themailroom.4`, a

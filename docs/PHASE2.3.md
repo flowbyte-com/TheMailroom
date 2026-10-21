@@ -1,8 +1,7 @@
 # Phase 2.3 Plan — Outbound submission foundations
 
-> **Status:** Phase 2.3 implementation is complete on `main`; the
-> documentation closeout is GitHub PR #13. See that PR for its current
-> merge status.
+> **Status:** Phase 2.3 implementation and documentation closeout are
+> complete on `main`.
 >
 > - PR 1 (outbound security foundations) is **MERGED** (PR #10, squash
 >   commit `bf3618f247928ea1f1d2c687aac1cffd96a89070`).
@@ -11,13 +10,20 @@
 > - PR 3 (authenticated SMTP submission and `send_message`) is **MERGED**
 >   (PR #12, squash commit
 >   `d1ecf774809681b2795a01f91182eec15a4b2f3f`).
+> - PR 4 (documentation closeout) is **MERGED** (PR #13, squash commit
+>   `a4851e9159af63026e5593f30988c114d7117261`).
 >
-> Reply/forward and mailbox mutation remain unimplemented. Controlled
-> external SMTP testing has **not** been performed and production
-> hardening is not complete. TheMailroom is a development milestone, not
-> a production-hardened release. The operator runbook in
-> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) has not been
-> executed.
+> The controlled Purelymail smoke-test campaign was executed on
+> 2026-10-21 and passed. The authoritative execution record, including
+> the distinction between live submissions and offline negative
+> controls, is in
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). It is
+> interoperability/smoke-test evidence, not exhaustive security testing
+> or production certification. Reply/forward and mailbox mutation remain
+> unimplemented. Production hardening is not complete; TheMailroom is a
+> development milestone, not a production-hardened release. App-password
+> support uses the existing `password` / `password_command` fields; no
+> separate `app_password` field exists.
 
 ## Scope
 
@@ -464,23 +470,50 @@ injection. Coverage includes:
 - SMTPUTF8 rejection before dialing; and
 - concurrent submissions for multiple accounts, including `-race`.
 
-## PR 4 — Documentation closeout (GitHub PR #13)
+## PR 4 — Documentation closeout (MERGED, PR #13)
 
-The Phase 2.3 documentation closeout is documentation-only. It does not
-change sender behavior, the configuration schema, Go production code,
-dependencies or tests. It:
+The Phase 2.3 documentation closeout was documentation-only and was
+squash-merged as
+`a4851e9159af63026e5593f30988c114d7117261`. It did not change sender
+behavior, the configuration schema, Go production code, dependencies or
+tests. It:
 
 - records the exact squash commits for PRs #10, #11 and #12;
 - reconciles the README, architecture, threat model, tool contract,
   design notes and example configuration with the merged implementation;
 - adds the operator runbook in
-  [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) and states
-  explicitly that it has not been executed.
+  [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md); at PR #13 merge
+  time it was a pre-execution checklist.
 
-Phase 2.3 implementation is complete on `main`; the documentation
-closeout is GitHub PR #13, whose current merge status is tracked there.
-Controlled external SMTP testing is a separate operational activity and
-requires explicit authorization. It has not been performed.
+Controlled external SMTP testing remained a separate operational
+activity requiring explicit authorization. It was executed on 2026-10-21
+after that authorization; the runbook now records the results. This
+follow-up documentation correction changes no code, configuration or
+provider state.
+
+### Live smoke-test evidence (2026-10-21)
+
+The Purelymail campaign passed. The authoritative execution record and
+the full qualification are in
+[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md); this is a concise
+cross-reference, not a second test report.
+
+- **Live submissions and received-message verification:** authenticated
+  SMTP over TLS 1.3; plain-text delivery; multipart/alternative MIME;
+  attachment delivery with JPEG SHA-256 verification; Bcc delivery
+  without visible-header disclosure; returned Message-ID present in the
+  received message; IMAP reply-threading interoperability.
+- **Offline negative controls:** allowlist rejection and confined
+  attachment traversal rejection returned the expected typed errors,
+  made zero sender calls and produced no live submission. These were
+  preflight security controls, not live SMTP transactions.
+- **Non-ASCII qualification:** non-ASCII subject delivery passed live;
+  non-ASCII body composition was verified offline only; delivered
+  multipart bodies were ASCII-only.
+- **Qualification:** the campaign is interoperability/smoke-test
+  evidence. It is not exhaustive security testing, provider-wide
+  certification or production certification. It does not cover
+  OAuth2-only providers.
 
 ## Explicit limitations and non-goals
 
@@ -497,5 +530,17 @@ requires explicit authorization. It has not been performed.
 - No plaintext SMTP, disabled certificate verification or SMTPUTF8
   envelope addresses.
 - No unrelated IMAP hardening.
-- Controlled external SMTP testing has not been performed; production
+- No separate `app_password` field. Provider-issued app passwords are
+  supplied through `password` or `password_command`; IMAP and SMTP have
+  independent credentials. IMAP uses `LOGIN` over verified TLS and SMTP
+  uses AUTH PLAIN after verified TLS. OAuth2-only providers remain
+  unsupported.
+- The Purelymail smoke test passed on 2026-10-21, but production
   hardening is not complete and TheMailroom is not production-ready.
+- **Residual risks:** `max_message_bytes` does not cap the initial
+  JSON-RPC allocation of `text`, `html` or attachment arrays; the
+  pre-existing IMAP `password_command` path uses unbounded stdout/stderr
+  buffers and includes truncated stderr in internal errors; and
+  failure-outcome audit categories are not fully unit-tested. These are
+  Phase 3 hardening items, not production-code changes in this
+  documentation closeout.

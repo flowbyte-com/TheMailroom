@@ -1,15 +1,18 @@
 # TheMailroom Threat Model
 
-> Status: Phase 2.3 implementation is complete on `main`. PR 1 is
-> **MERGED** (PR #10, `bf3618f247928ea1f1d2c687aac1cffd96a89070`),
-> PR 2 is **MERGED** (PR #11,
-> `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
-> (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
-> documentation closeout is GitHub PR #13; see that PR for its current
-> merge status. Controls marked **(implemented)** are present in the
-> current code; controls marked **(planned)** are not. Controlled
-> external SMTP testing has **not** been performed and production
-> hardening is not complete.
+> Status: Phase 2.3 implementation and documentation closeout are
+> complete on `main`. PR 1 is **MERGED** (PR #10,
+> `bf3618f247928ea1f1d2c687aac1cffd96a89070`), PR 2 is **MERGED**
+> (PR #11, `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), PR 3 is
+> **MERGED** (PR #12,
+> `d1ecf774809681b2795a01f91182eec15a4b2f3f`), and PR 4 is **MERGED**
+> (PR #13, `a4851e9159af63026e5593f30988c114d7117261`). Controls marked
+> **(implemented)** are present in the current code; controls marked
+> **(planned)** are not. The controlled Purelymail smoke-test campaign
+> was executed on 2026-10-21 and passed; the authoritative record is
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). It is
+> interoperability/smoke-test evidence, not production certification.
+> Production hardening is not complete.
 
 ## 1. Trust boundaries
 
@@ -61,12 +64,18 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 - **(implemented)** `panic` recovery in `cmd/themailroom` logs a redacted diagnostic and exits; it does not print a stack trace with secrets.
 - **(implemented)** `password_command` (pass, secret-tool) is the recommended credential source so secrets never live in the config file.
 - **(implemented)** `validateAuth` rejects configurations with neither `password` nor `password_command`, and rejects configurations that set both.
+- **(implemented)** Provider-issued app passwords are accepted as ordinary opaque password strings through `password` or `password_command`; there is no separate `app_password` field. IMAP and SMTP credentials are independent, so a provider may issue different app passwords or use different usernames for each protocol. IMAP uses `LOGIN` over verified TLS; SMTP uses AUTH PLAIN after verified TLS. OAuth2-only providers remain unsupported.
 - **(implemented, PR 1/PR 3)** `os.Root` confines local attachment reads to the configured roots; symlink escapes, traversal, absolute paths and ambiguous matches are rejected. `send_message` uses this resolver and freezes the bytes before opening SMTP.
 - **(implemented, PR 3)** The SMTP password is retained in an unexported field on the runtime account and passed directly to the sender. It is absent from `Account.View`, `list_accounts`, audit logs, error messages and sender errors.
-- **(implemented, PR 3)** `password_command` runs directly with no shell interpolation, a bounded context, bounded stdout and a bounded wait for inherited pipe handles. Output is never included in errors or logs.
+- **(implemented, PR 3)** The SMTP `password_command` runs directly with no shell interpolation, a bounded context, bounded stdout and a bounded wait for inherited pipe handles. Output is never included in errors or logs.
 - **(implemented, PR 3)** SMTP errors are mapped to generic typed errors. Raw server responses, commands, recipient addresses and credentials are not included.
 
-**Residual risk.** Misconfigured logging at the host can capture secrets; documented in README.
+**Residual risk.** Misconfigured logging at the host can capture
+secrets; documented in README. The pre-existing IMAP `password_command`
+path uses unbounded stdout/stderr buffers and includes truncated stderr
+in internal errors. Tool error mapping returns a generic
+`InternalError`, so no MCP credential leak has been observed, but this
+path should be aligned with the bounded SMTP credential path in Phase 3.
 
 ### T3. Data exfiltration
 
@@ -245,9 +254,10 @@ double-resolution approach described here.
 automatically. There is no durable spool, retry, prepared-message replay
 API or Sent-folder copy, and SMTP acceptance is not proof of mailbox
 delivery. Operators must verify at the recipient or provider before
-composing a new message. Controlled external SMTP testing has not yet
-been performed; the runbook is `docs/LIVE_SMTP_SMOKE_TEST.md` and it has
-not been executed.
+composing a new message. The Purelymail smoke test executed on
+2026-10-21 passed, but it is interoperability evidence, not production
+certification; the authoritative record is
+`docs/LIVE_SMTP_SMOKE_TEST.md`.
 
 ### T9. Filesystem writes from MCP
 
@@ -278,12 +288,38 @@ not been executed.
 - **(implemented, PR 3)** Envelope addresses are parsed and canonicalised by `internal/recipients`, then checked to be ASCII. CR/LF and control characters are rejected before the command is built; SMTPUTF8 is not requested. There is no caller-supplied From, raw SMTP command or arbitrary header.
 - **(implemented, PR 3)** SMTP server responses are converted to generic typed errors. Raw response text, command transcripts and credentials never reach the MCP client or audit log.
 
-## 3. Out-of-scope threats (explicitly documented)
+## 3. Out-of-scope threats and recorded residual risks
 
 - Host OS compromise: TheMailroom assumes the host is trusted; if it isn't, no application-layer control helps.
 - MCP client compromise: see T1, T3 — the agent is treated as semi-trusted.
 - Network-level MITM with valid CA: TLS verification rejects invalid certificates and we never fall back to plain TCP for credentials (no IMAP `LOGIN` over cleartext, no SMTP AUTH over cleartext).
-- Denial of service from large numbers of accounts or messages: out of scope for v1; documented.
+- Denial of service from large numbers of accounts or messages: out of scope for v1; documented. This does not waive the specific pre-limit JSON-RPC allocation risk recorded below.
+
+### 3.1 Phase 3 hardening backlog (known residual risks)
+
+These are recorded, not silently accepted as production-grade behaviour:
+
+- **Pre-limit JSON-RPC allocation.** `max_message_bytes` bounds message
+  composition and post-decode address/header preprocessing, but it is
+  not a transport request-size cap. Large `text`, `html` or attachment
+  arrays can be allocated by the JSON-RPC decoder before those checks
+  run. The MCP stdio transport has no explicit request-size limit in
+  TheMailroom. A transport-level cap and schema size/count limits are
+  Phase 3 work; the current risk is resource exhaustion, not
+  confidentiality or integrity.
+- **IMAP credential-command buffering.** The pre-existing IMAP
+  `password_command` path uses unbounded `bytes.Buffer` values for
+  stdout/stderr and includes truncated stderr in internal errors. SMTP
+  uses a bounded buffer and excludes command output. Tool mapping
+  currently returns a generic `InternalError`, so no MCP credential
+  disclosure has been observed; align the IMAP path in Phase 3.
+- **Audit-outcome test coverage.** The structured audit categories are
+  implemented and success logging is tested, but `preflight_failure`,
+  `definite_failure` and `ambiguous_submission` logs do not all have
+  independent automated assertions. Add table-driven tests in Phase 3.
+- **OAuth2-only providers.** App passwords are insufficient where a
+  provider requires OAuth2/XOAUTH2. OAuth2 remains deferred; this is a
+  compatibility limitation, not a Phase 2.3 regression.
 
 ## 4. Security checklist for releases
 

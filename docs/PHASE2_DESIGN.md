@@ -1,24 +1,27 @@
 # Phase 2 Design Notes
 
-> Status: Phase 2.3 implementation is complete on `main`: PR 1 is
-> **MERGED** (PR #10, `bf3618f247928ea1f1d2c687aac1cffd96a89070`),
-> PR 2 is **MERGED** (PR #11,
-> `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
-> (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
-> documentation closeout is GitHub PR #13; see that PR for its current
-> merge status. Phase 2.1 (read-only IMAP correctness + MIME reading) is
-> implemented in `internal/imapclient` and `internal/mimeparse`. Phase
-> 2.2 is complete, including inbound `read_attachment` (PR #8). PR 1
-> implemented the recipient policy, conditional SMTP configuration
-> validation, and the confined outbound attachment resolver. PR 2
-> implemented the standalone bounded MIME composer in
-> `internal/mailcompose`. PR 3 implemented `internal/smtpclient` and the
-> `send_message` tool. Reply/forward,
+> Status: Phase 2.3 implementation and documentation closeout are
+> complete on `main`: PR 1 is **MERGED** (PR #10,
+> `bf3618f247928ea1f1d2c687aac1cffd96a89070`), PR 2 is **MERGED**
+> (PR #11, `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), PR 3 is
+> **MERGED** (PR #12,
+> `d1ecf774809681b2795a01f91182eec15a4b2f3f`), and PR 4 is **MERGED**
+> (PR #13, `a4851e9159af63026e5593f30988c114d7117261`). Phase 2.1
+> (read-only IMAP correctness + MIME reading) is implemented in
+> `internal/imapclient` and `internal/mimeparse`. Phase 2.2 is complete,
+> including inbound `read_attachment` (PR #8). PR 1 implemented the
+> recipient policy, conditional SMTP configuration validation, and the
+> confined outbound attachment resolver. PR 2 implemented the standalone
+> bounded MIME composer in `internal/mailcompose`. PR 3 implemented
+> `internal/smtpclient` and the `send_message` tool. Reply/forward,
 > mailbox mutation and automatic Sent copies are **not** implemented.
-> Controlled external SMTP testing has **not** been performed; production
-> hardening is not complete. The runbook in
-> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) has not been
-> executed.
+> The Purelymail smoke-test campaign was executed on 2026-10-21 and
+> passed; the authoritative record and qualifications are in
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). It is
+> interoperability/smoke-test evidence, not production certification.
+> Production hardening is not complete. App-password support uses the
+> existing `password` / `password_command` fields; no separate
+> `app_password` field exists.
 
 ## 1. Library selection (post-research)
 
@@ -378,11 +381,13 @@ This prevents the agent from using one configured account to send as
 another. It is a hard architectural rule; configuration cannot disable
 it.
 
-SMTP submission is implemented, but it has not been exercised against a
-controlled external SMTP service. The operator runbook in
-[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) has not been
-executed, does not authorize sending email, and is separate from this
-design. Production hardening is not complete.
+SMTP submission is implemented and was exercised against Purelymail on
+2026-10-21; the campaign passed. The operator runbook in
+[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) contains the
+authoritative execution record and remains a reusable procedure. It
+does not authorize further live email. The campaign is
+interoperability/smoke-test evidence, not production certification.
+Production hardening is not complete.
 
 ## 4. Reply and forward semantics
 
@@ -440,13 +445,23 @@ design. Production hardening is not complete.
 - Requires the `delete` capability. Trash is the only supported
   form for v1; no `delete_immediately` option.
 
-## 6. OAuth2 (deferred)
+## 6. OAuth2 (deferred) and app passwords
 
-If a target provider requires OAuth2 (none in the initial target
-list), TheMailroom will add an `auth` block with `method: oauth2`
-and an `oauth2` sub-block containing `token_command` (analogous to
-`password_command`). The token is refreshed on 401 responses. The
-implementation is intentionally deferred to a separate slice.
+Provider-issued app passwords are accepted through the existing
+`password` and `password_command` fields. There is no separate
+`app_password` field and no automatic conversion from OAuth2. IMAP and
+SMTP credentials are independent. This works for providers that enforce
+2FA by issuing an app password and that still allow IMAP `LOGIN` and
+SMTP AUTH PLAIN over verified TLS.
+
+OAuth2-only providers remain unsupported. This includes, for example,
+Microsoft 365 tenants where basic authentication is disabled and Google
+Workspace domains where app passwords are disabled by policy. If a
+target provider requires OAuth2, TheMailroom will add an `auth` block
+with `method: oauth2` and an `oauth2` sub-block containing
+`token_command` (analogous to `password_command`). The token would be
+refreshed on 401 responses. The implementation is intentionally deferred
+to a separate slice; app passwords do not remove that limitation.
 
 ## 7. Search correctness: deficiencies and their resolution
 
@@ -919,6 +934,10 @@ personal fork of go-imap is itself a maintenance risk that must
 be resolved (upstream the change, or replace the library) — see
 §8 and the fork's `CHANGES.md`. The search defects (§7) are fixed;
 attachment retrieval (§2.4) is merged (PR #8), and Phase 2.3 outbound
-submission is implemented. Controlled external SMTP testing has not yet
-been performed; the runbook is `docs/LIVE_SMTP_SMOKE_TEST.md`. Production
-readiness is tracked across `docs/PHASE2.2.md` and `docs/PHASE2.3.md`.
+submission is implemented and was exercised against Purelymail on
+2026-10-21. The authoritative record is
+`docs/LIVE_SMTP_SMOKE_TEST.md`; this is smoke/interoperability evidence,
+not production certification. Known residual risks include pre-limit
+JSON-RPC allocations and the IMAP `password_command` buffering path,
+recorded in `docs/THREAT_MODEL.md` §3.1. Production readiness is tracked
+across `docs/PHASE2.2.md` and `docs/PHASE2.3.md`.

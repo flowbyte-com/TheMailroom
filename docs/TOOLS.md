@@ -1,18 +1,20 @@
 # TheMailroom Tools
 
-> Status: Phase 2.3 implementation is complete on `main`. PR 1 is
-> **MERGED** (PR #10, `bf3618f247928ea1f1d2c687aac1cffd96a89070`),
-> PR 2 is **MERGED** (PR #11,
-> `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
-> (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
-> documentation closeout is GitHub PR #13; see that PR for its current
-> merge status. The read-only tools below and `send_message` are
-> implemented. Reply/forward, mailbox modification and deletion remain
-> future work. Controlled external SMTP testing has **not** been
-> performed; production hardening is not complete and TheMailroom is
-> not a production-hardened release. The operator runbook is
-> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) and has not been
-> executed.
+> Status: Phase 2.3 implementation and documentation closeout are
+> complete on `main`. PR 1 is **MERGED** (PR #10,
+> `bf3618f247928ea1f1d2c687aac1cffd96a89070`), PR 2 is **MERGED**
+> (PR #11, `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), PR 3 is
+> **MERGED** (PR #12,
+> `d1ecf774809681b2795a01f91182eec15a4b2f3f`), and PR 4 is **MERGED**
+> (PR #13, `a4851e9159af63026e5593f30988c114d7117261`). The read-only
+> tools below and `send_message` are implemented. Reply/forward, mailbox
+> modification and deletion remain future work. The controlled
+> Purelymail smoke-test campaign was executed on 2026-10-21 and passed;
+> the authoritative record is
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). It is
+> interoperability/smoke-test evidence, not production certification.
+> Production hardening is not complete and TheMailroom is not a
+> production-hardened release.
 
 Every tool:
 
@@ -187,6 +189,16 @@ be ASCII; SMTPUTF8 is not requested. Both `password` and
 `password_command` are supported for SMTP credentials; command execution
 is direct (no shell), bounded and cancellable.
 
+Provider-issued app passwords are accepted as ordinary opaque password
+values through `password` or `password_command`; there is no separate
+`app_password` field. IMAP and SMTP credentials are independent and may
+use different usernames, passwords or commands. IMAP uses `LOGIN` over
+verified TLS and SMTP uses AUTH PLAIN after verified TLS. OAuth2-only
+providers, IMAP servers that require `AUTHENTICATE` instead of `LOGIN`,
+and SMTP servers that do not advertise AUTH PLAIN are unsupported. A
+literal `password` remains plaintext at rest; prefer `password_command`
+and restrict the config file.
+
 **Transaction and outcomes.** After authentication the client issues
 `MAIL FROM`, then one `RCPT TO` for every unique policy-approved
 envelope recipient. DATA is issued only if every recipient was
@@ -216,9 +228,21 @@ outcome category and typed error code. They never contain message
 bodies, attachment contents, credentials, raw SMTP transcripts or the
 full recipient list.
 
-The controlled external smoke test for this tool is documented in
-[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). It has not been
-executed and does not authorize sending live email.
+**Known residual risks (Phase 3 hardening).** `max_message_bytes` bounds
+composition and post-decode preprocessing, not the initial JSON-RPC
+allocation of `text`, `html` or attachment arrays. The pre-existing IMAP
+`password_command` path uses unbounded stdout/stderr buffers and includes
+truncated stderr in internal errors; SMTP command output is bounded and
+excluded. Failure-outcome audit categories are not fully unit-tested.
+These do not change the documented Phase 2.3 acceptance results but are
+recorded in [`THREAT_MODEL.md`](THREAT_MODEL.md).
+
+The controlled external smoke test for this tool was executed against
+Purelymail on 2026-10-21 and passed. The authoritative results and
+qualifications are in
+[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). The campaign is
+interoperability/smoke-test evidence, not production certification, and
+it does not authorize further live email.
 
 ## Read-only tools
 

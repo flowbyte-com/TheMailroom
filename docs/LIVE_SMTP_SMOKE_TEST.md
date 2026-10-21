@@ -1,11 +1,40 @@
 # Live SMTP Smoke-Test Runbook
 
-> **Status: NOT EXECUTED.**
+> **Status: EXECUTED — PASS on 2026-10-21 against Purelymail.**
 >
-> This document is an operator checklist for a future, separately
-> authorized test. It is not authorization to send email, and creating it
-> does not execute it. Do not run this against production accounts or
-> real recipients.
+> This document is both the execution record for the completed campaign
+> and a reusable operator checklist for future, separately authorized
+> tests. It is not authorization to send email. Do not run it against
+> production accounts or real recipients without approval.
+>
+> The execution record below is authoritative for the 2026-10-21
+> campaign. The checklists later in this runbook are retained as the
+> reusable procedure; they are not a per-item transcript.
+
+## Execution record — 2026-10-21
+
+**Provider:** Purelymail, using a dedicated test account. The campaign
+was executed under separate authorization and did not change
+provider configuration.
+
+| Evidence class | Confirmed result |
+|---|---|
+| Live SMTP submission and received-message verification | Authenticated SMTP/TLS 1.3; plain-text delivery; multipart/alternative delivery with non-ASCII subject; attachment delivery with JPEG SHA-256 match; Bcc delivery without visible-header disclosure; returned Message-ID present in the received message; IMAP reply-threading interoperability |
+| Offline negative security controls | Allowlist rejection and confined-attachment traversal rejection returned the expected typed errors, made zero sender calls, and produced no live submission |
+| Audit observation | Structured audit records contained no credentials, command output, bodies, attachment contents, raw SMTP responses, full recipient lists or host filesystem paths |
+| Offline-only composition | Non-ASCII body composition was verified offline only; delivered multipart bodies were ASCII-only |
+| Not covered | OAuth2-only providers, provider-side Sent-folder behaviour, exhaustive failure/security testing, all providers, provider-wide certification and production certification |
+
+The received `.eml` evidence was independently reviewed. The live
+submissions are distinct from the allowlist and traversal controls,
+which were offline preflight tests and did not open SMTP. IMAP reply
+threading is an interoperability observation only; reply/forward is not
+implemented in Phase 2.3.
+
+**Qualification:** this is interoperability/smoke-test evidence, not
+exhaustive security testing or production certification. TLS 1.3 was
+observed; the client requires TLS 1.2 or newer. No credentials or
+personal addresses are recorded here.
 
 ## Purpose
 
@@ -56,7 +85,11 @@ receipt is still a failed smoke test for delivery.
 - [ ] The server advertises **AUTH PLAIN**. TheMailroom does not support
       other SMTP authentication mechanisms.
 - [ ] The credential source is verified. Prefer `password_command` over a
-      literal password in the file.
+      literal password in the file. Provider-issued app passwords may be
+      used through `password` or `password_command`; IMAP and SMTP
+      credentials are independent. IMAP uses `LOGIN` over verified TLS
+      and SMTP uses AUTH PLAIN after verified TLS. OAuth2-only providers
+      are unsupported.
 - [ ] The SMTP endpoint uses implicit TLS or mandatory STARTTLS, with a
       certificate valid for the configured host. There is no plaintext or
       skip-verification mode.
@@ -383,22 +416,25 @@ endpoint, TLS, credentials or recipient before a deliberate retry.
 
 ## Pass criteria
 
-The smoke test passes only when:
+The 2026-10-21 campaign met all of the following:
 
-- [ ] all intended live-send cases return `status: "submitted"`;
-- [ ] each recipient receives the expected message;
-- [ ] the preflight controls return their expected typed errors;
-- [ ] Bcc addresses and Bcc headers are absent from recipient headers;
-- [ ] attachment counts, byte totals and contents match;
-- [ ] returned Message-IDs match the delivered headers;
-- [ ] `send_message` audit records contain no secrets, bodies,
+- [x] all intended live-send cases returned `status: "submitted"`;
+- [x] each recipient received the expected message;
+- [x] the offline preflight controls returned their expected typed errors
+      and did not create an SMTP transaction;
+- [x] Bcc addresses and Bcc headers were absent from recipient headers;
+- [x] attachment counts, byte totals and contents matched, including the
+      JPEG SHA-256 check;
+- [x] returned Message-IDs matched the delivered headers;
+- [x] `send_message` audit records contained no secrets, bodies,
       attachment contents, raw SMTP responses, full recipient lists or
       host paths; and
-- [ ] Sent-folder behaviour is recorded as provider-specific, with no
-      expectation that TheMailroom created a copy.
+- [x] TheMailroom did not create an automatic Sent-folder copy;
+      provider-side Sent behaviour remains provider-specific and was not
+      used as delivery evidence.
 
-A failure in any case is an operational defect. Report code defects
-separately; do not patch production code as part of the live test.
+A failure in any future case is an operational defect. Report code
+defects separately; do not patch production code as part of a live test.
 
 ## Cleanup
 
@@ -419,4 +455,12 @@ separately; do not patch production code as part of the live test.
 - SMTPUTF8 envelope submission is unsupported; non-ASCII envelope
   addresses are rejected.
 - Production hardening is not complete.
-- Controlled external SMTP testing has not yet been performed.
+- OAuth2-only providers remain unsupported; app passwords work only
+  where the provider accepts them through IMAP `LOGIN` and SMTP AUTH
+  PLAIN.
+- The Purelymail campaign passed on 2026-10-21 and is interoperability
+  evidence, not production certification. Non-ASCII body composition was
+  tested offline only.
+- Residual risks include pre-limit JSON-RPC allocations and the
+  pre-existing IMAP `password_command` buffering path. See
+  [`THREAT_MODEL.md`](THREAT_MODEL.md) for the Phase 3 backlog.
