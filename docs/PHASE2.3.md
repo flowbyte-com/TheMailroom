@@ -1,17 +1,27 @@
 # Phase 2.3 Plan — Outbound submission foundations
 
-> **Status:** PR 1 (outbound security foundations) is **MERGED**
-> (PR #10, squash commit `bf3618f`). PR 2 (standalone MIME composer) is
-> **MERGED** (PR #11, squash commit `ab928c3`). PR 3 (authenticated SMTP
-> submission and `send_message`) is **IN REVIEW**. Reply/forward and
-> mailbox mutation remain unimplemented. TheMailroom is a development
-> milestone, not a production-hardened release. Phase 2.3 is **not**
-> done.
+> **Status:** Phase 2.3 implementation is complete on `main`; the
+> documentation closeout (PR 4) is **IN REVIEW**.
+>
+> - PR 1 (outbound security foundations) is **MERGED** (PR #10, squash
+>   commit `bf3618f247928ea1f1d2c687aac1cffd96a89070`).
+> - PR 2 (standalone MIME composer) is **MERGED** (PR #11, squash commit
+>   `ab928c3a33ac5b760ca714c6f915fcbfe4366212`).
+> - PR 3 (authenticated SMTP submission and `send_message`) is **MERGED**
+>   (PR #12, squash commit
+>   `d1ecf774809681b2795a01f91182eec15a4b2f3f`).
+>
+> Reply/forward and mailbox mutation remain unimplemented. Controlled
+> external SMTP testing has **not** been performed and production
+> hardening is not complete. TheMailroom is a development milestone, not
+> a production-hardened release. The operator runbook in
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) has not been
+> executed.
 
 ## Scope
 
-Phase 2.3 prepares and then enables the outbound path in separately
-reviewed slices. The full milestone covers:
+Phase 2.3 implemented the outbound path in separately reviewed slices.
+The milestone covers:
 
 - RFC 5322 / MIME composition, including text and HTML bodies.
 - Multiple outbound attachments with a fixed `From` identity.
@@ -23,8 +33,10 @@ mailbox-mutating operations are out of scope for this milestone.
 
 ## PR 1 — Outbound security foundations (MERGED, PR #10)
 
-PR 1 was additive and did not register `send_message`, create an SMTP
-client, or compose MIME. It provides:
+PR 1 was squash-merged as
+`bf3618f247928ea1f1d2c687aac1cffd96a89070`. It was additive and did
+not register `send_message`, create an SMTP client, or compose MIME. It
+provides:
 
 ### Conditional SMTP validation
 
@@ -124,9 +136,10 @@ root paths.
 
 ## PR 2 — Standalone MIME composer (MERGED, PR #11)
 
-PR 2 was squash-merged as `ab928c3`. It added `internal/mailcompose`, a
-pure, in-memory RFC 5322 / MIME message-construction component. As
-merged, that PR did **not**:
+PR 2 was squash-merged as
+`ab928c3a33ac5b760ca714c6f915fcbfe4366212`. It added
+`internal/mailcompose`, a pure, in-memory RFC 5322 / MIME
+message-construction component. As merged, that PR did **not**:
 
 - open an SMTP connection;
 - register `send_message`;
@@ -243,8 +256,8 @@ Typed errors distinguish invalid message/header input, invalid
 attachment metadata, too many attachments, per-attachment size, total
 attachment size, serialized message size, MIME composition failure and
 invalid limits. Error text does not echo attachment contents,
-credentials or untrusted raw header input. These errors are suitable
-for mapping to MCP typed errors when a sender is added.
+credentials or untrusted raw header input. The `send_message` handler
+maps these errors to MCP typed errors.
 
 ### Tests
 
@@ -261,8 +274,9 @@ results, repeated composition and concurrent composition.
 ### Known limitations at PR 2 merge
 
 - At PR 2 merge, no SMTP client, `send_message`, reply/forward,
-  Sent-folder copy, retry, queue or background worker existed. PR 3 adds
-  the SMTP client and `send_message`; the other limitations remain.
+  Sent-folder copy, retry, queue or background worker existed. PR 3 added
+  the SMTP client and `send_message`; the remaining limitations still
+  apply.
 - The composer does not enforce `allowed_recipients` or
   `max_recipients`; the PR 3 sender runs `recipients.Policy`.
 - `From` is trusted input. The composer canonicalises it but cannot
@@ -279,13 +293,15 @@ results, repeated composition and concurrent composition.
 - The Message-ID is generated in memory. A caller that discards the
   prepared bytes and re-composes will receive a new identity.
 
-## PR 3 — SMTP sender and `send_message` (IN REVIEW)
+## PR 3 — SMTP sender and `send_message` (MERGED, PR #12)
 
-PR 3 adds `internal/smtpclient` and registers the MCP `send_message`
-tool. It uses `github.com/emersion/go-smtp` v0.25.0 and
-`github.com/emersion/go-sasl` for the SMTP transaction and PLAIN
-authentication. The sender is a separate interface; no sending method
-was added to `mailbox.Backend`.
+PR 3 was squash-merged as
+`d1ecf774809681b2795a01f91182eec15a4b2f3f` (reviewed head
+`e40bd26fac4e17490652ef0d9712ae24591a5258`) after HAL approval. It added
+`internal/smtpclient` and registered the MCP `send_message` tool. It uses
+`github.com/emersion/go-smtp` v0.25.0 and `github.com/emersion/go-sasl`
+for the SMTP transaction and PLAIN authentication. The sender is a
+separate interface; no sending method was added to `mailbox.Backend`.
 
 ### Sender architecture
 
@@ -370,19 +386,20 @@ The handler performs these steps in order, before any SMTP connection:
 
 1. Look up `account_id`.
 2. Require the `send` capability.
-3. Bound the raw To/Cc/Bcc entry count and aggregate bytes against
+3. Bound the raw From/To/Cc/Bcc entry count and aggregate bytes against
    `max_message_bytes`, before parsing any address.
-4. Validate and canonicalize all To/Cc/Bcc addresses.
+4. Canonicalize the configured `From` and all To/Cc/Bcc addresses.
 5. Apply the exact recipient allow-list and unique-recipient limit.
-6. Require `attachment_send` when attachments are present.
-7. Resolve and freeze attachments through the confined resolver.
-8. Compose the complete serialized RFC 5322/MIME message.
-9. Enforce `max_message_bytes` on the final serialized bytes.
-10. Retain the generated Message-ID and immutable bytes for submission.
+6. Reject any non-ASCII envelope address; SMTPUTF8 is not supported.
+7. Require `attachment_send` when attachments are present.
+8. Resolve and freeze attachments through the confined resolver.
+9. Compose the complete serialized RFC 5322/MIME message.
+10. Enforce `max_message_bytes` on the final serialized bytes.
+11. Retain the generated Message-ID and immutable bytes for submission.
 
 Any preflight error means zero SMTP connections and zero submission
-attempts. The sender also validates the final request before dialing as
-defence in depth.
+attempts. The sender also validates the final request and resolves
+credentials before dialing as defence in depth.
 
 ### Outcome classification
 
@@ -446,22 +463,37 @@ injection. Coverage includes:
 - SMTPUTF8 rejection before dialing; and
 - concurrent submissions for multiple accounts, including `-race`.
 
-## PR 4 — Closeout (planned, not started)
+## PR 4 — Documentation closeout (IN REVIEW)
 
-PR 3 updates the current tool contract, architecture, threat model,
-README and example configuration. PR 4 will reconcile any review
-feedback, record the final verification evidence, and mark Phase 2.3
-done only after the sender is merged and the closeout lands.
+PR 4 is documentation-only. It does not change sender behavior, the
+configuration schema, Go production code, dependencies or tests. It:
 
-## Explicit non-goals for PR 3
+- records the exact squash commits for PRs #10, #11 and #12;
+- reconciles the README, architecture, threat model, tool contract,
+  design notes and example configuration with the merged implementation;
+- adds the operator runbook in
+  [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) and states
+  explicitly that it has not been executed.
 
+Phase 2.3 implementation is complete on `main`; this closeout remains
+**IN REVIEW** until it is reviewed and merged. Controlled external SMTP
+testing is a separate operational activity and requires explicit
+authorization. It has not been performed.
+
+## Explicit limitations and non-goals
+
+- SMTP acceptance is not guaranteed final mailbox delivery.
 - No reply or forward.
 - No mailbox mutation, deletion or automatic Sent-folder copy.
-- No queues, retries, durable spooling or background sending.
-- No provider-specific adapters or provider administration.
+- No queues, retries, durable spooling, background sending or
+  prepared-message replay API.
+- No provider-specific adapters, provider administration or provider
+  certification.
 - No OAuth2, DKIM, ARC, S/MIME or PGP.
 - No arbitrary MIME, caller-supplied headers, caller-selected From,
   raw SMTP commands, credentials or filesystem-root access.
 - No plaintext SMTP, disabled certificate verification or SMTPUTF8
   envelope addresses.
 - No unrelated IMAP hardening.
+- Controlled external SMTP testing has not been performed; production
+  hardening is not complete and TheMailroom is not production-ready.

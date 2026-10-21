@@ -1,11 +1,18 @@
 # TheMailroom Tools
 
-> Status: Phase 2.3 PR 1 is **MERGED** (PR #10) and PR 2 is **MERGED**
-> (PR #11). PR 3 (authenticated SMTP submission and `send_message`) is
-> **IN REVIEW**. The read-only tools below and `send_message` are
-> implemented. Reply/forward, mailbox modification and deletion remain
-> future work. TheMailroom is a development milestone, not a
-> production-hardened release; Phase 2.3 is **not** done.
+> Status: Phase 2.3 implementation is complete on `main`. PR 1 is
+> **MERGED** (PR #10, `bf3618f247928ea1f1d2c687aac1cffd96a89070`),
+> PR 2 is **MERGED** (PR #11,
+> `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
+> (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
+> documentation closeout (PR 4) is **IN REVIEW**. The read-only tools
+> below and `send_message` are implemented. Reply/forward, mailbox
+> modification and deletion remain future work. Controlled external SMTP
+> testing has **not** been performed; production hardening is not
+> complete and TheMailroom is not a production-hardened release. The
+> operator runbook is
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) and has not been
+> executed.
 
 Every tool:
 
@@ -32,11 +39,14 @@ All account-scoped tools take `account_id` as a required string field. There is 
 
 - `InvalidInput` — schema or business validation failed.
 - `AccountNotFound` — `account_id` not configured.
+- `MailboxNotFound` — the requested mailbox does not exist.
+- `MessageNotFound` — the requested UID does not exist in the mailbox.
 - `PermissionDenied` — capability not granted.
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
 - `NotImplemented` — capability exists in the schema but is not yet wired.
-- `MessageTooLarge` — raw To/Cc/Bcc input or the serialized message
+- `InternalError` — an unexpected internal failure; details are suppressed.
+- `MessageTooLarge` — raw From/To/Cc/Bcc input or the serialized message
   exceeds `max_message_bytes`, or an ordinary body part exceeds the
   per-part cap during `read_attachment` validation.
 - `NestingTooDeep` — the MIME nesting exceeds `max_mime_nesting`.
@@ -136,18 +146,19 @@ following before opening any SMTP connection:
 
 1. Look up `account_id`.
 2. Require `send`.
-3. Bound the raw To/Cc/Bcc entry count and aggregate bytes against
+3. Bound the raw From/To/Cc/Bcc entry count and aggregate bytes against
    `max_message_bytes`, before parsing any address.
-4. Canonicalise To, Cc and Bcc.
+4. Canonicalise the configured `From`, To, Cc and Bcc.
 5. Enforce the exact recipient allow-list, at least one recipient, and
    the unique `max_recipients` limit.
-6. Require `attachment_send` when attachments are present.
-7. Resolve and freeze attachments inside the account's configured
+6. Reject any non-ASCII envelope address; SMTPUTF8 is unsupported.
+7. Require `attachment_send` when attachments are present.
+8. Resolve and freeze attachments inside the account's configured
    roots.
-8. Compose the complete RFC 5322/MIME message with the account identity
+9. Compose the complete RFC 5322/MIME message with the account identity
    as `From`.
-9. Enforce `max_message_bytes` on the final serialized message.
-10. Retain that Message-ID and those bytes for the sender.
+10. Enforce `max_message_bytes` on the final serialized message.
+11. Retain that Message-ID and those bytes for the sender.
 
 Any preflight error means no SMTP connection or submission attempt.
 
@@ -161,10 +172,10 @@ Any preflight error means no SMTP connection or submission attempt.
 - `max_attachment_bytes` / `max_total_attachment_bytes` /
   `max_attachments` — bound frozen attachments resolved by
   `internal/attachments`.
-- `max_message_bytes` — bounds raw To/Cc/Bcc entry count and aggregate
-  bytes before address parsing, is enforced by `internal/mailcompose`
-  on header preparation and the final serialized message, and is
-  re-checked by the tool before SMTP.
+- `max_message_bytes` — bounds raw From/To/Cc/Bcc entry count and
+  aggregate bytes before address parsing, is enforced by
+  `internal/mailcompose` on header preparation and the final serialized
+  message, and is re-checked by the tool before SMTP.
 
 **SMTP transport.** Exactly one short-lived connection is used per call;
 there is no pooling, queue, background worker or retry. The client
@@ -204,6 +215,10 @@ Message-ID, recipient count, attachment count, total attachment bytes,
 outcome category and typed error code. They never contain message
 bodies, attachment contents, credentials, raw SMTP transcripts or the
 full recipient list.
+
+The controlled external smoke test for this tool is documented in
+[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). It has not been
+executed and does not authorize sending live email.
 
 ## Read-only tools
 

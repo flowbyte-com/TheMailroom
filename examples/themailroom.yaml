@@ -4,10 +4,12 @@
 # The server validates this file on startup; unknown fields and
 # duplicate keys are rejected, and the schema is otherwise strict.
 #
-# Outbound submission is implemented in Phase 2.3 PR 3. An account with
+# Outbound submission is implemented (Phase 2.3, PR #12). An account with
 # the "send" capability can use the send_message MCP tool. Submission is
 # TLS-only (implicit TLS or mandatory STARTTLS) and authenticates with
-# AUTH PLAIN; the server must advertise that mechanism.
+# AUTH PLAIN; the server must advertise that mechanism. Controlled
+# external SMTP testing has not been performed. See
+# docs/LIVE_SMTP_SMOKE_TEST.md (not yet executed).
 
 server:
   log_level: info            # debug, info, warn, error
@@ -58,13 +60,13 @@ accounts:
 
     attachment_send_paths: []        # empty = no outbound attachment source
 
-  # A second account that can send. Phase 2.3 PR 1 validates this
-  # configuration and opens the attachment roots; PR 2 provides the
-  # bounded MIME composer; PR 3 provides the authenticated SMTP sender and
-  # registers send_message. Successful submission means the SMTP server
-  # accepted the message after DATA; it is not final mailbox delivery.
-  # No automatic Sent-folder copy is made, and ambiguous outcomes are
-  # never retried automatically.
+  # A second account that can send. Phase 2.3 PR 1 validated this
+  # configuration and opened the attachment roots; PR 2 provided the
+  # bounded MIME composer; PR 3 provided the authenticated SMTP sender and
+  # registered send_message. All three PRs are merged. Successful
+  # submission means the SMTP server accepted the message after DATA; it
+  # is not final mailbox delivery. No automatic Sent-folder copy is made,
+  # and ambiguous outcomes are never retried automatically.
   - id: work
     email: alice@work.example.test
     imap:

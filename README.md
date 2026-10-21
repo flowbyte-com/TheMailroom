@@ -21,27 +21,40 @@ and `SMTP`. It is designed to be:
   [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk).
 - Tool surface: read-only `list_accounts`, `list_mailboxes`,
   `list_messages`, `read_message`, `search_messages`, plus
-  authenticated `send_message` (Phase 2.3 PR 3, in review).
+  authenticated `send_message` (Phase 2.3, merged as PR #12).
 - YAML configuration with credential-via-command (`pass`, `secret-tool`).
 - Permission and limit enforcement server-side.
 - An in-memory backend (loads `.eml` files) for tests and local
   development.
 
-**Phase 2 (Mail functionality)** is in progress. **Phase 2.1**
+**Phase 2 (Mail functionality)** is implemented through Phase 2.3;
+production hardening remains future work. **Phase 2.1**
 (read-only IMAP correctness + MIME reading) is merged on `main`
 (PR #3), and all three **Phase 2.2** priorities are complete:
 protocol-level IMAP literal-size enforcement (PR #5), IMAP search
 correctness (PR #6), and secure inbound attachment retrieval (PR #8).
 The Phase 2.2 documentation closeout is merged as PR #9.
 
-**Phase 2.3 (Outbound submission)** is in progress.
-PR 1 (merged as PR #10) added conditional SMTP configuration validation,
-the recipient policy, the confined outbound attachment resolver, and
-safer `list_accounts` output. PR 2 (merged as PR #11) added the
-standalone, bounded MIME composer. PR 3 adds authenticated SMTP
-submission and the `send_message` tool and is **IN REVIEW**. Reply/forward,
-mailbox mutation and automatic Sent copies remain future work; Phase 2.3
-is **not** done. The plan is in [`docs/PHASE2.3.md`](docs/PHASE2.3.md).
+**Phase 2.3 (Outbound submission)** implementation is complete on
+`main`; the documentation closeout is **IN REVIEW**. PR 1 added
+conditional SMTP configuration validation, the recipient policy, the
+confined outbound attachment resolver, and safer `list_accounts`
+output. PR 2 added the standalone, bounded MIME composer. PR 3 added
+authenticated SMTP submission and the `send_message` tool.
+
+| PR | Scope | Squash commit |
+|---|---|---|
+| #10 | Outbound security foundations | `bf3618f247928ea1f1d2c687aac1cffd96a89070` |
+| #11 | Bounded MIME composer | `ab928c3a33ac5b760ca714c6f915fcbfe4366212` |
+| #12 | Authenticated SMTP submission and `send_message` | `d1ecf774809681b2795a01f91182eec15a4b2f3f` |
+
+Reply/forward, mailbox mutation and automatic Sent copies remain
+future work. Controlled external SMTP testing has **not** been
+performed, and Phase 2.3 is not a production-hardened outbound system.
+The plan and explicit limitations are in
+[`docs/PHASE2.3.md`](docs/PHASE2.3.md); the not-yet-executed operator
+runbook is
+[`docs/LIVE_SMTP_SMOKE_TEST.md`](docs/LIVE_SMTP_SMOKE_TEST.md).
 
 TheMailroom is a **development milestone, not a
 production-hardened release**. The IMAP literal-size
@@ -50,8 +63,8 @@ fork of go-imap that must still be upstreamed or replaced (see
 [`docs/PHASE2_DESIGN.md`](docs/PHASE2_DESIGN.md) §8). Inbound
 attachment retrieval is merged (PR #8). MIME composition and
 authenticated SMTP submission are implemented for `send_message`, but
-Phase 2.3 is still in review and is not a production-hardened outbound
-system.
+the sender has not been exercised against a controlled external SMTP
+service and production hardening remains outstanding.
 
 Phase 2.1 ships:
 
@@ -83,12 +96,14 @@ Outbound `send_message` is implemented in Phase 2.3 PR 3, but
 reply/forward and mutating mailbox operations remain unimplemented.
 Phase 2.3 PR 1 prepared the configuration, recipient-policy, and
 confined attachment-resolution foundations; PR 2 added the bounded MIME
-composer; PR 3 adds the authenticated SMTP sender.
+composer; PR 3 added the authenticated SMTP sender.
 
 **Phase 3 (Hardening)** will cover the remaining production gates,
 including bounded IMAP list/search workloads, explicit IMAP command
 timeouts, `has_attachments` for IMAP summaries, response-size limits,
-fuzz tests, installation docs, and a cross-platform release.
+fuzz tests, installation docs, and a cross-platform release. Controlled
+external SMTP testing of the Phase 2.3 sender is tracked separately and
+has not been performed.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and
@@ -207,9 +222,10 @@ certificate, requires TLS 1.2+, and authenticates only with AUTH PLAIN
 after TLS. All unique To/Cc/Bcc recipients are sent as envelope `RCPT TO`
 before DATA; Bcc never appears in headers. A successful result means the
 SMTP server accepted the message after DATA, not that it reached every
-mailbox. There is no automatic Sent copy and no retry. A failure after
-DATA begins is reported as an ambiguous submission with the original
-Message-ID and must not be retried automatically.
+mailbox. There is no automatic Sent copy, durable queue, prepared-message
+replay API or retry, and SMTPUTF8 envelope submission is unsupported. A
+failure after DATA begins is reported as an ambiguous submission with the
+original Message-ID and must not be retried automatically.
 
 ## Run
 
