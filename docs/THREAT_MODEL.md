@@ -1,9 +1,10 @@
 # TheMailroom Threat Model
 
-> Status: Phase 2.3 PR 2 is **IN REVIEW**. Controls marked
-> **(implemented)** are present in the current code; controls marked
-> **(planned)** are not. In particular, the bounded MIME composer is
-> implemented, but SMTP submission and `send_message` are not.
+> Status: Phase 2.3 PR 1 is **MERGED** (PR #10) and PR 2 is **MERGED**
+> (PR #11). PR 3 (authenticated SMTP submission and `send_message`) is
+> **IN REVIEW**. Controls marked **(implemented)** are present in the
+> current code; controls marked **(planned)** are not. Phase 2.3 is
+> **not** done.
 
 ## 1. Trust boundaries
 
@@ -55,7 +56,10 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 - **(implemented)** `panic` recovery in `cmd/themailroom` logs a redacted diagnostic and exits; it does not print a stack trace with secrets.
 - **(implemented)** `password_command` (pass, secret-tool) is the recommended credential source so secrets never live in the config file.
 - **(implemented)** `validateAuth` rejects configurations with neither `password` nor `password_command`, and rejects configurations that set both.
-- **(implemented for the outbound resolver)** `os.Root` confines local attachment reads to the configured roots; symlink escapes, traversal, absolute paths and ambiguous matches are rejected. No SMTP sender or send tool uses the resolver yet.
+- **(implemented, PR 1/PR 3)** `os.Root` confines local attachment reads to the configured roots; symlink escapes, traversal, absolute paths and ambiguous matches are rejected. `send_message` uses this resolver and freezes the bytes before opening SMTP.
+- **(implemented, PR 3)** The SMTP password is retained in an unexported field on the runtime account and passed directly to the sender. It is absent from `Account.View`, `list_accounts`, audit logs, error messages and sender errors.
+- **(implemented, PR 3)** `password_command` runs directly with no shell interpolation, a bounded context, bounded stdout and a bounded wait for inherited pipe handles. Output is never included in errors or logs.
+- **(implemented, PR 3)** SMTP errors are mapped to generic typed errors. Raw server responses, commands, recipient addresses and credentials are not included.
 
 **Residual risk.** Misconfigured logging at the host can capture secrets; documented in README.
 
@@ -65,12 +69,13 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 **Mitigations.**
 
-- **(implemented)** The `send` capability is disabled by default. No send tool is registered yet, so no account can send in this slice.
-- **(implemented, not yet wired to a sender)** The recipient policy parses and canonicalises To/Cc/Bcc, rejects empty, malformed and control-character-containing addresses, enforces `max_recipients` (default 50), and supports an optional exact `allowed_recipients` allow-list. Empty allow-list permits any recipient. Matching is exact after canonicalisation: local-part case is preserved and significant, domain case is normalized; there are no wildcard or substring rules. Local-parts that differ only by case are distinct recipients.
-- **(implemented, PR 2, not yet wired)** The MIME composer canonicalises addresses with the same rules, rejects header injection in Subject, addresses and attachment filenames, and never serializes Bcc. It does not enforce the allow-list or recipient count; that remains the sender's responsibility.
-- **(planned)** The future `send_message` handler must invoke the recipient policy before opening SMTP and must not bypass it.
+- **(implemented)** The `send` capability is disabled by default. `send_message` is registered only as a capability-gated tool; without the per-account `send` capability it returns `PermissionDenied` before any SMTP connection.
+- **(implemented, PR 3)** `send_message` parses and canonicalises To/Cc/Bcc, rejects empty, malformed and control-character-containing addresses, enforces `max_recipients` (default 50), and supports an optional exact `allowed_recipients` allow-list. Empty allow-list permits any recipient. Matching is exact after canonicalisation: local-part case is preserved and significant, domain case is normalized; there are no wildcard or substring rules. Local-parts that differ only by case are distinct recipients.
+- **(implemented, PR 3)** The MIME composer canonicalises addresses with the same rules, rejects header injection in Subject, addresses and attachment filenames, and never serializes Bcc. The handler enforces the allow-list and recipient count before starting the sender.
+- **(implemented, PR 3)** The full preflight sequence runs before any SMTP connection: account lookup, `send`, a raw To/Cc/Bcc count/byte budget, recipient policy, `attachment_send`, attachment resolution, MIME composition and final serialized size. A preflight failure means zero SMTP connections.
+- **(implemented, PR 3)** SMTP submission uses one connection and one transaction, AUTH PLAIN only after verified TLS, and no retry. A failure after DATA begins is reported as ambiguous with the original Message-ID rather than retried.
 - **(planned)** Rate-limit sending (e.g. max N messages per hour) to bound blast radius.
-- **(planned)** All sends are logged with a structured record including account ID, recipients, message size.
+- **(implemented, PR 3)** Sends are logged with a structured record containing account ID, Message-ID, recipient count, attachment count, total attachment bytes, outcome category and typed error code. Bodies, attachment contents, credentials, raw SMTP transcripts and full recipient lists are not logged.
 
 **Residual risk.** A user who enables `send` exposes the full account; this is the intended trust model.
 
@@ -88,8 +93,8 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   - A MIME part-count cap (`max_mime_parts`, default 500).
   - An attachment count cap (`max_attachments`, default 50).
   - Filename sanitisation in attachment metadata (no path separators, no NULs).
-- **(implemented for inbound retrieval)** Attachment content is returned in memory; MIME parsing never writes to disk. Outbound local attachments are read through the `os.Root` resolver described in T5, but no sender uses it yet.
-- **(implemented, PR 2)** The outbound composer re-checks per-attachment, total-attachment and attachment-count limits even when called directly. A bounded writer measures the final serialized RFC 5322 message, including headers, MIME boundaries, quoted-printable and base64 expansion. Exactly `max_message_bytes` succeeds; any larger message returns a typed error and no partial bytes. The same limit bounds subject/filename input and aggregate address header preparation before RFC 2047/RFC 2231 encoding, preventing a small serialized limit from being bypassed by expensive header expansion. The composer performs no filesystem reads or writes, uses a fixed in-process extension table for attachment content types, and accepts no paths or raw MIME fragments.
+- **(implemented for inbound retrieval)** Attachment content is returned in memory; MIME parsing never writes to disk. Outbound local attachments are read through the `os.Root` resolver described in T5 and frozen by `send_message` before SMTP; the sender never receives a path.
+- **(implemented, PR 2/PR 3)** The outbound composer re-checks per-attachment, total-attachment and attachment-count limits even when called directly. A bounded writer measures the final serialized RFC 5322 message, including headers, MIME boundaries, quoted-printable and base64 expansion. Exactly `max_message_bytes` succeeds; any larger message returns a typed error and no partial bytes. The same limit bounds subject/filename input and aggregate address header preparation before RFC 2047/RFC 2231 encoding, preventing a small serialized limit from being bypassed by expensive header expansion. Before any address parsing or recipient-policy map/slice construction, `send_message` applies the same `max_message_bytes` budget to the raw To/Cc/Bcc entry count and aggregate bytes; a repeated or oversized list is rejected with a typed error and zero SMTP connections. The composer performs no filesystem reads or writes, uses a fixed in-process extension table for attachment content types, and accepts no paths or raw MIME fragments. `send_message` independently checks the final length before dialing.
 - **(implemented)** For `read_message`/`Parse`, unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide. `read_attachment` fails closed on unknown transfer encodings and on a selected text attachment with an unknown charset; unrelated charset warnings remain non-fatal.
 - **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. The `read_attachment` tool materialises exactly one explicitly requested part after validating the complete message and its limits. It rejects containers, body parts, missing parts and hidden descendants of opaque `message/rfc822` attachments. Extraction is fail-closed: a malformed sibling, body read or transfer-decoding failure, unknown transfer encoding, or oversized ordinary body part returns a typed error and no content, even if the requested part was already captured. Unrelated charset warnings remain non-fatal; a selected text attachment with an unknown charset is rejected rather than returned undecoded. Text parts are charset-decoded to UTF-8 where possible, so text content may be normalised; binary transfer-encoded content is decoded to its original bytes. Base64 output expands the response by roughly one third, and default maximum-size attachments can produce very large tool responses; this is a documented operational consideration, not an automatic fetch.
 - **(implemented)** `read_attachment` accepts no filesystem path. Its only reference inputs are account, mailbox, UID, UIDVALIDITY and the `read_message` part path; part syntax, length, depth and component bounds are validated before retrieval. Retrieved filenames and MIME types remain untrusted metadata and are never opened, executed or written to disk.
@@ -173,9 +178,9 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   bounded by actual bytes read, not a prior metadata size. Per-file and
   aggregate decoded limits are enforced, and the returned content is
   frozen in memory. No host path is returned to the agent.
-- **(implemented, PR 1)** Empty `attachment_send_paths` means no resolver
-  is created, so there is no attachment source. There is still no send
-  tool to invoke either path.
+- **(implemented, PR 1/PR 3)** Empty `attachment_send_paths` means no
+  resolver is created, so there is no attachment source. `send_message`
+  requires `attachment_send` before using the resolver.
 - **(implemented, PR 2)** `internal/mailcompose` consumes only the
   resolver's frozen `[]attachments.File` data. It has no path field and
   performs no filesystem access, so it cannot reopen a source or race a
@@ -220,15 +225,16 @@ double-resolution approach described here.
 - **(planned)** Trash / Deleted Messages handling honours provider folder names (`Trash`, `INBOX.Trash`, `[Gmail]/Trash`).
 - **(implemented)** No read operation mutates: `read_message` and `read_attachment` use `UID FETCH BODY.PEEK[]` (does not set `\Seen`); `list_messages`, `search_messages`, `list_mailboxes` are pure queries. The IMAP backend issues `EXAMINE` (read-only `SELECT`) so the server-side state cannot accept `STORE` or `APPEND` through a read connection.
 
-### T8. SMTP duplicate sends
+### T8. SMTP duplicate sends and ambiguous outcomes
 
 **Threat.** Network failure between submission and acknowledgement causes the client to retry, producing duplicate emails.
 
 **Mitigations.**
 
-- **(planned)** The SMTP submission path uses a single `MAIL FROM` / `RCPT TO` / `DATA` cycle. On transient network failure before the server's `250` confirmation, the message is treated as not sent and the error is returned. No retry.
-- **(implemented, PR 2; not yet exposed)** The composer generates exactly one RFC 5322 Message-ID per composition, embeds it in the headers and returns it separately. The future sender must report that value on an ambiguous failure instead of generating a second identity. TheMailroom does not retry on ambiguity.
-- **(planned)** The tool returns the `message_id` and the agent can correlate. The SMTP envelope is logged once per send for audit.
+- **(implemented, PR 3)** The SMTP submission path uses exactly one `MAIL FROM` / `RCPT TO` / `DATA` cycle. There is no retry, pipelining, queue or background worker.
+- **(implemented, PR 2/PR 3)** The composer generates exactly one RFC 5322 Message-ID per composition, embeds it in the headers and returns it separately. The sender reports that same value on an ambiguous failure instead of generating a second identity. TheMailroom never retries on ambiguity.
+- **(implemented, PR 3)** A failure before DATA is definite and returns a typed failure. A failure after DATA begins but before a definitive final response returns `SmtpAmbiguousFailure` with `message_id` and `may_have_been_sent: true`; the message is not reported as non-delivery.
+- **(implemented, PR 3)** The tool returns the `message_id` on success and on an ambiguous failure. Audit records contain counts and outcome, not the full recipient list or message body.
 
 ### T9. Filesystem writes from MCP
 
@@ -246,6 +252,18 @@ double-resolution approach described here.
 
 - **(implemented)** Only the configured MCP transport is bound. There is no HTTP listener.
 - **(planned)** JSON-RPC framing errors are logged and the connection is closed; partial messages are not executed.
+
+### T11. SMTP downgrade, envelope injection and authentication exposure
+
+**Threat.** An active network attacker strips STARTTLS, presents an invalid certificate, or induces the client to send credentials or attacker-controlled SMTP commands.
+
+**Mitigations.**
+
+- **(implemented, PR 3)** The SMTP client accepts only implicit TLS or mandatory STARTTLS. A missing or refused STARTTLS and certificate/handshake failures are definite `SmtpTLSFailed`; a TLS-stage timeout is `SmtpTimeout`. There is no plaintext fallback.
+- **(implemented, PR 3)** Certificates and hostnames are verified against the configured SMTP host with `ServerName`; TLS 1.2 is the minimum. No configuration can disable verification.
+- **(implemented, PR 3)** AUTH PLAIN is sent only after verified TLS and only when the server advertises the mechanism. Otherwise authentication fails before credentials are sent.
+- **(implemented, PR 3)** Envelope addresses are parsed and canonicalised by `internal/recipients`, then checked to be ASCII. CR/LF and control characters are rejected before the command is built; SMTPUTF8 is not requested. There is no caller-supplied From, raw SMTP command or arbitrary header.
+- **(implemented, PR 3)** SMTP server responses are converted to generic typed errors. Raw response text, command transcripts and credentials never reach the MCP client or audit log.
 
 ## 3. Out-of-scope threats (explicitly documented)
 

@@ -57,7 +57,7 @@ func New(reg *accounts.Registry, opts Options) (*Server, error) {
 	}
 	mcpServer := mcp.NewServer(mcpImpl, serverOpts)
 
-	tools.Register(mcpServer, reg)
+	tools.Register(mcpServer, reg, tools.WithLogger(opts.Logger))
 
 	return &Server{
 		mcp:      mcpServer,

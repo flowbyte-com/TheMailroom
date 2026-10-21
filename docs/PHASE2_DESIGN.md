@@ -1,15 +1,16 @@
 # Phase 2 Design Notes
 
-> Status: Phase 2.3 PR 2 is **IN REVIEW**. Phase 2.1 (read-only IMAP
-> correctness + MIME reading) is implemented in `internal/imapclient`
-> and `internal/mimeparse`. Phase 2.2 is complete, including inbound
-> `read_attachment` (PR #8). Phase 2.3 PR 1 (merged as PR #10)
-> implements the recipient policy, conditional SMTP configuration
+> Status: Phase 2.3 PR 1 is **MERGED** (PR #10), PR 2 is **MERGED**
+> (PR #11), and PR 3 (authenticated SMTP submission and `send_message`)
+> is **IN REVIEW**. Phase 2.1 (read-only IMAP correctness + MIME reading)
+> is implemented in `internal/imapclient` and `internal/mimeparse`.
+> Phase 2.2 is complete, including inbound `read_attachment` (PR #8).
+> PR 1 implements the recipient policy, conditional SMTP configuration
 > validation, and the confined outbound attachment resolver. PR 2
 > implements the standalone bounded MIME composer in
-> `internal/mailcompose`. SMTP submission, `send_message`,
-> reply/forward, and protected mailbox modifications are **not**
-> implemented.
+> `internal/mailcompose`. PR 3 implements `internal/smtpclient` and the
+> `send_message` tool. Reply/forward, mailbox mutation and automatic
+> Sent copies are **not** implemented.
 
 ## 1. Library selection (post-research)
 
@@ -17,10 +18,10 @@
 |----------------------|--------------------------------------|----------|
 | IMAP client          | `github.com/emersion/go-imap` v1.2.1 | **Selected.** v1 is the stable, production-tracked line. v2 is parallel development, not yet marked stable. TheMailroom will move to v2 only when upstream tags a stable release. |
 | IMAP server (tests)  | `github.com/emersion/go-imap/server` + `backend/memory` | **Selected.** Spin up a real IMAP4rev1 server in-process for tests. |
-| SMTP client          | `github.com/emersion/go-smtp` v0.25.0 | **Selected for Phase 2.3 PR 3.** Not yet a dependency or implemented. |
+| SMTP client          | `github.com/emersion/go-smtp` v0.25.0 | **Selected and implemented in Phase 2.3 PR 3.** Used through its low-level `Mail`/`Rcpt`/`Data` client API; the automatic `SendMail` convenience path is not used. |
 | MIME parser/composer | `github.com/emersion/go-message` v0.18.2 | **Selected.** Charset-aware, multipart-aware, RFC 2047 handling. **Parser implemented in Phase 2.1** as `internal/mimeparse`; **bounded composer implemented in Phase 2.3 PR 2** as `internal/mailcompose`. |
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+) | **Selected.** OS-level confinement; prevents symlink escape. |
-| Self-signed test CA  | `crypto/rsa`, `crypto/x509`, `crypto/tls` (stdlib) | **Selected.** Generate certs in tests; trust via `InsecureSkipVerify` only in the test-only `Options.TLSConfig` knob. |
+| Self-signed test CA  | `crypto/ecdsa`, `crypto/x509`, `crypto/tls` (stdlib) | **Selected.** Generate certs in tests and trust them through a test-only `RootCAs` pool. Production never disables certificate or hostname verification. |
 
 ## 2. Attachment reference model
 
@@ -36,8 +37,8 @@ The MCP tool surface accepts two attachment references:
 1. **Path reference** — a string. The path is resolved against the
    account's `attachment_send_paths` roots. Allowed only when the
    account has the `attachment_send` capability. Refused outright if
-   the resolved path escapes any root. The resolver is implemented in
-   Phase 2.3 PR 1; no send tool accepts a reference yet.
+   the resolved path escapes any root. The resolver was implemented in
+   Phase 2.3 PR 1 and is wired into `send_message` in PR 3.
 
 2. **Inline reference** (future) — a base64 blob supplied by the
    tool. Refused for any account without the `attachment_send`
@@ -96,9 +97,9 @@ Each account has:
   expansion.
 
 The attachment and recipient limits were implemented in Phase 2.3 PR 1.
-`max_message_bytes` is now enforced by the PR 2 composer's bounded
-writer: exactly-at-limit succeeds and any larger message returns a typed
-error. No send path exists yet.
+`max_message_bytes` is enforced by the PR 2 composer's bounded writer:
+exactly-at-limit succeeds and any larger message returns a typed error.
+PR 3 re-checks the final serialized length before dialing SMTP.
 
 ### 2.4 Inbound attachment retrieval (Phase 2.2 Priority 3)
 
@@ -195,8 +196,8 @@ MIME part headers. It accepts no header map or raw MIME fragment.
 `Subject` is RFC 2047 encoded when needed; attachment filenames use
 RFC 2231. CR/LF and control characters are rejected in user-controlled
 header fields and filenames. Bcc never appears in serialized headers.
-The future sender must use the same validated recipients to build the
-SMTP envelope separately.
+The sender uses the same validated recipients to build the SMTP
+envelope separately, including Bcc.
 
 The MIME trees are:
 
@@ -241,44 +242,81 @@ are suitable for mapping to MCP errors when the sender lands. Error
 messages do not echo attachment contents, credentials or raw untrusted
 header values.
 
-Authorization remains outside the composer: the future `send_message`
-handler must call `recipients.Policy.Validate` (the exact allow-list and
-recipient limit) before composing, and must pass the account's
-configured `email` as `From`. The composer canonicalises addresses but
-cannot prove that `From` is the configured identity.
+Authorization remains outside the composer. The `send_message` handler
+calls `recipients.Policy.Validate` (the exact allow-list and unique
+recipient limit) before composing and passes the account's configured
+`email` as `From`. The composer canonicalises addresses but cannot prove
+that `From` is the configured identity; the handler and sender enforce
+that by construction.
 
 ## 3. SMTP submission semantics
 
 ### 3.1 Single submit cycle
 
-TheMailroom performs one `MAIL FROM` / `RCPT TO` / `DATA` cycle per
-send. There is no internal queue, no retry, no pipelining.
+PR 3 implements one `MAIL FROM` / `RCPT TO` / `DATA` cycle per send
+through `internal/smtpclient`. There is no internal queue, no retry, no
+pipelining and no connection pool.
 
 This is intentional:
 
 - We do not have a notion of a "send spool" — a crashed send is a
-  failed send.
+  failed or ambiguous send.
 - The composer generates exactly one Message-ID per composition and
-  returns it with the serialized bytes. The future sender must report
-  that value on an ambiguous failure rather than generating a second
-  identity. A new composition receives a new Message-ID.
-- The agent (MCP caller) is responsible for retrying with the
-  **same** prepared message and Message-ID if needed.
-- Duplicate sends are the agent's responsibility. TheMailroom
-  surfaces the `Message-ID` and the SMTP server's response so the
-  agent can detect duplicates on its end.
+  returns it with the serialized bytes. The sender never generates a
+  second identity. On an ambiguous failure it reports that same
+  Message-ID.
+- There is no prepared-message replay API. Once an ambiguous call
+  returns, the agent cannot resubmit the exact bytes through this tool;
+  it must verify server state before deciding whether to compose and
+  send a new message.
+- Duplicate sends are the agent's responsibility. TheMailroom returns
+  the Message-ID but deliberately does not expose raw SMTP transcripts
+  or the full recipient list.
+
+Before dialing, the `send_message` handler performs the complete
+preflight: account lookup, `send` permission, recipient
+canonicalisation/allow-list/limit checks, `attachment_send` and confined
+attachment resolution when needed, MIME composition, final serialized
+size enforcement, and retention of the Message-ID and immutable bytes.
+Any failure in that sequence means zero SMTP connections. The sender
+re-validates its request before dialing as defence in depth.
+
+The sender uses one TCP connection and one short-lived transaction:
+
+1. Connect to the configured host and port.
+2. Establish verified TLS — implicit TLS, or mandatory STARTTLS with no
+   plaintext fallback.
+3. Authenticate with AUTH PLAIN only after verified TLS.
+4. `MAIL FROM` the configured account envelope.
+5. `RCPT TO` every unique policy-approved envelope recipient, including
+   Bcc recipients.
+6. Issue `DATA` only after every recipient is accepted.
+7. Write the complete prepared MIME bytes, finalize `DATA`, and read the
+   final response.
+8. Close the connection.
+
+A MAIL FROM rejection is a definite failure. If any RCPT TO is
+rejected, the sender attempts RSET and aborts without DATA; earlier
+accepted recipients are never used for a partial send. A DATA command
+rejection is a definite failure before message data. DNS/TCP, TLS
+handshake, greeting/EHLO, STARTTLS, authentication, MAIL, RCPT, data
+writing and final-response stages all have finite deadlines. MCP request
+cancellation closes the active connection.
 
 ### 3.2 Ambiguous failure handling
 
-Network errors after the DATA payload was sent but before the
-server's `250` confirmation are **not retried** automatically. They
-are returned as `SmtpAmbiguousFailure` with the `Message-ID` of the
-attempted message. The agent is told "the message may or may not
-have been accepted; verify on the server before retrying".
+A lost connection, timeout or cancellation after DATA begins but before
+a definitive final SMTP response is **not retried** automatically. It is
+returned as `SmtpAmbiguousFailure` with the original `message_id` and
+`may_have_been_sent: true`. This includes failures while writing message
+data and while waiting for the final response. An explicit final 4xx/5xx
+response is a definite rejection, not an ambiguous failure.
 
-This is the strictest of three reasonable choices; it is what
-RFC 5321 Section 6.1 recommends for client implementers and what
-limits accidental duplicate sends.
+The agent is told the message may or may not have been accepted and must
+verify on the server before composing a new message. There is no
+prepared-message replay API. This is the strictest of three reasonable
+choices; it is what RFC 5321 Section 6.1 recommends for client
+implementers and what limits accidental duplicate sends.
 
 ### 3.3 Sent-folder strategy
 
@@ -317,20 +355,20 @@ substring, prefix, suffix or wildcard matching. Exact duplicates are
 collapsed before the `max_recipients` limit is applied; local-parts that
 differ only by case remain distinct. If the list is empty, any recipient
 is allowed. The policy is implemented and testable in Phase 2.3 PR 1;
-the future `send_message` handler must call it before opening SMTP and
-must not bypass it.
+the `send_message` handler calls it before opening SMTP and does not
+bypass it.
 
 ### 3.5 Sender identity enforcement
 
-The SMTP `MAIL FROM` and the RFC 5322 `From:` header must match the
-account's configured `email`. A mismatched `From:` is rejected
-client-side before the connection is opened. A mismatched SMTP
-`MAIL FROM` is closed by the server; TheMailroom reports it as
-`SenderRejected` without retrying.
+The SMTP `MAIL FROM` and the RFC 5322 `From:` header both come from the
+account's configured `email`, canonicalised by the same recipient
+parser. The `send_message` input has no `from` field, so an agent cannot
+select a sender identity. A server that rejects MAIL FROM produces a
+typed `SenderRejected`; there is no retry.
 
-This prevents the agent from using one configured account to send
-as another. It is a hard architectural rule; configuration cannot
-disable it.
+This prevents the agent from using one configured account to send as
+another. It is a hard architectural rule; configuration cannot disable
+it.
 
 ## 4. Reply and forward semantics
 

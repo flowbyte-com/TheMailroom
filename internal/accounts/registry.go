@@ -28,8 +28,8 @@ import (
 var ErrIMAPNotImplemented = errors.New("accounts: imap backend not implemented")
 
 // Account is the runtime representation of one configured account.
-// Credentials are NEVER copied into this type; they remain in config and
-// are resolved at the IMAP/SMTP client boundary.
+// Credentials are retained only in unexported fields for use at the
+// protocol boundary; they are never part of View or any MCP-visible shape.
 type Account struct {
 	ID              string
 	Email           string
@@ -40,6 +40,7 @@ type Account struct {
 
 	backend            mailbox.Backend
 	attachmentResolver *attachments.Resolver
+	smtp               config.SMTPConfig
 }
 
 // Backend returns the mailbox backend for this account.
@@ -58,6 +59,15 @@ func (a *Account) AttachmentSendEnabled() bool { return a.attachmentResolver != 
 // AttachmentResolver returns the confined outbound attachment resolver, or
 // nil when attachment sending is not configured for this account.
 func (a *Account) AttachmentResolver() *attachments.Resolver { return a.attachmentResolver }
+
+// SMTPSubmissionConfig returns a copy of the account's SMTP submission
+// configuration for the sender. It contains credentials and must never be
+// exposed through an MCP-visible structure or logged.
+func (a *Account) SMTPSubmissionConfig() config.SMTPConfig {
+	cfg := a.smtp
+	cfg.PasswordCommand = append([]string(nil), a.smtp.PasswordCommand...)
+	return cfg
+}
 
 // Close releases resources owned by the account, currently the outbound
 // attachment roots. It is idempotent.
@@ -121,6 +131,8 @@ func New(cfg config.Config) (reg *Registry, err error) {
 		if err != nil {
 			return nil, fmt.Errorf("account %q: %w", acc.ID, err)
 		}
+		smtpConfig := acc.SMTP
+		smtpConfig.PasswordCommand = append([]string(nil), acc.SMTP.PasswordCommand...)
 		a := &Account{
 			ID:              acc.ID,
 			Email:           acc.Email,
@@ -128,6 +140,7 @@ func New(cfg config.Config) (reg *Registry, err error) {
 			Permissions:     perms,
 			Limits:          acc.Limits,
 			RecipientPolicy: policy,
+			smtp:            smtpConfig,
 		}
 		if perms.Has(permissions.CapAttachmentSend) && len(acc.AttachmentSendPaths) > 0 {
 			resolver, err := attachments.NewResolver(acc.AttachmentSendPaths, attachments.Limits{
