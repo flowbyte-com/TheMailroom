@@ -5,12 +5,12 @@
 > PR 2 is **MERGED** (PR #11,
 > `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
 > (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
-> documentation closeout (PR 4) is **IN REVIEW**. The read-only tools
-> below and `send_message` are implemented. Reply/forward, mailbox
-> modification and deletion remain future work. Controlled external SMTP
-> testing has **not** been performed; production hardening is not
-> complete and TheMailroom is not a production-hardened release. The
-> operator runbook is
+> documentation closeout is GitHub PR #13; see that PR for its current
+> merge status. The read-only tools below and `send_message` are
+> implemented. Reply/forward, mailbox modification and deletion remain
+> future work. Controlled external SMTP testing has **not** been
+> performed; production hardening is not complete and TheMailroom is
+> not a production-hardened release. The operator runbook is
 > [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) and has not been
 > executed.
 

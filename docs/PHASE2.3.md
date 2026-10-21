@@ -1,7 +1,8 @@
 # Phase 2.3 Plan — Outbound submission foundations
 
 > **Status:** Phase 2.3 implementation is complete on `main`; the
-> documentation closeout (PR 4) is **IN REVIEW**.
+> documentation closeout is GitHub PR #13. See that PR for its current
+> merge status.
 >
 > - PR 1 (outbound security foundations) is **MERGED** (PR #10, squash
 >   commit `bf3618f247928ea1f1d2c687aac1cffd96a89070`).
@@ -463,10 +464,11 @@ injection. Coverage includes:
 - SMTPUTF8 rejection before dialing; and
 - concurrent submissions for multiple accounts, including `-race`.
 
-## PR 4 — Documentation closeout (IN REVIEW)
+## PR 4 — Documentation closeout (GitHub PR #13)
 
-PR 4 is documentation-only. It does not change sender behavior, the
-configuration schema, Go production code, dependencies or tests. It:
+The Phase 2.3 documentation closeout is documentation-only. It does not
+change sender behavior, the configuration schema, Go production code,
+dependencies or tests. It:
 
 - records the exact squash commits for PRs #10, #11 and #12;
 - reconciles the README, architecture, threat model, tool contract,
@@ -475,10 +477,10 @@ configuration schema, Go production code, dependencies or tests. It:
   [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) and states
   explicitly that it has not been executed.
 
-Phase 2.3 implementation is complete on `main`; this closeout remains
-**IN REVIEW** until it is reviewed and merged. Controlled external SMTP
-testing is a separate operational activity and requires explicit
-authorization. It has not been performed.
+Phase 2.3 implementation is complete on `main`; the documentation
+closeout is GitHub PR #13, whose current merge status is tracked there.
+Controlled external SMTP testing is a separate operational activity and
+requires explicit authorization. It has not been performed.
 
 ## Explicit limitations and non-goals
 

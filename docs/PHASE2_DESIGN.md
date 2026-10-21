@@ -5,14 +5,15 @@
 > PR 2 is **MERGED** (PR #11,
 > `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
 > (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
-> documentation closeout (PR 4) is **IN REVIEW**. Phase 2.1 (read-only
-> IMAP correctness + MIME reading) is implemented in
-> `internal/imapclient` and `internal/mimeparse`. Phase 2.2 is complete,
-> including inbound `read_attachment` (PR #8). PR 1 implemented the
-> recipient policy, conditional SMTP configuration validation, and the
-> confined outbound attachment resolver. PR 2 implemented the standalone
-> bounded MIME composer in `internal/mailcompose`. PR 3 implemented
-> `internal/smtpclient` and the `send_message` tool. Reply/forward,
+> documentation closeout is GitHub PR #13; see that PR for its current
+> merge status. Phase 2.1 (read-only IMAP correctness + MIME reading) is
+> implemented in `internal/imapclient` and `internal/mimeparse`. Phase
+> 2.2 is complete, including inbound `read_attachment` (PR #8). PR 1
+> implemented the recipient policy, conditional SMTP configuration
+> validation, and the confined outbound attachment resolver. PR 2
+> implemented the standalone bounded MIME composer in
+> `internal/mailcompose`. PR 3 implemented `internal/smtpclient` and the
+> `send_message` tool. Reply/forward,
 > mailbox mutation and automatic Sent copies are **not** implemented.
 > Controlled external SMTP testing has **not** been performed; production
 > hardening is not complete. The runbook in
@@ -327,12 +328,12 @@ implementers and what limits accidental duplicate sends.
 
 ### 3.3 Sent-folder strategy
 
-TheMailroom does **not** automatically append sent messages to a
-Sent folder. Reasons:
+TheMailroom itself never creates an automatic Sent copy. Reasons:
 
-- Providers that auto-Sent (Gmail, Purelymail, Fastmail, etc.) will
-  save a server-side copy regardless of what the client does.
-- Providers that do not auto-Sent usually have a separate
+- Some providers may create a server-side Sent copy regardless of what
+  the client does; this behavior must be verified for the selected
+  service.
+- Providers that do not create such a copy usually have a separate
   IMAP APPEND path; mixing SMTP submission and IMAP APPEND in a
   single tool adds complexity for no real benefit.
 

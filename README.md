@@ -36,11 +36,12 @@ correctness (PR #6), and secure inbound attachment retrieval (PR #8).
 The Phase 2.2 documentation closeout is merged as PR #9.
 
 **Phase 2.3 (Outbound submission)** implementation is complete on
-`main`; the documentation closeout is **IN REVIEW**. PR 1 added
-conditional SMTP configuration validation, the recipient policy, the
-confined outbound attachment resolver, and safer `list_accounts`
-output. PR 2 added the standalone, bounded MIME composer. PR 3 added
-authenticated SMTP submission and the `send_message` tool.
+`main`; the documentation closeout is GitHub PR #13; see that PR for its
+current merge status. PR 1 added conditional SMTP configuration
+validation, the recipient policy, the confined outbound attachment
+resolver, and safer `list_accounts` output. PR 2 added the standalone,
+bounded MIME composer. PR 3 added authenticated SMTP submission and the
+`send_message` tool.
 
 | PR | Scope | Squash commit |
 |---|---|---|
