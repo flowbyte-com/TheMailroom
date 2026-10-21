@@ -1,10 +1,15 @@
 # TheMailroom Threat Model
 
-> Status: Phase 2.3 PR 1 is **MERGED** (PR #10) and PR 2 is **MERGED**
-> (PR #11). PR 3 (authenticated SMTP submission and `send_message`) is
-> **IN REVIEW**. Controls marked **(implemented)** are present in the
-> current code; controls marked **(planned)** are not. Phase 2.3 is
-> **not** done.
+> Status: Phase 2.3 implementation is complete on `main`. PR 1 is
+> **MERGED** (PR #10, `bf3618f247928ea1f1d2c687aac1cffd96a89070`),
+> PR 2 is **MERGED** (PR #11,
+> `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
+> (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
+> documentation closeout is GitHub PR #13; see that PR for its current
+> merge status. Controls marked **(implemented)** are present in the
+> current code; controls marked **(planned)** are not. Controlled
+> external SMTP testing has **not** been performed and production
+> hardening is not complete.
 
 ## 1. Trust boundaries
 
@@ -38,7 +43,7 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 - **(implemented)** Tool responses use a structured schema (JSON) with explicit fields. Message bodies are returned as fields, never as concatenated strings that look like instructions.
 - **(implemented)** No tool name, schema, or description is taken from email content.
-- **(planned)** HTML bodies are returned as a separate field with charset metadata; the agent is responsible for any rendering, never TheMailroom.
+- **(implemented)** HTML bodies are returned as a separate field with charset metadata; the agent is responsible for any rendering, never TheMailroom.
 - **(planned)** A configurable max body length (default 1 MiB) prevents oversized payloads from dominating context.
 - **(planned)** Optional redaction of long URLs and tracking parameters is the agent's choice; TheMailroom does not mutate message content.
 
@@ -69,10 +74,10 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 **Mitigations.**
 
-- **(implemented)** The `send` capability is disabled by default. `send_message` is registered only as a capability-gated tool; without the per-account `send` capability it returns `PermissionDenied` before any SMTP connection.
+- **(implemented)** The `send` capability is disabled by default. Every `send_message` call requires the per-account `send` capability; without it the handler returns `PermissionDenied` before any SMTP connection.
 - **(implemented, PR 3)** `send_message` parses and canonicalises To/Cc/Bcc, rejects empty, malformed and control-character-containing addresses, enforces `max_recipients` (default 50), and supports an optional exact `allowed_recipients` allow-list. Empty allow-list permits any recipient. Matching is exact after canonicalisation: local-part case is preserved and significant, domain case is normalized; there are no wildcard or substring rules. Local-parts that differ only by case are distinct recipients.
 - **(implemented, PR 3)** The MIME composer canonicalises addresses with the same rules, rejects header injection in Subject, addresses and attachment filenames, and never serializes Bcc. The handler enforces the allow-list and recipient count before starting the sender.
-- **(implemented, PR 3)** The full preflight sequence runs before any SMTP connection: account lookup, `send`, a raw To/Cc/Bcc count/byte budget, recipient policy, `attachment_send`, attachment resolution, MIME composition and final serialized size. A preflight failure means zero SMTP connections.
+- **(implemented, PR 3)** The full preflight sequence runs before any SMTP connection: account lookup, `send`, a raw From/To/Cc/Bcc count/byte budget, recipient policy, `attachment_send`, attachment resolution, MIME composition and final serialized size. A preflight failure means zero SMTP connections.
 - **(implemented, PR 3)** SMTP submission uses one connection and one transaction, AUTH PLAIN only after verified TLS, and no retry. A failure after DATA begins is reported as ambiguous with the original Message-ID rather than retried.
 - **(planned)** Rate-limit sending (e.g. max N messages per hour) to bound blast radius.
 - **(implemented, PR 3)** Sends are logged with a structured record containing account ID, Message-ID, recipient count, attachment count, total attachment bytes, outcome category and typed error code. Bodies, attachment contents, credentials, raw SMTP transcripts and full recipient lists are not logged.
@@ -94,7 +99,7 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
   - An attachment count cap (`max_attachments`, default 50).
   - Filename sanitisation in attachment metadata (no path separators, no NULs).
 - **(implemented for inbound retrieval)** Attachment content is returned in memory; MIME parsing never writes to disk. Outbound local attachments are read through the `os.Root` resolver described in T5 and frozen by `send_message` before SMTP; the sender never receives a path.
-- **(implemented, PR 2/PR 3)** The outbound composer re-checks per-attachment, total-attachment and attachment-count limits even when called directly. A bounded writer measures the final serialized RFC 5322 message, including headers, MIME boundaries, quoted-printable and base64 expansion. Exactly `max_message_bytes` succeeds; any larger message returns a typed error and no partial bytes. The same limit bounds subject/filename input and aggregate address header preparation before RFC 2047/RFC 2231 encoding, preventing a small serialized limit from being bypassed by expensive header expansion. Before any address parsing or recipient-policy map/slice construction, `send_message` applies the same `max_message_bytes` budget to the raw To/Cc/Bcc entry count and aggregate bytes; a repeated or oversized list is rejected with a typed error and zero SMTP connections. The composer performs no filesystem reads or writes, uses a fixed in-process extension table for attachment content types, and accepts no paths or raw MIME fragments. `send_message` independently checks the final length before dialing.
+- **(implemented, PR 2/PR 3)** The outbound composer re-checks per-attachment, total-attachment and attachment-count limits even when called directly. A bounded writer measures the final serialized RFC 5322 message, including headers, MIME boundaries, quoted-printable and base64 expansion. Exactly `max_message_bytes` succeeds; any larger message returns a typed error and no partial bytes. The same limit bounds subject/filename input and aggregate address header preparation before RFC 2047/RFC 2231 encoding, preventing a small serialized limit from being bypassed by expensive header expansion. Before any address parsing or recipient-policy map/slice construction, `send_message` applies the same `max_message_bytes` budget to the raw From/To/Cc/Bcc entry count and aggregate bytes; a repeated or oversized list is rejected with a typed error and zero SMTP connections. The composer performs no filesystem reads or writes, uses a fixed in-process extension table for attachment content types, and accepts no paths or raw MIME fragments. `send_message` independently checks the final length before dialing.
 - **(implemented)** For `read_message`/`Parse`, unknown charsets and unknown transfer encodings surface as warnings rather than hard errors; the body is still returned (raw) so the agent can decide. `read_attachment` fails closed on unknown transfer encodings and on a selected text attachment with an unknown charset; unrelated charset warnings remain non-fatal.
 - **(implemented)** Attachment bodies are not materialised inline: only metadata is exposed through `read_message`. The `read_attachment` tool materialises exactly one explicitly requested part after validating the complete message and its limits. It rejects containers, body parts, missing parts and hidden descendants of opaque `message/rfc822` attachments. Extraction is fail-closed: a malformed sibling, body read or transfer-decoding failure, unknown transfer encoding, or oversized ordinary body part returns a typed error and no content, even if the requested part was already captured. Unrelated charset warnings remain non-fatal; a selected text attachment with an unknown charset is rejected rather than returned undecoded. Text parts are charset-decoded to UTF-8 where possible, so text content may be normalised; binary transfer-encoded content is decoded to its original bytes. Base64 output expands the response by roughly one third, and default maximum-size attachments can produce very large tool responses; this is a documented operational consideration, not an automatic fetch.
 - **(implemented)** `read_attachment` accepts no filesystem path. Its only reference inputs are account, mailbox, UID, UIDVALIDITY and the `read_message` part path; part syntax, length, depth and component bounds are validated before retrieval. Retrieved filenames and MIME types remain untrusted metadata and are never opened, executed or written to disk.
@@ -235,6 +240,14 @@ double-resolution approach described here.
 - **(implemented, PR 2/PR 3)** The composer generates exactly one RFC 5322 Message-ID per composition, embeds it in the headers and returns it separately. The sender reports that same value on an ambiguous failure instead of generating a second identity. TheMailroom never retries on ambiguity.
 - **(implemented, PR 3)** A failure before DATA is definite and returns a typed failure. A failure after DATA begins but before a definitive final response returns `SmtpAmbiguousFailure` with `message_id` and `may_have_been_sent: true`; the message is not reported as non-delivery.
 - **(implemented, PR 3)** The tool returns the `message_id` on success and on an ambiguous failure. Audit records contain counts and outcome, not the full recipient list or message body.
+
+**Residual risk.** Ambiguous submissions cannot be reconciled
+automatically. There is no durable spool, retry, prepared-message replay
+API or Sent-folder copy, and SMTP acceptance is not proof of mailbox
+delivery. Operators must verify at the recipient or provider before
+composing a new message. Controlled external SMTP testing has not yet
+been performed; the runbook is `docs/LIVE_SMTP_SMOKE_TEST.md` and it has
+not been executed.
 
 ### T9. Filesystem writes from MCP
 

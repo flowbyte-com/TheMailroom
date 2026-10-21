@@ -1,16 +1,24 @@
 # Phase 2 Design Notes
 
-> Status: Phase 2.3 PR 1 is **MERGED** (PR #10), PR 2 is **MERGED**
-> (PR #11), and PR 3 (authenticated SMTP submission and `send_message`)
-> is **IN REVIEW**. Phase 2.1 (read-only IMAP correctness + MIME reading)
-> is implemented in `internal/imapclient` and `internal/mimeparse`.
-> Phase 2.2 is complete, including inbound `read_attachment` (PR #8).
-> PR 1 implements the recipient policy, conditional SMTP configuration
+> Status: Phase 2.3 implementation is complete on `main`: PR 1 is
+> **MERGED** (PR #10, `bf3618f247928ea1f1d2c687aac1cffd96a89070`),
+> PR 2 is **MERGED** (PR #11,
+> `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
+> (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
+> documentation closeout is GitHub PR #13; see that PR for its current
+> merge status. Phase 2.1 (read-only IMAP correctness + MIME reading) is
+> implemented in `internal/imapclient` and `internal/mimeparse`. Phase
+> 2.2 is complete, including inbound `read_attachment` (PR #8). PR 1
+> implemented the recipient policy, conditional SMTP configuration
 > validation, and the confined outbound attachment resolver. PR 2
-> implements the standalone bounded MIME composer in
-> `internal/mailcompose`. PR 3 implements `internal/smtpclient` and the
-> `send_message` tool. Reply/forward, mailbox mutation and automatic
-> Sent copies are **not** implemented.
+> implemented the standalone bounded MIME composer in
+> `internal/mailcompose`. PR 3 implemented `internal/smtpclient` and the
+> `send_message` tool. Reply/forward,
+> mailbox mutation and automatic Sent copies are **not** implemented.
+> Controlled external SMTP testing has **not** been performed; production
+> hardening is not complete. The runbook in
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) has not been
+> executed.
 
 ## 1. Library selection (post-research)
 
@@ -237,8 +245,8 @@ exact final-size boundary.
 
 Typed errors distinguish invalid message/header input, invalid
 attachment metadata, too many attachments, per-attachment size, total
-attachment size, serialized size, MIME failure and invalid limits. They
-are suitable for mapping to MCP errors when the sender lands. Error
+attachment size, serialized size, MIME failure and invalid limits. The
+`send_message` handler maps them to stable MCP error codes. Error
 messages do not echo attachment contents, credentials or raw untrusted
 header values.
 
@@ -320,12 +328,12 @@ implementers and what limits accidental duplicate sends.
 
 ### 3.3 Sent-folder strategy
 
-TheMailroom does **not** automatically append sent messages to a
-Sent folder. Reasons:
+TheMailroom itself never creates an automatic Sent copy. Reasons:
 
-- Providers that auto-Sent (Gmail, Purelymail, Fastmail, etc.) will
-  save a server-side copy regardless of what the client does.
-- Providers that do not auto-Sent usually have a separate
+- Some providers may create a server-side Sent copy regardless of what
+  the client does; this behavior must be verified for the selected
+  service.
+- Providers that do not create such a copy usually have a separate
   IMAP APPEND path; mixing SMTP submission and IMAP APPEND in a
   single tool adds complexity for no real benefit.
 
@@ -369,6 +377,12 @@ typed `SenderRejected`; there is no retry.
 This prevents the agent from using one configured account to send as
 another. It is a hard architectural rule; configuration cannot disable
 it.
+
+SMTP submission is implemented, but it has not been exercised against a
+controlled external SMTP service. The operator runbook in
+[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md) has not been
+executed, does not authorize sending email, and is separate from this
+design. Production hardening is not complete.
 
 ## 4. Reply and forward semantics
 
@@ -893,13 +907,18 @@ deliverables, and out-of-scope items, is in
    **DONE**: merged in PR #8 (`2690380`) after HAL approval at
    `41430936`. See §2.4.
 
-SMTP, outbound attachments, and mutating mailbox operations
-remain out of scope.
+Phase 2.2 did not include SMTP submission, outbound attachments or
+mutating mailbox operations. Phase 2.3 subsequently implemented SMTP
+submission, outbound attachment resolution and the bounded MIME composer
+behind `send_message` (PRs #10, #11 and #12). Reply/forward and mutating
+mailbox operations remain out of scope.
 
 TheMailroom is **not** production-hardened. The literal-size
 requirement (§10) is satisfied, but a long-term dependency on a
 personal fork of go-imap is itself a maintenance risk that must
 be resolved (upstream the change, or replace the library) — see
 §8 and the fork's `CHANGES.md`. The search defects (§7) are fixed;
-attachment retrieval (§2.4) is merged (PR #8). The remaining
-production-readiness work is tracked in `docs/PHASE2.2.md`.
+attachment retrieval (§2.4) is merged (PR #8), and Phase 2.3 outbound
+submission is implemented. Controlled external SMTP testing has not yet
+been performed; the runbook is `docs/LIVE_SMTP_SMOKE_TEST.md`. Production
+readiness is tracked across `docs/PHASE2.2.md` and `docs/PHASE2.3.md`.
