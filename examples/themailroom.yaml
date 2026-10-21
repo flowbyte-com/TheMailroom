@@ -15,6 +15,7 @@
 
 server:
   log_level: info            # debug, info, warn, error
+  max_request_bytes: 33554432  # optional per-frame inbound cap; 32 MiB default, 128 MiB maximum
 
 accounts:
   # A read-only account that connects to a real IMAP server.

@@ -356,6 +356,9 @@ Validation covers:
   enabled; plaintext submission is rejected. Read-only accounts may
   leave SMTP unset.
 - Limits are non-negative; `max_recipients` defaults to 50.
+- `server.max_request_bytes` defaults to 32 MiB and is capped at 128 MiB.
+  It is a per-frame pre-decode transport boundary and is independent of
+  account `max_message_bytes`.
 - Permission names are known capability names.
 - `allowed_recipients` entries parse as addresses; matching is exact,
   preserving local-part case while normalizing domain case.
@@ -385,7 +388,7 @@ CA) or a `SSL_CERT_FILE` override at the host level.
 
 | Concern              | Choice                                          | Rationale                                                       |
 |----------------------|-------------------------------------------------|-----------------------------------------------------------------|
-| MCP transport        | `github.com/modelcontextprotocol/go-sdk`       | Official Go SDK; stdio transport; schema-validated tools.       |
+| MCP transport        | `github.com/modelcontextprotocol/go-sdk` v1.5.0 | Official Go SDK; stdio transport; schema-validated tools; v1.5.0 carries the upstream `ioConn.protocolVersion` race fix. |
 | YAML config          | `gopkg.in/yaml.v3`                              | Mature, widely used; supports strict unknown-key rejection.    |
 | IMAP (Phase 2)       | `github.com/flowbyte-com/go-imap` (fork of `github.com/emersion/go-imap` v1.2.1) | De facto standard; protocol-correct; stable API. The fork adds protocol-level IMAP literal-size enforcement; see `docs/PHASE2_DESIGN.md` §8/§10. |
 | SMTP (Phase 2.3)     | `github.com/emersion/go-smtp` v0.25.0 + `github.com/emersion/go-sasl` | Implemented in `internal/smtpclient`; low-level `Mail`/`Rcpt`/`Data`/`CloseWithResponse` are used so the client can abort before DATA and classify ambiguity. |
@@ -394,13 +397,72 @@ CA) or a `SSL_CERT_FILE` override at the host level.
 | Filesystem confine   | `os.Root` (stdlib, Go 1.24+)                    | OS-level chroot-style; prevents escape by symlink.             |
 | Testing              | stdlib `testing` + emersion server packages     | Stub-friendly; integration via local in-process servers later.  |
 
+The MCP Go SDK is pinned to v1.5.0, the first release that carries the
+upstream fix for the `ioConn.protocolVersion` data race (upstream PR #832,
+"protect ioConn.protocolVersion with a mutex") and that ships with the
+SDK's own race test re-enabled after the related data-race fixes (upstream
+PR #851). v1.5.0 also re-enables the SDK's race test across its own suite,
+so the upgrade brings fixes beyond the single field that the bounded frame
+reader exposed.
+
+The SDK continues to own JSON-RPC decoding, correlation, lifecycle handling
+and legacy batch semantics. TheMailroom owns only the inbound byte
+boundary: `internal/mcpserver/transport.go` caps and validates one frame
+before the SDK decodes it, and hands the SDK a plain `mcp.IOTransport`.
+
+### 3.1 Observable compatibility differences of the v1.5.0 upgrade
+
+The upgrade was assessed by replaying identical raw JSON-RPC frames against
+v1.1.0 and v1.5.0 and diffing the emitted bytes. Everything the bounded
+framing design depends on is byte-identical: exact frame-size enforcement,
+framing-error propagation and transport termination, clean EOF,
+cancellation, initialization responses, normal tool invocation, legacy
+batch responses and their correlation, the `tools/list` tool set, and
+stdout protocol integrity (including JSON escaping of `<`, `>` and `&` in
+text content). Three differences are observable:
+
+1. **Protocol version set.** v1.5.0 adds `2025-11-25` and makes it the
+   newest supported version. `2024-11-05`, `2025-03-26` and `2025-06-18`
+   still negotiate to themselves unchanged; a client that requests an
+   unknown version now falls back to `2025-11-25` instead of `2025-06-18`.
+   A client that does not send a version is unaffected. Legacy JSON-RPC
+   batching remains available only for `2024-11-05` and `2025-03-26`
+   clients, because the SDK refuses a batch at the transport boundary from
+   `2025-06-18` onwards; this refusal is unchanged by the upgrade.
+
+2. **Tool input validation errors are tool results, not JSON-RPC errors.**
+   Upstream PR #863 ("return input validation errors as tool results, not
+   JSON-RPC errors") moved schema-validation and argument-unmarshal
+   failures from a JSON-RPC `-32602` error to a `CallToolResult` with
+   `isError: true`. This matches the MCP specification, which classifies
+   input validation errors as tool execution errors so that a model can see
+   the message and retry with corrected arguments. It also makes
+   TheMailroom internally consistent: its own tool-level failures (for
+   example `AccountNotFound` or `PermissionDenied`) were already reported
+   as `isError: true` results. Unknown tools remain a JSON-RPC protocol
+   error, as the specification requires. A client that inspects only the
+   JSON-RPC error and ignores `isError` would misread a rejected call as a
+   success; clients are specified to surface tool execution errors to the
+   model, and TheMailroom's own documented error model is unaffected.
+
+3. **Tool schema precision.** The transitive `jsonschema-go` upgrade from
+   v0.3.0 to v0.4.2 renders Go slices and pointers as nullable
+   (`["null","array"]`, `["null","string"]`) and adds the numeric bounds of
+   `uint32` fields. `required` lists and `additionalProperties: false` are
+   unchanged, the tool set is unchanged, and the change only widens what
+   the advertised schemas accept.
+
+No upstream compatibility knob restores the previous validation-error
+shape; `MCPGODEBUG` covers JSON escaping and the streamable HTTP
+transport's origin checks only.
+
 Avoided-over plugins:
 
 - No plugin framework, no Lua, no dynamic loading.
 - No general-purpose email "client" framework; we own the protocol calls.
 - No HTTP framework — stdio only.
 
-### 3.1 Why go-imap v1 (not v2)
+### 3.2 Why go-imap v1 (not v2)
 
 `github.com/emersion/go-imap` v1 (current `v1.2.1`) is the stable,
 production-tracked line; it has been used in many production systems

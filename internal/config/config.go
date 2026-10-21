@@ -34,6 +34,16 @@ const (
 	DefaultMaxMIMENesting          = 16
 	DefaultMaxMIMEParts            = 500
 
+	// DefaultMaxRequestBytes bounds one inbound MCP JSON-RPC frame before
+	// JSON decoding. The payload count excludes LF or CRLF framing.
+	DefaultMaxRequestBytes = 32 * 1024 * 1024 // 32 MiB
+
+	// MaxRequestBytesLimit is the largest value an operator may configure
+	// for server.max_request_bytes. It is intentionally independent of any
+	// account's max_message_bytes: account limits govern email content,
+	// while this bound governs a single pre-decode MCP allocation.
+	MaxRequestBytesLimit = 128 * 1024 * 1024 // 128 MiB
+
 	DefaultLogLevel = "info"
 )
 
@@ -47,6 +57,13 @@ type Config struct {
 type ServerConfig struct {
 	// LogLevel is one of "debug", "info", "warn", "error".
 	LogLevel string `yaml:"log_level"`
+
+	// MaxRequestBytes caps one inbound MCP JSON-RPC frame before JSON
+	// decoding. The count is UTF-8 payload bytes excluding LF or CRLF
+	// framing. Zero selects DefaultMaxRequestBytes. This is a per-frame
+	// allocation boundary, not an aggregate process-memory limit, and is
+	// independent of account max_message_bytes.
+	MaxRequestBytes int `yaml:"max_request_bytes,omitempty"`
 }
 
 // AccountConfig describes one email account.
@@ -214,6 +231,15 @@ func (c Config) Validate() (Config, error) {
 	}
 	if !isLogLevel(c.Server.LogLevel) {
 		return Config{}, fmt.Errorf("server.log_level %q invalid; want one of debug, info, warn, error", c.Server.LogLevel)
+	}
+	if c.Server.MaxRequestBytes == 0 {
+		c.Server.MaxRequestBytes = DefaultMaxRequestBytes
+	}
+	if c.Server.MaxRequestBytes < 0 || c.Server.MaxRequestBytes > MaxRequestBytesLimit {
+		return Config{}, fmt.Errorf(
+			"server.max_request_bytes %d invalid; want between 1 and %d bytes (%d MiB)",
+			c.Server.MaxRequestBytes, MaxRequestBytesLimit, MaxRequestBytesLimit/(1024*1024),
+		)
 	}
 	if len(c.Accounts) == 0 {
 		return Config{}, fmt.Errorf("at least one account is required")
