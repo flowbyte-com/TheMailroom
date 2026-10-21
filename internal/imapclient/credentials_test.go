@@ -3,9 +3,11 @@ package imapclient
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -26,26 +28,44 @@ import (
 // vector with no shell involved.
 
 const (
-	helperEnvMode   = "THEMAILROOM_CREDENTIAL_MODE"
-	helperEnvBytes  = "THEMAILROOM_CREDENTIAL_BYTES"
-	helperEnvMarker = "THEMAILROOM_CREDENTIAL_MARKER"
+	helperEnvMode           = "THEMAILROOM_CREDENTIAL_MODE"
+	helperEnvBytes          = "THEMAILROOM_CREDENTIAL_BYTES"
+	helperEnvMarker         = "THEMAILROOM_CREDENTIAL_MARKER"
+	helperEnvStartedFile    = "THEMAILROOM_CREDENTIAL_STARTED_FILE"
+	helperEnvPIDFile        = "THEMAILROOM_CREDENTIAL_PID_FILE"
+	helperEnvDescendantFile = "THEMAILROOM_CREDENTIAL_DESCENDANT_FILE"
+	helperEnvFinishedFile   = "THEMAILROOM_CREDENTIAL_FINISHED_FILE"
 )
 
 // Helper modes. Each one produces a different observable behaviour.
 const (
-	helperModeStdout       = "stdout"        // n bytes on stdout, exit 0
-	helperModeStderr       = "stderr"        // n bytes on stderr, exit 0
-	helperModeBoth         = "both"          // a password on stdout and n bytes on stderr, at once
-	helperModeBigBoth      = "big-both"      // n bytes on stdout while stderr is active
-	helperModePartial      = "partial"       // a few bytes on stdout, then exit 3
-	helperModeExit         = "exit"          // exit 1 with no output
-	helperModeSleep        = "sleep"         // run for a long time
-	helperModeSecret       = "secret"        // the server's test password
-	helperModeTrailingLF   = "trailing-lf"   // password plus a trailing LF
-	helperModeTrailingCRLF = "trailing-crlf" // password plus a trailing CRLF
-	helperModeSecretStderr = "secret-stderr" // a secret on stderr, then exit 1
-	helperModeEmpty        = "empty"         // no output at all
+	helperModeStdout          = "stdout"           // n bytes on stdout, exit 0
+	helperModeStderr          = "stderr"           // n bytes on stderr, exit 0
+	helperModeBoth            = "both"             // a password on stdout and n bytes on stderr, at once
+	helperModeBigBoth         = "big-both"         // n bytes on stdout while stderr is active
+	helperModePartial         = "partial"          // a few bytes on stdout, then exit 3
+	helperModeExit            = "exit"             // exit 1 with no output
+	helperModeSleep           = "sleep"            // run for a long time
+	helperModeSecret          = "secret"           // the server's test password
+	helperModeTrailingLF      = "trailing-lf"      // password plus a trailing LF
+	helperModeTrailingCRLF    = "trailing-crlf"    // password plus a trailing CRLF
+	helperModeSecretStderr    = "secret-stderr"    // a secret on stderr, then exit 1
+	helperModeEmpty           = "empty"            // no output at all
+	helperModeSpawnDescendant = "spawn-descendant" // spawn a descendant that inherits the pipes, then exit
+	helperModeDescendantHold  = "descendant-hold"  // the descendant: hold the inherited pipes open
 )
+
+// The secrets used by the helper. They are synthetic test values.
+const (
+	helperStdoutSecret = "stdout-secret-do-not-leak"
+	helperStderrSecret = "stderr-secret-do-not-leak"
+)
+
+// descendantLifetime is how long the spawned descendant holds the inherited
+// pipes open. It is far longer than any test step, so the descendant is
+// guaranteed to still be running when the assertions run, and it bounds
+// the worst case if the cleanup kill does not take effect.
+const descendantLifetime = 30 * time.Second
 
 // TestCredentialHelperProcess is not a real test. It is the child process
 // used by the credential-command tests; it only does work when the parent
@@ -63,6 +83,13 @@ func TestCredentialHelperProcess(t *testing.T) {
 			_, _ = f.WriteString("invoked\n")
 			_ = f.Close()
 		}
+	}
+
+	// Report that this process is running, before doing anything else.
+	// The parent uses this to tell "cancelled while the command was
+	// running" apart from "cancelled before the command was spawned".
+	if started := os.Getenv(helperEnvStartedFile); started != "" {
+		writeFile(started, "started\n")
 	}
 
 	n, _ := strconv.Atoi(os.Getenv(helperEnvBytes))
@@ -110,10 +137,68 @@ func TestCredentialHelperProcess(t *testing.T) {
 		os.Exit(1)
 	case helperModeEmpty:
 		// No output at all.
+	case helperModeSpawnDescendant:
+		// Write credential material on both streams, then start a
+		// descendant that inherits them and outlives this process.
+		// The descendant therefore keeps the inherited pipes open after
+		// this process exits.
+		writeAll(os.Stdout, []byte(helperStdoutSecret))
+		writeAll(os.Stderr, []byte(helperStderrSecret))
+
+		desc := exec.Command(os.Args[0], "-test.run=^TestCredentialHelperProcess$")
+		// The descendant must not write to the parent's marker files.
+		desc.Env = append(os.Environ(),
+			helperEnvMode+"="+helperModeDescendantHold,
+			helperEnvStartedFile+"=",
+		)
+		// Inherit stdout and stderr: the descendant keeps the pipe write
+		// ends open after this process exits.
+		desc.Stdout = os.Stdout
+		desc.Stderr = os.Stderr
+		desc.Stdin = nil
+		if err := desc.Start(); err != nil {
+			os.Exit(11)
+		}
+		writeFile(os.Getenv(helperEnvPIDFile), strconv.Itoa(desc.Process.Pid)+"\n")
+		// Exit immediately, leaving the descendant holding the pipes.
+		os.Exit(0)
+	case helperModeDescendantHold:
+		// This process holds the inherited pipes open. It reports that
+		// it is running, waits, and then records that it has finished.
+		writeFile(os.Getenv(helperEnvDescendantFile), "holding\n")
+		time.Sleep(descendantLifetime)
+		writeFile(os.Getenv(helperEnvFinishedFile), "finished\n")
 	default:
 		os.Exit(9)
 	}
 	os.Exit(0)
+}
+
+// writeFile writes content to path, ignoring any error. It is used by the
+// helper process for its marker files.
+func writeFile(path, content string) {
+	if path == "" {
+		return
+	}
+	if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+		_, _ = f.WriteString(content)
+		_ = f.Close()
+	}
+}
+
+// waitForFile waits until path exists and reports whether it appeared
+// within the timeout.
+func waitForFile(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // writeAll writes every byte, tolerating short writes.
@@ -377,30 +462,166 @@ func TestCredentialCommandTimeout(t *testing.T) {
 }
 
 // TestCredentialCommandCancellation checks that cancelling the caller's
-// context stops the command and is reported as a cancellation.
+// context stops a command that is already running and is reported as a
+// cancellation.
+//
+// The cancellation is triggered by the helper reporting that it has
+// started, so the test distinguishes a cancellation of a running command
+// from a cancellation that arrived before the subprocess was spawned. A
+// cancellation before the spawn would make exec fail in Start and the
+// helper would never run, so the absence of the marker would make the
+// test inconclusive rather than passing.
 func TestCredentialCommandCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cmd := credentialCommand(t, helperModeSleep, 0)
+	startedFile := filepath.Join(t.TempDir(), "started")
 
-	// Cancel once the helper has certainly started.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := credentialCommand(t, helperModeSleep, 0)
+	t.Setenv(helperEnvStartedFile, startedFile)
+
+	type result struct{ err error }
+	res := make(chan result, 1)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
+		_, err := resolvePassword(ctx, config.IMAPConfig{PasswordCommand: cmd})
+		res <- result{err}
 	}()
 
+	// Wait for the helper to report that it is running before cancelling.
+	if !waitForFile(startedFile, 20*time.Second) {
+		t.Fatal("the credential helper never reported that it started; the " +
+			"cancellation would not distinguish a running command from one that was never spawned")
+	}
+	cancel()
+
+	select {
+	case r := <-res:
+		if r.err == nil {
+			t.Fatal("expected an error for a cancelled command")
+		}
+		if !strings.Contains(r.err.Error(), "canceled") {
+			t.Errorf("err = %v, want it to report a cancellation", r.err)
+		}
+		if strings.Contains(r.err.Error(), "timed out") {
+			t.Errorf("err = %v, want a cancellation rather than a timeout", r.err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("resolvePassword did not return after the cancellation")
+	}
+}
+
+// TestCredentialCommandInheritedPipeDoesNotHang is the regression test for
+// a credential helper that leaves a descendant holding the inherited
+// stdout and stderr pipes open.
+//
+// The helper writes credential material on both streams, starts a
+// descendant that inherits those pipes, and exits. The descendant keeps
+// the pipes open, so the parent would otherwise wait for the pipes to
+// reach EOF and never return. The configured cmd.WaitDelay must bound
+// that wait.
+//
+// The test is portable: the descendant is this same test binary, started
+// with the inherited descriptors, and it is cleaned up with the portable
+// os.FindProcess plus os.Process.Kill. No shell and no signal handling
+// are involved.
+func TestCredentialCommandInheritedPipeDoesNotHang(t *testing.T) {
+	dir := t.TempDir()
+	startedFile := filepath.Join(dir, "started")
+	pidFile := filepath.Join(dir, "descendant.pid")
+	descendantFile := filepath.Join(dir, "descendant.holding")
+	finishedFile := filepath.Join(dir, "descendant.finished")
+
+	cmd := credentialCommand(t, helperModeSpawnDescendant, 0)
+	t.Setenv(helperEnvStartedFile, startedFile)
+	t.Setenv(helperEnvPIDFile, pidFile)
+	t.Setenv(helperEnvDescendantFile, descendantFile)
+	t.Setenv(helperEnvFinishedFile, finishedFile)
+
 	start := time.Now()
-	_, err := resolvePassword(ctx, config.IMAPConfig{PasswordCommand: cmd})
+	_, err := resolvePassword(context.Background(), config.IMAPConfig{
+		PasswordCommand: cmd,
+	})
 	elapsed := time.Since(start)
 
+	// The helper must have run.
+	if !waitForFile(startedFile, 10*time.Second) {
+		t.Fatal("the credential helper never reported that it started")
+	}
+
+	// The descendant must have been spawned and must still be running: it
+	// is the holder of the inherited pipes.
+	if !waitForFile(descendantFile, 10*time.Second) {
+		t.Fatal("the descendant never reported that it was holding the inherited pipes")
+	}
+	pid := readPID(t, pidFile)
+	defer killProcess(pid)
+
+	if _, err := os.Stat(finishedFile); err == nil {
+		t.Fatalf("the descendant had already finished after %v; it could not have been holding the inherited pipes open "+
+			"while the wait was bounded", elapsed)
+	}
+
+	// The outcome must be a sanitized failure, never an accepted
+	// password.
 	if err == nil {
-		t.Fatal("expected an error for a cancelled command")
+		t.Fatalf("expected a failure after %v: the inherited pipe was still open when the command was reaped", elapsed)
 	}
-	if !strings.Contains(err.Error(), "canceled") {
-		t.Errorf("err = %v, want it to report a cancellation", err)
+	if !strings.Contains(err.Error(), "password_command failed") {
+		t.Errorf("err = %v, want a password_command failure", err)
 	}
-	if elapsed > 30*time.Second {
-		t.Errorf("resolvePassword took %v; the cancellation did not bound the command", elapsed)
+	// ErrWaitDelay is returned only when the command's I/O pipes were
+	// still open after the wait delay elapsed. That is the direct
+	// evidence that the descendant was holding the inherited pipe.
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Errorf("err = %v, want it to wrap exec.ErrWaitDelay; the wait must have been bounded by cmd.WaitDelay", err)
 	}
+	// No credential and no stderr content may appear in the error.
+	for _, forbidden := range []string{helperStdoutSecret, helperStderrSecret} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Errorf("the error contains command output %q: %v", forbidden, err)
+		}
+	}
+
+	// The wait must have been bounded by the delay, not by the
+	// descendant's lifetime.
+	if elapsed < 900*time.Millisecond {
+		t.Errorf("resolvePassword returned after %v; it did not wait for the configured cmd.WaitDelay", elapsed)
+	}
+	if elapsed >= descendantLifetime {
+		t.Errorf("resolvePassword returned after %v; it waited for the inherited pipe to close instead of the configured bound", elapsed)
+	}
+}
+
+// readPID reads a PID written by the helper.
+func readPID(t *testing.T, path string) int {
+	t.Helper()
+	if !waitForFile(path, 10*time.Second) {
+		t.Fatal("the helper never wrote the descendant PID")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("parse pid %q: %v", string(b), err)
+	}
+	return pid
+}
+
+// killProcess terminates a process by PID. It uses only the portable os
+// package: FindProcess plus Kill. It is best effort, because a process
+// that is not a child of this test cannot be waited on portably; the
+// descendant also exits on its own after descendantLifetime.
+func killProcess(pid int) {
+	if pid <= 0 {
+		return
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	_ = p.Kill()
 }
 
 // TestCredentialCommandPartialOutputBeforeFailure checks that output
