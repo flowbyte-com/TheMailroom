@@ -267,9 +267,11 @@ allocation boundary, not an aggregate process-memory limit: the SDK
 handler queue, concurrent in-flight requests, tool-level argument
 amplification and response sizes remain separate concerns. Account
 `max_message_bytes` still governs email composition and post-decode
-preprocessing. The pre-existing IMAP `password_command` path uses
-unbounded stdout/stderr buffers and includes truncated stderr in internal
-errors; SMTP command output is bounded and excluded. Failure-outcome
+preprocessing. The IMAP `password_command` path bounds stdout to 8 KiB,
+discards stderr, and bounds the run by a timeout and by the caller's
+cancellation; neither its stdout nor its stderr reaches an error, a log or
+a tool response. The external command itself remains an operator-supplied
+executable and is not made safe by these bounds. Failure-outcome
 audit categories are not fully unit-tested. These do not change the
 documented Phase 2.3 acceptance results but are recorded in
 [`THREAT_MODEL.md`](THREAT_MODEL.md).

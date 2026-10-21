@@ -480,4 +480,5 @@ defects separately; do not patch production code as part of a live test.
   tested offline only.
 - Residual risks include pre-limit JSON-RPC allocations and the
   pre-existing IMAP `password_command` buffering path. See
-  [`THREAT_MODEL.md`](THREAT_MODEL.md) for the Phase 3 backlog.
+  [`THREAT_MODEL.md`](THREAT_MODEL.md) for the Phase 3 backlog. (The IMAP
+  credential-command bounding was implemented in Phase 3 PR 2.)

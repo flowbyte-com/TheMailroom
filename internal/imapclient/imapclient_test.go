@@ -311,7 +311,7 @@ func TestRejectsNoTLS(t *testing.T) {
 }
 
 func TestPasswordCommand(t *testing.T) {
-	got, err := resolvePassword(config.IMAPConfig{
+	got, err := resolvePassword(context.Background(), config.IMAPConfig{
 		PasswordCommand: []string{"/bin/sh", "-c", "echo s3cret"},
 	})
 	if err != nil {
@@ -323,7 +323,7 @@ func TestPasswordCommand(t *testing.T) {
 }
 
 func TestPasswordCommandFailure(t *testing.T) {
-	_, err := resolvePassword(config.IMAPConfig{
+	_, err := resolvePassword(context.Background(), config.IMAPConfig{
 		PasswordCommand: []string{"/bin/sh", "-c", "exit 1"},
 	})
 	if err == nil {
@@ -335,7 +335,7 @@ func TestPasswordCommandFailure(t *testing.T) {
 }
 
 func TestPasswordCommandRejectsEmpty(t *testing.T) {
-	_, err := resolvePassword(config.IMAPConfig{
+	_, err := resolvePassword(context.Background(), config.IMAPConfig{
 		PasswordCommand: []string{"/bin/sh", "-c", ":"},
 	})
 	if err == nil {

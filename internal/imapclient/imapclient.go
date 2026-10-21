@@ -87,7 +87,6 @@
 package imapclient
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -95,7 +94,6 @@ import (
 	"io"
 	"math"
 	"net"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -706,7 +704,7 @@ func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.client == nil || isLoggedOut(b.client) {
-		c, err := b.dialAndLogin()
+		c, err := b.dialAndLogin(ctx)
 		if err != nil {
 			return err
 		}
@@ -732,7 +730,13 @@ func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error)
 	return err
 }
 
-func (b *Backend) dialAndLogin() (*client.Client, error) {
+// dialAndLogin establishes one IMAP connection and authenticates it.
+//
+// ctx bounds the credential command: it is the caller's operation context
+// and is cancelled with it. The TLS handshake deliberately keeps using
+// context.Background(), as before, so that the existing implicit-TLS and
+// STARTTLS connection behaviour is unchanged.
+func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, error) {
 	addr := net.JoinHostPort(b.cfg.IMAP.Host, strconv.Itoa(b.cfg.IMAP.Port))
 	dialer := &net.Dialer{Timeout: b.dialTimeout}
 	tlsCfg := b.tlsConfig
@@ -786,7 +790,7 @@ func (b *Backend) dialAndLogin() (*client.Client, error) {
 			_ = c.Close()
 			return nil, fmt.Errorf("imap: starttls: %w", err)
 		}
-		pw, err := resolvePassword(b.cfg.IMAP)
+		pw, err := resolvePassword(ctx, b.cfg.IMAP)
 		if err != nil {
 			_ = c.Close()
 			return nil, err
@@ -808,7 +812,7 @@ func (b *Backend) dialAndLogin() (*client.Client, error) {
 	if b.commandTimeout > 0 {
 		c.Timeout = b.commandTimeout
 	}
-	pw, err := resolvePassword(b.cfg.IMAP)
+	pw, err := resolvePassword(ctx, b.cfg.IMAP)
 	if err != nil {
 		_ = c.Close()
 		return nil, err
@@ -832,32 +836,6 @@ func (b *Backend) setSelected(name string, validity uint32) error {
 	return nil
 }
 
-// resolvePassword returns the password from the configured source.
-// It does not retain references to the returned string beyond the
-// call; the caller is expected to use it promptly.
-func resolvePassword(cfg config.IMAPConfig) (string, error) {
-	if cfg.Password != "" {
-		return cfg.Password, nil
-	}
-	if len(cfg.PasswordCommand) == 0 {
-		return "", errors.New("imap: no password source configured")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, cfg.PasswordCommand[0], cfg.PasswordCommand[1:]...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("imap: password_command failed: %w (stderr: %s)", err, redactStderr(stderr.String()))
-	}
-	out := strings.TrimRight(stdout.String(), "\r\n")
-	if out == "" {
-		return "", errors.New("imap: password_command produced empty output")
-	}
-	return out, nil
-}
-
 // limitReader is no longer used; the body cap is enforced with
 // io.LimitReader(r, cap+1) and a length check on the returned
 // slice. Keeping the type commented for reference.
@@ -874,16 +852,6 @@ func redactAddr(addr string) string {
 		return addr[:i] + ":***"
 	}
 	return addr
-}
-
-// redactStderr trims and escapes arbitrary stderr output.
-func redactStderr(s string) string {
-	s = strings.TrimSpace(s)
-	const max = 200
-	if len(s) > max {
-		s = s[:max] + "...[truncated]"
-	}
-	return strings.ReplaceAll(s, "\n", " ")
 }
 
 // isLoggedOut returns true if the client's logout channel has been

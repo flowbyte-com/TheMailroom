@@ -938,6 +938,6 @@ submission is implemented and was exercised against Purelymail on
 2026-10-21. The authoritative record is
 `docs/LIVE_SMTP_SMOKE_TEST.md`; this is smoke/interoperability evidence,
 not production certification. Known residual risks include pre-limit
-JSON-RPC allocations and the IMAP `password_command` buffering path,
-recorded in `docs/THREAT_MODEL.md` §3.1. Production readiness is tracked
-across `docs/PHASE2.2.md` and `docs/PHASE2.3.md`.
+JSON-RPC allocations, recorded in `docs/THREAT_MODEL.md` §3.1; the IMAP
+`password_command` buffering path was bounded in Phase 3 PR 2. Production
+readiness is tracked across `docs/PHASE2.2.md` and `docs/PHASE2.3.md`.
