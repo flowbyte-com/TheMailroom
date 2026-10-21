@@ -19,11 +19,16 @@ provider configuration.
 
 | Evidence class | Confirmed result |
 |---|---|
-| Live SMTP submission and received-message verification | Authenticated SMTP/TLS 1.3; plain-text delivery; multipart/alternative delivery with non-ASCII subject; attachment delivery with JPEG SHA-256 match; Bcc delivery without visible-header disclosure; returned Message-ID present in the received message; IMAP reply-threading interoperability |
+| Live SMTP submission and received-message verification | Authenticated SMTP/TLS 1.3; plain-text delivery; multipart/alternative delivery with non-ASCII subject; one JPEG attachment with verified SHA-256 integrity; Bcc delivery with no Bcc address or sender-generated Bcc header in the To recipient's copy, while provider delivery headers in the Bcc recipient's own copy are permitted; returned Message-ID present in the received message; IMAP reply-threading interoperability |
 | Offline negative security controls | Allowlist rejection and confined-attachment traversal rejection returned the expected typed errors, made zero sender calls, and produced no live submission |
 | Audit observation | Structured audit records contained no credentials, command output, bodies, attachment contents, raw SMTP responses, full recipient lists or host filesystem paths |
 | Offline-only composition | Non-ASCII body composition was verified offline only; delivered multipart bodies were ASCII-only |
-| Not covered | OAuth2-only providers, provider-side Sent-folder behaviour, exhaustive failure/security testing, all providers, provider-wide certification and production certification |
+| Not covered | OAuth2-only providers, provider-side Sent-folder behaviour, the planned two-attachment/internationalized-filename case, exhaustive failure/security testing, all providers, provider-wide certification and production certification |
+
+The live cases actually executed were plain text, multipart/alternative
+with a non-ASCII subject, one JPEG attachment with verified SHA-256
+integrity, and Bcc. The planned two-attachment/internationalized-filename
+case in section 3 was not executed live.
 
 The received `.eml` evidence was independently reviewed. The live
 submissions are distinct from the allowlist and traversal controls,
@@ -242,6 +247,10 @@ subject to exercise RFC 2047 header encoding:
 
 ### 3. Multiple attachments from confined roots
 
+> **Not executed in the 2026-10-21 campaign.** The live attachment case
+> used one JPEG. This two-attachment/internationalized-filename procedure
+> remains a reusable future test.
+
 Place two known test files under the configured root. Use relative paths
 only. Include a non-ASCII filename to exercise encoded MIME parameters:
 
@@ -286,15 +295,18 @@ Use two test recipients: one in `to`, one in `bcc`:
 
 - [ ] The result reports `recipient_count: 2`.
 - [ ] Both test recipients receive the message.
-- [ ] The `to` recipient's headers contain `To` but **no** `Bcc` header
-      and no Bcc address.
-- [ ] The Bcc recipient's headers also omit `Bcc`; the address is
-      visible only through the provider's envelope/delivery information.
+- [ ] The `to` recipient's copy contains `To` but **no** Bcc address and
+      no sender-generated `Bcc` header. The To recipient must not learn
+      the Bcc address.
+- [ ] The Bcc recipient's copy omits the sender-generated `Bcc` header.
+      Provider-generated `Delivered-To` or `X-Pm-Original-To` headers may
+      legitimately identify the Bcc recipient in that recipient's own
+      copy.
 - [ ] Do not use a personal mailbox for this check.
 
 The tool result does not expose the SMTP transcript or full recipient
 list. Privacy is confirmed by recipient delivery plus the absence of
-Bcc in the serialized headers.
+sender-generated Bcc information in the serialized headers.
 
 ### 5. Preflight controls (no SMTP)
 
@@ -418,13 +430,18 @@ endpoint, TLS, credentials or recipient before a deliberate retry.
 
 The 2026-10-21 campaign met all of the following:
 
-- [x] all intended live-send cases returned `status: "submitted"`;
+- [x] the live cases actually executed (plain text, multipart/alternative
+      with non-ASCII subject, one JPEG attachment, and Bcc) returned
+      `status: "submitted"`;
 - [x] each recipient received the expected message;
 - [x] the offline preflight controls returned their expected typed errors
       and did not create an SMTP transaction;
-- [x] Bcc addresses and Bcc headers were absent from recipient headers;
-- [x] attachment counts, byte totals and contents matched, including the
-      JPEG SHA-256 check;
+- [x] the To recipient received no Bcc address and no sender-generated
+      Bcc header; provider-generated `Delivered-To` or `X-Pm-Original-To`
+      headers in the Bcc recipient's own copy were permitted;
+- [x] the single live JPEG attachment's SHA-256 integrity was verified;
+      the planned two-attachment/internationalized-filename case was not
+      executed live;
 - [x] returned Message-IDs matched the delivered headers;
 - [x] `send_message` audit records contained no secrets, bodies,
       attachment contents, raw SMTP responses, full recipient lists or

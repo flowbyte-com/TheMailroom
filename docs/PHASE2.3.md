@@ -500,9 +500,11 @@ cross-reference, not a second test report.
 
 - **Live submissions and received-message verification:** authenticated
   SMTP over TLS 1.3; plain-text delivery; multipart/alternative MIME;
-  attachment delivery with JPEG SHA-256 verification; Bcc delivery
-  without visible-header disclosure; returned Message-ID present in the
-  received message; IMAP reply-threading interoperability.
+  one JPEG attachment with verified SHA-256 integrity; Bcc delivery with
+  no Bcc address or sender-generated Bcc header in the To recipient's
+  copy, while provider delivery headers in the Bcc recipient's own copy
+  are permitted; returned Message-ID present in the received message;
+  IMAP reply-threading interoperability.
 - **Offline negative controls:** allowlist rejection and confined
   attachment traversal rejection returned the expected typed errors,
   made zero sender calls and produced no live submission. These were
@@ -510,6 +512,9 @@ cross-reference, not a second test report.
 - **Non-ASCII qualification:** non-ASCII subject delivery passed live;
   non-ASCII body composition was verified offline only; delivered
   multipart bodies were ASCII-only.
+- **Attachment qualification:** the live attachment case used one JPEG
+  with verified SHA-256 integrity; the planned
+  two-attachment/internationalized-filename case was not executed live.
 - **Qualification:** the campaign is interoperability/smoke-test
   evidence. It is not exhaustive security testing, provider-wide
   certification or production certification. It does not cover

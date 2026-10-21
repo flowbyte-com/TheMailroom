@@ -1,18 +1,23 @@
 # TheMailroom Architecture
 
-> Status: Phase 2.3 implementation is complete on `main`. PR 1 is
-> **MERGED** (PR #10, `bf3618f247928ea1f1d2c687aac1cffd96a89070`),
-> PR 2 is **MERGED** (PR #11,
-> `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), and PR 3 is **MERGED**
-> (PR #12, `d1ecf774809681b2795a01f91182eec15a4b2f3f`). The
-> documentation closeout is GitHub PR #13; see that PR for its current
-> merge status. The read-only IMAP path, inbound attachment retrieval,
-> recipient policy, conditional SMTP validation, confined outbound
-> attachment resolver, bounded MIME composer, SMTP submission client and
-> `send_message` are implemented.
-> Reply/forward and mailbox mutation are **not** implemented. Controlled
-> external SMTP testing has **not** been performed, production hardening
-> is not complete, and TheMailroom is not a production-hardened release.
+> Status: Phase 2.3 implementation and documentation closeout are
+> complete on `main`. PR 1 is **MERGED** (PR #10,
+> `bf3618f247928ea1f1d2c687aac1cffd96a89070`), PR 2 is **MERGED**
+> (PR #11, `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), PR 3 is
+> **MERGED** (PR #12,
+> `d1ecf774809681b2795a01f91182eec15a4b2f3f`), and PR 4 (documentation
+> closeout) is **MERGED** (PR #13,
+> `a4851e9159af63026e5593f30988c114d7117261`). The read-only IMAP path,
+> inbound attachment retrieval, recipient policy, conditional SMTP
+> validation, confined outbound attachment resolver, bounded MIME
+> composer, SMTP submission client and `send_message` are implemented.
+> The Purelymail smoke-test campaign was executed on 2026-10-21 and
+> passed; the authoritative record is
+> [`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). It is
+> interoperability/smoke-test evidence, not production certification.
+> Reply/forward and mailbox mutation are **not** implemented. Production
+> hardening is not complete, and TheMailroom is not a production-hardened
+> release.
 
 ## 1. Goals and non-goals
 
@@ -187,10 +192,11 @@ The sender is deliberately minimal:
 
 SMTP acceptance is not final mailbox delivery. The tool does not create
 an automatic Sent copy. The full semantics are in
-`docs/PHASE2_DESIGN.md` §3 and `docs/PHASE2.3.md` PR 3. The sender has not
-yet been exercised against a controlled external SMTP service; the
-not-yet-executed operator runbook is
-[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md).
+`docs/PHASE2_DESIGN.md` §3 and `docs/PHASE2.3.md` PR 3. The sender was
+exercised against Purelymail on 2026-10-21 in the live smoke-test
+campaign; the authoritative record is
+[`LIVE_SMTP_SMOKE_TEST.md`](LIVE_SMTP_SMOKE_TEST.md). That campaign is
+interoperability/smoke-test evidence, not production certification.
 
 ### 2.5 MIME (`internal/mimeparse`, `internal/mailcompose`)
 
