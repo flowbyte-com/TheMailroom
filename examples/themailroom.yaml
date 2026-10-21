@@ -4,12 +4,14 @@
 # The server validates this file on startup; unknown fields and
 # duplicate keys are rejected, and the schema is otherwise strict.
 #
-# Outbound submission is implemented (Phase 2.3, PR #12). An account with
-# the "send" capability can use the send_message MCP tool. Submission is
-# TLS-only (implicit TLS or mandatory STARTTLS) and authenticates with
-# AUTH PLAIN; the server must advertise that mechanism. Controlled
-# external SMTP testing has not been performed. See
-# docs/LIVE_SMTP_SMOKE_TEST.md (not yet executed).
+# Outbound submission is implemented (Phase 2.3, PRs #10-#12; docs PR #13
+# merged as a4851e9). An account with the "send" capability can use the
+# send_message MCP tool. Submission is TLS-only (implicit TLS or mandatory
+# STARTTLS) and authenticates with AUTH PLAIN; the server must advertise
+# that mechanism.
+# The Purelymail smoke-test campaign was executed on 2026-10-21 and passed.
+# It is interoperability/smoke-test evidence, not production certification.
+# See docs/LIVE_SMTP_SMOKE_TEST.md for the authoritative record.
 
 server:
   log_level: info            # debug, info, warn, error
@@ -31,6 +33,13 @@ accounts:
       # waits for the command to exit and reads its stdout (trimmed).
       password_command: ["pass", "email/imap/personal"]
 
+      # Provider-issued app passwords are accepted as ordinary password
+      # values through password or password_command; there is no separate
+      # app_password field. IMAP and SMTP credentials are independent. A
+      # 2FA provider may require an app password; it works only if the
+      # provider permits IMAP LOGIN and SMTP AUTH PLAIN over TLS. OAuth2-only
+      # providers remain unsupported.
+      #
       # Alternatively, store the password directly. NEVER commit a file
       # with this field set; chmod 600 the file.
       # password: hunter2
