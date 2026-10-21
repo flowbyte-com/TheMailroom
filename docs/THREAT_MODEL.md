@@ -68,14 +68,17 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 - **(implemented, PR 1/PR 3)** `os.Root` confines local attachment reads to the configured roots; symlink escapes, traversal, absolute paths and ambiguous matches are rejected. `send_message` uses this resolver and freezes the bytes before opening SMTP.
 - **(implemented, PR 3)** The SMTP password is retained in an unexported field on the runtime account and passed directly to the sender. It is absent from `Account.View`, `list_accounts`, audit logs, error messages and sender errors.
 - **(implemented, PR 3)** The SMTP `password_command` runs directly with no shell interpolation, a bounded context, bounded stdout and a bounded wait for inherited pipe handles. Output is never included in errors or logs.
+- **(implemented, Phase 3 PR 2)** The IMAP `password_command` runs directly with no shell interpolation, a bounded context, bounded stdout, a discarded stderr and a bounded wait for inherited pipe handles. Its stdout is capped at 8 KiB and its stderr is discarded rather than captured, so neither the credential nor any command diagnostic text can reach an error, a log or an MCP response. The exit status and the timeout or cancellation classification are the only failure diagnostics retained.
 - **(implemented, PR 3)** SMTP errors are mapped to generic typed errors. Raw server responses, commands, recipient addresses and credentials are not included.
 
 **Residual risk.** Misconfigured logging at the host can capture
-secrets; documented in README. The pre-existing IMAP `password_command`
-path uses unbounded stdout/stderr buffers and includes truncated stderr
-in internal errors. Tool error mapping returns a generic
-`InternalError`, so no MCP credential leak has been observed, but this
-path should be aligned with the bounded SMTP credential path in Phase 3.
+secrets; documented in README. Bounding the credential-command output
+bounds TheMailroom's memory use and keeps the command's output out of
+errors and logs; it does not make the command itself safe. The external
+credential command remains a locally configured executable that runs with
+TheMailroom's privileges: its trustworthiness, its own filesystem and
+network access, and the behaviour of any program it launches remain the
+operator's responsibility.
 
 ### T3. Data exfiltration
 
@@ -327,12 +330,16 @@ These are recorded, not silently accepted as production-grade behaviour:
   hardening concerns. Schema size/count limits are also still Phase 3
   work; the remaining risk is resource exhaustion, not confidentiality
   or integrity.
-- **IMAP credential-command buffering.** The pre-existing IMAP
-  `password_command` path uses unbounded `bytes.Buffer` values for
-  stdout/stderr and includes truncated stderr in internal errors. SMTP
-  uses a bounded buffer and excludes command output. Tool mapping
-  currently returns a generic `InternalError`, so no MCP credential
-  disclosure has been observed; align the IMAP path in Phase 3.
+- **Credential-command trustworthiness.** Bounding the IMAP and SMTP
+  credential-command output bounds TheMailroom's memory use and keeps the
+  command's output out of errors and logs. It does not make the command
+  safe: the executable is operator-configured and runs with
+  TheMailroom's privileges, and its own behaviour, filesystem and network
+  access are the operator's responsibility. The IMAP path caps stdout at
+  8 KiB, discards stderr, and bounds the run at 30 seconds or the
+  caller's cancellation; the SMTP path caps stdout at 8 KiB, discards
+  stderr, and bounds the run at its configured timeout. A command that
+  legitimately needs to run longer is out of scope.
 - **Audit-outcome test coverage.** The structured audit categories are
   implemented and success logging is tested, but `preflight_failure`,
   `definite_failure` and `ambiguous_submission` logs do not all have

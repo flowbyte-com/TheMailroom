@@ -548,4 +548,6 @@ cross-reference, not a second test report.
   buffers and includes truncated stderr in internal errors; and
   failure-outcome audit categories are not fully unit-tested. These are
   Phase 3 hardening items, not production-code changes in this
-  documentation closeout.
+  documentation closeout. (The IMAP credential-command bounding was
+  implemented in Phase 3 PR 2; see `docs/THREAT_MODEL.md` for the current
+  state.)

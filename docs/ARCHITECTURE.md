@@ -378,6 +378,33 @@ Two credential sources are supported:
    password. This is the recommended mechanism using a system keyring
    (e.g. `pass`, `secret-tool`).
 
+A `password_command` is executed directly, never through a shell, so no
+argument is ever interpolated into a command line. Both the IMAP and the
+SMTP path apply the same constraints:
+
+- stdout is capped at 8 KiB. Output beyond the cap is discarded as it
+  arrives, so the retained memory does not grow with the amount of output,
+  and the child process is never blocked by a full pipe. Exactly 8 KiB is
+  accepted; one byte more is rejected.
+- stderr is discarded, not captured. It is arbitrary operator-supplied
+  text that may embed secrets, and it is not needed to classify the
+  failure.
+- The run is bounded by a timeout — 30 seconds for IMAP, the configured
+  credential timeout for SMTP — and by the caller's context, so a
+  cancelled operation stops the command. A child that outlives
+  cancellation while holding the stdout pipe open cannot wedge the
+  caller: the wait for inherited pipe handles is bounded separately.
+- Neither the command's stdout nor its stderr is ever included in an
+  error, a log or an MCP response. The exit status and the timeout or
+  cancellation classification are the only failure diagnostics kept.
+- Trailing CR and LF characters are trimmed from the captured stdout, so
+  a command that prints a trailing newline is handled exactly as before.
+
+The external command is a locally configured executable that runs with
+TheMailroom's privileges. Bounding its output bounds TheMailroom's
+resource use and output exposure; it does not make the command itself
+trustworthy. See [`THREAT_MODEL.md`](THREAT_MODEL.md) T2.
+
 The legacy `insecure_skip_verify` field has been **removed** from
 production configuration. There is no way to disable TLS certificate
 verification through the configuration file. Tests against a

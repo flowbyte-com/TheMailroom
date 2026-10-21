@@ -104,11 +104,11 @@ confined attachment-resolution foundations; PR 2 added the bounded MIME
 composer; PR 3 added the authenticated SMTP sender.
 
 **Phase 3 (Hardening)** covers the remaining production gates. This
-change adds bounded inbound MCP request framing; bounded IMAP list/search
-workloads, explicit IMAP command timeouts, `has_attachments` for IMAP
-summaries, response-size limits, fuzz tests, installation docs, and a
-cross-platform release remain Phase 3 work. The Purelymail smoke test
-completed on 2026-10-21; IMAP credential-command buffering and other
+change adds bounded inbound MCP request framing and bounds the IMAP
+credential command; bounded IMAP list/search workloads, explicit IMAP
+command timeouts, `has_attachments` for IMAP summaries, response-size
+limits, fuzz tests, installation docs, and a cross-platform release remain
+Phase 3 work. The Purelymail smoke test completed on 2026-10-21; other
 hardening items remain Phase 3 work. The smoke test is not production
 certification.
 
@@ -170,12 +170,13 @@ TheMailroom supports two credential sources, in order of preference:
    (`chmod 600 themailroom.yaml`).
 
 No matter which mechanism is used, the server does not print a resolved
-password. SMTP credential-command output is bounded and excluded from
-errors and logs. The pre-existing IMAP `password_command` path is
-pending hardening: it uses unbounded stdout/stderr buffers and includes
-truncated stderr in internal errors, although tool errors are
-mapped to generic messages. Logs go to stderr so they do not contaminate
-the stdio JSON-RPC stream.
+password. For both IMAP and SMTP, credential-command output is bounded to
+8 KiB of stdout, stderr is discarded rather than captured, and the run is
+bounded by a timeout and by the caller's cancellation. Neither the
+command's stdout nor its stderr is ever included in an error, a log or an
+MCP response; only the exit status and the timeout or cancellation
+classification are kept. Logs go to stderr so they do not contaminate the
+stdio JSON-RPC stream.
 
 ### App passwords and 2FA
 
@@ -328,8 +329,7 @@ pre-decode MCP allocation, the other bounds email content after parsing.
 It is a per-frame allocation boundary, not an aggregate process-memory
 limit. The SDK handler queue, concurrent in-flight requests, tool-level
 argument amplification and response sizes remain separate Phase 3
-hardening concerns. The IMAP credential-command buffering issue noted
-above is also Phase 3 work.
+hardening concerns.
 
 **IMAP client dependency.** TheMailroom depends on
 `github.com/flowbyte-com/go-imap` `v1.2.1-themailroom.4`, a
