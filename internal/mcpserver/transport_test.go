@@ -777,6 +777,41 @@ func TestBoundedServerLegacyBatchRejectedFrom20250618(t *testing.T) {
 	}
 }
 
+// toolErrorResponse is the subset of a JSON-RPC response that a client
+// needs in order to read a tool execution error. It deliberately omits
+// structuredContent: the SDK's SetError does not populate that field, so a
+// client must not depend on it.
+type toolErrorResponse struct {
+	Result *struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"result"`
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// consumeToolError reads a tool execution error the way a client must: from
+// isError and the text blocks in content, without consulting
+// structuredContent. It reports whether the response was a readable tool
+// execution error.
+func consumeToolError(resp *toolErrorResponse) (string, bool) {
+	if resp.Error != nil || resp.Result == nil || !resp.Result.IsError {
+		return "", false
+	}
+	var text string
+	for _, c := range resp.Result.Content {
+		if c.Type == "text" {
+			text += c.Text
+		}
+	}
+	return text, text != ""
+}
+
 // TestBoundedServerToolValidationErrorShape pins the two error channels the
 // MCP specification defines for tool calls. A schema-invalid argument is a
 // tool execution error and is reported in the result with isError set; an
@@ -792,19 +827,7 @@ func TestBoundedServerToolValidationErrorShape(t *testing.T) {
 	bs.write(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{}}}`)
 	line := bs.read()
 
-	var resp struct {
-		Result *struct {
-			IsError bool `json:"isError"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
+	var resp toolErrorResponse
 	if err := json.Unmarshal(line, &resp); err != nil {
 		t.Fatalf("tools/call response: %v (line %s)", err, line)
 	}
@@ -828,11 +851,24 @@ func TestBoundedServerToolValidationErrorShape(t *testing.T) {
 		t.Errorf("tool handler invoked %d times, want 0", got)
 	}
 
+	// The SDK's SetError populates content and isError only. It does not
+	// populate structuredContent, so a client must be able to consume the
+	// error without it.
+	if bytes.Contains(line, []byte(`"structuredContent"`)) {
+		t.Errorf("schema-invalid call carries structuredContent: %s", line)
+	}
+	msg, ok := consumeToolError(&resp)
+	if !ok {
+		t.Fatal("schema-invalid call is not consumable from isError and content")
+	}
+	if !strings.Contains(msg, `"text"`) {
+		t.Errorf("consumed validation message = %q, want it to name the missing argument", msg)
+	}
+
 	// An unknown tool stays a protocol error.
 	bs.write(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}`)
 	line = bs.read()
-	resp.Result = nil
-	resp.Error = nil
+	resp = toolErrorResponse{}
 	if err := json.Unmarshal(line, &resp); err != nil {
 		t.Fatalf("tools/call response: %v (line %s)", err, line)
 	}
@@ -841,6 +877,12 @@ func TestBoundedServerToolValidationErrorShape(t *testing.T) {
 	}
 	if resp.Error.Code != -32602 {
 		t.Errorf("unknown tool error code = %d, want -32602", resp.Error.Code)
+	}
+	if resp.Result != nil {
+		t.Errorf("unknown tool returned a result alongside the protocol error: %s", line)
+	}
+	if _, ok := consumeToolError(&resp); ok {
+		t.Error("unknown tool was consumable as a tool execution error; want a protocol error")
 	}
 }
 

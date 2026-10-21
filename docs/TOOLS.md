@@ -25,17 +25,37 @@ Every tool:
 
 All account-scoped tools take `account_id` as a required string field. There is no implicit "current account"; `list_accounts` is the only account metadata tool.
 
-**Error channels.** A tool call can fail in two distinct ways, and clients
-must handle both. A *tool execution error* — a schema or business
-validation failure, a missing account, a missing capability — is returned
-as a normal JSON-RPC result whose `isError` is `true` and whose
-`structuredContent` carries the error object below. A *protocol error* is
-returned as a JSON-RPC error; the only one a client can trigger with a
-well-formed request is an unknown tool name (code `-32602`). Arguments
-that fail schema validation are tool execution errors, not protocol
-errors, so that a model sees the validation message and can retry with
-corrected arguments. This split follows the MCP specification and is
-pinned by `TestBoundedServerToolValidationErrorShape`.
+**Error channels.** A tool call can fail in three distinct ways, and
+clients must handle all three.
+
+1. **SDK-generated argument errors.** A schema validation failure or an
+   argument unmarshal failure is rejected by the MCP SDK before the tool
+   handler runs. The SDK returns a normal JSON-RPC *result* whose `isError`
+   is `true` and whose `content` holds one human-readable text block
+   describing the violation. The SDK's `SetError` does not populate
+   `structuredContent`, so a client must not depend on that field for these
+   errors; `isError` and `content` are the portable fields.
+2. **TheMailroom business errors.** The tool handlers produce the typed
+   error model documented under [Common error model](#common-error-model)
+   below — a `code`, a `message` and optional `details` — for an unknown
+   account, a missing capability, invalid input, and backend or SMTP
+   failures. The SDK converts a handler error into the same tool execution
+   error shape as case 1: a result with `isError: true` and the error
+   message in `content`. The typed `code` is recorded in the server-side
+   audit log, for example the `send_message` outcome record; the client
+   payload carries the message text.
+3. **Protocol errors.** A malformed protocol request, a missing or
+   unparseable `params` object, and an unknown tool name are JSON-RPC
+   *errors*, not results. An unknown tool name uses code `-32602`; a
+   request with no `params` uses `-32600`. A `params` object that cannot be
+   parsed into a call-tool request is also a JSON-RPC error. No `isError`
+   flag and no `content` are present in any of these.
+
+A tool execution error therefore does not carry `structuredContent` today.
+`structuredContent` appears only on a successful call, where it holds the
+tool's typed output. The portable way to read any tool execution error is
+`isError` plus the text in `content`. This split follows the MCP
+specification and is pinned by `TestBoundedServerToolValidationErrorShape`.
 
 ## Common error model
 
