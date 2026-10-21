@@ -150,6 +150,15 @@ func sendMessage(ctx context.Context, registry *accounts.Registry, sender smtpcl
 		err = &permissions.ErrPermissionDenied{Account: acc.ID, Capability: permissions.CapSend}
 		return
 	}
+
+	// Bound the raw address input before parsing or recipient-policy
+	// processing. This keeps repeated or oversized To/Cc/Bcc values from
+	// forcing allocations proportional to the submitted entry count.
+	if berr := mailcompose.ValidateAddressInputBudget(acc.Email, args.To, args.Cc, args.Bcc, acc.Limits.MaxMessageBytes); berr != nil {
+		err = berr
+		return
+	}
+
 	fromEnvelope, ferr := recipients.Canonical(acc.Email)
 	if ferr != nil {
 		err = ferr

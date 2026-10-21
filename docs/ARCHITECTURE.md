@@ -428,8 +428,9 @@ AI agent
   | MCP tool call: send_message { account_id, to, cc, bcc, subject, text, html, attachments }
   v
 internal/tools         -- account lookup, send/attachment_send checks,
-  |                       recipient policy, confined attachment resolve,
-  |                       MIME composition, max_message_bytes
+  |                       raw recipient budget, recipient policy,
+  |                       confined attachment resolve, MIME composition,
+  |                       max_message_bytes
   v
 internal/smtpclient    -- one connection: TLS -> AUTH PLAIN -> MAIL FROM ->
   |                       all RCPT TO -> DATA -> prepared bytes -> final response

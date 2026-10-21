@@ -370,13 +370,15 @@ The handler performs these steps in order, before any SMTP connection:
 
 1. Look up `account_id`.
 2. Require the `send` capability.
-3. Validate and canonicalize all To/Cc/Bcc addresses.
-4. Apply the exact recipient allow-list and unique-recipient limit.
-5. Require `attachment_send` when attachments are present.
-6. Resolve and freeze attachments through the confined resolver.
-7. Compose the complete serialized RFC 5322/MIME message.
-8. Enforce `max_message_bytes` on the final serialized bytes.
-9. Retain the generated Message-ID and immutable bytes for submission.
+3. Bound the raw To/Cc/Bcc entry count and aggregate bytes against
+   `max_message_bytes`, before parsing any address.
+4. Validate and canonicalize all To/Cc/Bcc addresses.
+5. Apply the exact recipient allow-list and unique-recipient limit.
+6. Require `attachment_send` when attachments are present.
+7. Resolve and freeze attachments through the confined resolver.
+8. Compose the complete serialized RFC 5322/MIME message.
+9. Enforce `max_message_bytes` on the final serialized bytes.
+10. Retain the generated Message-ID and immutable bytes for submission.
 
 Any preflight error means zero SMTP connections and zero submission
 attempts. The sender also validates the final request before dialing as
@@ -425,6 +427,11 @@ injection. Coverage includes:
 - independent MIME reparsing of transmitted text, HTML and attachments;
 - no SMTP connection for recipient, permission, attachment, size and
   other preflight failures;
+- early oversized recipient-input rejection before address parsing,
+  including large repeated lists, aggregate To/Cc/Bcc input, a typed
+  `MessageTooLarge` error, zero sender calls and bounded allocation;
+- duplicate collapsing, local-part case sensitivity, domain case
+  insensitivity and unique-recipient counting;
 - invalid certificates, wrong hostnames, missing/refused STARTTLS and
   authentication rejection, with no credentials sent without verified
   TLS;

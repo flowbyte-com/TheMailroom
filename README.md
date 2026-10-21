@@ -194,9 +194,10 @@ paths resolved only inside `attachment_send_paths`; absolute paths,
 traversal, symlink escapes and non-regular files are rejected. The
 outbound resolver, recipient policy, MIME composer and SMTP sender are
 wired into `send_message`. Preflight runs completely before any SMTP
-connection: account lookup, `send`, recipient policy and limits,
-`attachment_send` when needed, confined attachment resolution, MIME
-composition and final `max_message_bytes` enforcement. The composer
+connection: account lookup, `send`, a raw recipient count/byte budget,
+recipient policy and limits, `attachment_send` when needed, confined
+attachment resolution, MIME composition and final `max_message_bytes`
+enforcement. The composer
 bounds header preparation by the same limit, omits Bcc from headers and
 returns the Message-ID used by the sender.
 

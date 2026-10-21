@@ -103,3 +103,28 @@ func TestOversizedSubjectRejectedBeforeEncoding(t *testing.T) {
 		t.Fatalf("oversized subject allocated %d bytes before rejection", allocated)
 	}
 }
+
+// TestValidateAddressInputBudgetBoundedAllocations verifies that the early
+// recipient budget rejects a large repeated list without allocating a map or
+// slice proportional to the submitted entry count. The input slice itself is
+// built before measurement.
+func TestValidateAddressInputBudgetBoundedAllocations(t *testing.T) {
+	const maxMessageBytes = 64
+	values := make([]string, 1<<20)
+	for i := range values {
+		values[i] = "a@example.test"
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err := ValidateAddressInputBudget("sender@example.test", values, nil, nil, maxMessageBytes)
+	runtime.ReadMemStats(&after)
+
+	if !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("err = %v, want ErrMessageTooLarge", err)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 1<<20 {
+		t.Fatalf("oversized address input allocated %d bytes before rejection", allocated)
+	}
+}

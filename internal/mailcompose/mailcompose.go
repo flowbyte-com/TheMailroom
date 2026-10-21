@@ -49,8 +49,8 @@ var (
 	// bytes exceed max_total_attachment_bytes.
 	ErrTotalAttachmentTooLarge = errors.New("mailcompose: total attachment size too large")
 
-	// ErrMessageTooLarge is returned when the final serialized message
-	// exceeds max_message_bytes.
+	// ErrMessageTooLarge is returned when raw header or recipient input,
+	// or the final serialized message, exceeds max_message_bytes.
 	ErrMessageTooLarge = errors.New("mailcompose: serialized message too large")
 
 	// ErrMIME is returned when MIME serialization fails for a reason other
@@ -228,36 +228,59 @@ func validateHeaderPreparation(req Request, maxMessageBytes int) error {
 		filenameBytes += n
 	}
 
+	if err := ValidateAddressInputBudget(req.From, req.To, req.Cc, req.Bcc, maxMessageBytes); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateAddressInputBudget bounds raw envelope address input before parsing.
+// It applies the same count and aggregate-byte budget against maxMessageBytes
+// that Compose applies during header preparation. From is included because the
+// composer counts it in the same address-header budget.
+//
+// The function does not parse addresses and allocates only when it returns an
+// error. send_message calls it before recipient canonicalisation and policy
+// processing, so repeated or oversized To/Cc/Bcc input cannot force large
+// maps or slices before it is rejected.
+func ValidateAddressInputBudget(from string, to, cc, bcc []string, maxMessageBytes int) error {
+	if maxMessageBytes <= 0 {
+		return fmt.Errorf("%w: max_message_bytes must be positive", ErrInvalidLimits)
+	}
+	max := int64(maxMessageBytes)
+
 	addressCount := int64(1) // From
-	addressCount += int64(len(req.To))
-	addressCount += int64(len(req.Cc))
-	addressCount += int64(len(req.Bcc))
+	addressCount += int64(len(to))
+	addressCount += int64(len(cc))
+	addressCount += int64(len(bcc))
 	if addressCount > max {
 		return fmt.Errorf("%w: address count exceeds max_message_bytes", ErrMessageTooLarge)
 	}
 
-	var addressBytes int64
-	addAddresses := func(field string, values []string) error {
-		for _, value := range values {
-			n := int64(len(value))
-			if n > max-addressBytes {
-				return fmt.Errorf("%w: %s address input exceeds max_message_bytes", ErrMessageTooLarge, field)
-			}
-			addressBytes += n
+	addressBytes := int64(len(from))
+	if addressBytes > max {
+		return fmt.Errorf("%w: from address input exceeds max_message_bytes", ErrMessageTooLarge)
+	}
+	for _, value := range to {
+		n := int64(len(value))
+		if n > max-addressBytes {
+			return fmt.Errorf("%w: to address input exceeds max_message_bytes", ErrMessageTooLarge)
 		}
-		return nil
+		addressBytes += n
 	}
-	if err := addAddresses("from", []string{req.From}); err != nil {
-		return err
+	for _, value := range cc {
+		n := int64(len(value))
+		if n > max-addressBytes {
+			return fmt.Errorf("%w: cc address input exceeds max_message_bytes", ErrMessageTooLarge)
+		}
+		addressBytes += n
 	}
-	if err := addAddresses("to", req.To); err != nil {
-		return err
-	}
-	if err := addAddresses("cc", req.Cc); err != nil {
-		return err
-	}
-	if err := addAddresses("bcc", req.Bcc); err != nil {
-		return err
+	for _, value := range bcc {
+		n := int64(len(value))
+		if n > max-addressBytes {
+			return fmt.Errorf("%w: bcc address input exceeds max_message_bytes", ErrMessageTooLarge)
+		}
+		addressBytes += n
 	}
 	return nil
 }

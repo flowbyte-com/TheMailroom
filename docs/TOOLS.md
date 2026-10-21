@@ -36,9 +36,9 @@ All account-scoped tools take `account_id` as a required string field. There is 
 - `RateLimited` — limit exceeded.
 - `UidMismatch` — `uid_validity` does not match the current mailbox.
 - `NotImplemented` — capability exists in the schema but is not yet wired.
-- `MessageTooLarge` — the raw message exceeds `max_message_bytes`, or an
-  ordinary body part exceeds the per-part cap during `read_attachment`
-  validation.
+- `MessageTooLarge` — raw To/Cc/Bcc input or the serialized message
+  exceeds `max_message_bytes`, or an ordinary body part exceeds the
+  per-part cap during `read_attachment` validation.
 - `NestingTooDeep` — the MIME nesting exceeds `max_mime_nesting`.
 - `TooManyParts` — the MIME part count exceeds `max_mime_parts`.
 - `TooManyAttachments` — the attachment count exceeds `max_attachments`.
@@ -136,16 +136,18 @@ following before opening any SMTP connection:
 
 1. Look up `account_id`.
 2. Require `send`.
-3. Canonicalise To, Cc and Bcc.
-4. Enforce the exact recipient allow-list, at least one recipient, and
+3. Bound the raw To/Cc/Bcc entry count and aggregate bytes against
+   `max_message_bytes`, before parsing any address.
+4. Canonicalise To, Cc and Bcc.
+5. Enforce the exact recipient allow-list, at least one recipient, and
    the unique `max_recipients` limit.
-5. Require `attachment_send` when attachments are present.
-6. Resolve and freeze attachments inside the account's configured
+6. Require `attachment_send` when attachments are present.
+7. Resolve and freeze attachments inside the account's configured
    roots.
-7. Compose the complete RFC 5322/MIME message with the account identity
+8. Compose the complete RFC 5322/MIME message with the account identity
    as `From`.
-8. Enforce `max_message_bytes` on the final serialized message.
-9. Retain that Message-ID and those bytes for the sender.
+9. Enforce `max_message_bytes` on the final serialized message.
+10. Retain that Message-ID and those bytes for the sender.
 
 Any preflight error means no SMTP connection or submission attempt.
 
@@ -159,8 +161,10 @@ Any preflight error means no SMTP connection or submission attempt.
 - `max_attachment_bytes` / `max_total_attachment_bytes` /
   `max_attachments` — bound frozen attachments resolved by
   `internal/attachments`.
-- `max_message_bytes` — enforced by `internal/mailcompose` on the final
-  serialized message and re-checked by the tool before SMTP.
+- `max_message_bytes` — bounds raw To/Cc/Bcc entry count and aggregate
+  bytes before address parsing, is enforced by `internal/mailcompose`
+  on header preparation and the final serialized message, and is
+  re-checked by the tool before SMTP.
 
 **SMTP transport.** Exactly one short-lived connection is used per call;
 there is no pooling, queue, background worker or retry. The client

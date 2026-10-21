@@ -348,6 +348,73 @@ func TestSendMessageTooLargeBeforeSMTP(t *testing.T) {
 	}
 }
 
+func TestSendMessageRejectsOversizedRecipientInputBeforePreprocessing(t *testing.T) {
+	sender := &recordingSender{}
+	env := newSendEnv(t, sendYAMLWithAccounts(t, 2525, `
+    limits:
+      max_message_bytes: 64
+`), sender, nil)
+	defer env.cleanup()
+
+	repeated := make([]string, 10_000)
+	for i := range repeated {
+		repeated[i] = "alice@example.test"
+	}
+	longAddress := strings.Repeat("a", 32) + "@example.test"
+
+	tests := []struct {
+		name string
+		args SendMessageArgs
+	}{
+		{
+			name: "very large repeated list",
+			args: SendMessageArgs{
+				AccountID: "sender",
+				To:        repeated,
+				Text:      "body",
+			},
+		},
+		{
+			name: "aggregate across to cc and bcc",
+			args: SendMessageArgs{
+				AccountID: "sender",
+				To:        []string{longAddress, longAddress},
+				Cc:        []string{longAddress, longAddress},
+				Bcc:       []string{longAddress, longAddress},
+				Text:      "body",
+			},
+		},
+		{
+			name: "oversized before parsing malformed address",
+			args: SendMessageArgs{
+				AccountID: "sender",
+				To:        []string{longAddress, "not-an-address"},
+				Text:      "body",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := sendMessage(context.Background(), env.reg, sender, nil, tc.args)
+			if err == nil {
+				t.Fatal("expected recipient input size error")
+			}
+			te, ok := err.(*TypedError)
+			if !ok {
+				t.Fatalf("error type = %T, want *TypedError", err)
+			}
+			if te.Code != codeMessageTooLarge {
+				t.Errorf("error code = %q, want %q", te.Code, codeMessageTooLarge)
+			}
+			requireToolErrorContains(t, err, "exceeds size limit")
+		})
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("sender called %d times, want 0 for oversized recipient input", sender.callCount())
+	}
+}
+
 func TestSendMessageSuccessContract(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("attachment body"), 0o600); err != nil {
@@ -596,6 +663,53 @@ func TestSendMessageDeduplicatesRecipientsAndKeepsBccEnvelopeOnly(t *testing.T) 
 	if len(req.Recipients) != 2 || req.Recipients[0] != "alice@example.test" || req.Recipients[1] != "bob@example.test" {
 		t.Errorf("recipients = %v, want unique alice then bob", req.Recipients)
 	}
+	rawLower := strings.ToLower(string(req.Message))
+	if strings.Contains(rawLower, "\r\nbcc:") || strings.HasPrefix(rawLower, "bcc:") {
+		t.Error("Bcc header was serialized")
+	}
+}
+
+func TestSendMessageRecipientCaseAndDuplicateSemantics(t *testing.T) {
+	sender := &recordingSender{}
+	env := newSendEnv(t, sendYAMLWithAccounts(t, 2525, `
+    limits:
+      max_recipients: 4
+`), sender, nil)
+	defer env.cleanup()
+
+	got, err := env.call(t, "send_message", map[string]any{
+		"account_id": "sender",
+		"to":         []any{"Alice@Example.TEST", "alice@example.test"},
+		"cc":         []any{"ALICE@example.test", "Alice@EXAMPLE.TEST"},
+		"bcc":        []any{"alice@EXAMPLE.TEST", "bob@example.test"},
+		"text":       "body",
+	})
+	if err != nil {
+		t.Fatalf("send_message: %v", err)
+	}
+	if got["recipient_count"] != float64(4) {
+		t.Errorf("recipient_count = %v, want 4 unique recipients from 6 entries", got["recipient_count"])
+	}
+	if sender.callCount() != 1 {
+		t.Fatalf("sender called %d times, want 1", sender.callCount())
+	}
+
+	req := sender.request()
+	want := []string{
+		"Alice@example.test",
+		"alice@example.test",
+		"ALICE@example.test",
+		"bob@example.test",
+	}
+	if len(req.Recipients) != len(want) {
+		t.Fatalf("recipients = %v, want %v", req.Recipients, want)
+	}
+	for i := range want {
+		if req.Recipients[i] != want[i] {
+			t.Errorf("recipients[%d] = %q, want %q", i, req.Recipients[i], want[i])
+		}
+	}
+
 	rawLower := strings.ToLower(string(req.Message))
 	if strings.Contains(rawLower, "\r\nbcc:") || strings.HasPrefix(rawLower, "bcc:") {
 		t.Error("Bcc header was serialized")
