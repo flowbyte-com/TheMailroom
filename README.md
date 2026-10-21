@@ -103,13 +103,14 @@ Phase 2.3 PR 1 prepared the configuration, recipient-policy, and
 confined attachment-resolution foundations; PR 2 added the bounded MIME
 composer; PR 3 added the authenticated SMTP sender.
 
-**Phase 3 (Hardening)** will cover the remaining production gates,
-including bounded IMAP list/search workloads, explicit IMAP command
-timeouts, `has_attachments` for IMAP summaries, response-size limits,
-fuzz tests, installation docs, and a cross-platform release. The
-Purelymail smoke test completed on 2026-10-21; transport-level request
-sizing, IMAP credential-command buffering, and other hardening items
-remain Phase 3 work. The smoke test is not production certification.
+**Phase 3 (Hardening)** covers the remaining production gates. This
+change adds bounded inbound MCP request framing; bounded IMAP list/search
+workloads, explicit IMAP command timeouts, `has_attachments` for IMAP
+summaries, response-size limits, fuzz tests, installation docs, and a
+cross-platform release remain Phase 3 work. The Purelymail smoke test
+completed on 2026-10-21; IMAP credential-command buffering and other
+hardening items remain Phase 3 work. The smoke test is not production
+certification.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and
@@ -136,6 +137,7 @@ and validated on startup. The minimal example uses the in-memory backend:
 # themailroom.yaml
 server:
   log_level: info
+  max_request_bytes: 33554432             # optional; 32 MiB default, max 128 MiB
 
 accounts:
   - id: personal
@@ -312,12 +314,22 @@ to typed errors, and ambiguous post-DATA outcomes are never reported as
 definite non-delivery or retried. The full threat catalogue and
 mitigations are in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
-`max_message_bytes` bounds message composition and post-decode
-preprocessing; it is not a JSON-RPC request-size cap. A hostile or
-misbehaving MCP client can therefore force allocation of large `text`,
-`html` or attachment-list arguments before those checks run. A
-transport-level request cap is Phase 3 hardening. The IMAP
-credential-command buffering issue noted above is also Phase 3 work.
+Inbound stdio MCP frames are capped by `server.max_request_bytes`
+(default 32 MiB; hard maximum 128 MiB). The limit counts UTF-8 payload
+bytes excluding LF or CRLF framing and is enforced before the SDK's JSON
+decoder allocates the message. The 128 MiB upper bound is four times the
+default and leaves room for JSON escaping of a default-size 25 MiB
+message while keeping a single decoder allocation bounded. Exactly the
+limit is accepted; one more byte closes the connection without
+dispatching a tool. Each physical line must contain one complete JSON
+value; multi-line pretty-printed JSON is rejected. The setting is
+independent of an account's `max_message_bytes`: one bounds a single
+pre-decode MCP allocation, the other bounds email content after parsing.
+It is a per-frame allocation boundary, not an aggregate process-memory
+limit. The SDK handler queue, concurrent in-flight requests, tool-level
+argument amplification and response sizes remain separate Phase 3
+hardening concerns. The IMAP credential-command buffering issue noted
+above is also Phase 3 work.
 
 **IMAP client dependency.** TheMailroom depends on
 `github.com/flowbyte-com/go-imap` `v1.2.1-themailroom.4`, a

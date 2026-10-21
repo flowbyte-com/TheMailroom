@@ -9,6 +9,8 @@ func (c Config) Redacted() string {
 	var b strings.Builder
 	b.WriteString("server{log_level=")
 	b.WriteString(c.Server.LogLevel)
+	b.WriteString(", max_request_bytes=")
+	b.WriteString(itoa(c.Server.MaxRequestBytes))
 	b.WriteString("} accounts=[")
 	for i, a := range c.Accounts {
 		if i > 0 {

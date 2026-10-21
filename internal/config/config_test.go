@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -74,6 +75,9 @@ func TestParseValid(t *testing.T) {
 	if a.Limits.MaxSearchResults != DefaultMaxSearchResults {
 		t.Errorf("MaxSearchResults = %d, want default %d", a.Limits.MaxSearchResults, DefaultMaxSearchResults)
 	}
+	if redacted := cfg.Redacted(); !strings.Contains(redacted, "max_request_bytes=33554432") {
+		t.Errorf("Redacted() missing server max_request_bytes; got: %s", redacted)
+	}
 }
 
 func TestParseDefaults(t *testing.T) {
@@ -103,6 +107,60 @@ accounts:
 	}
 	if a.Limits.MaxMessageBytes != DefaultMaxMessageBytes {
 		t.Errorf("limits default missing")
+	}
+}
+
+func TestServerMaxRequestBytes(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		want    int
+		wantErr string
+	}{
+		{name: "default", want: DefaultMaxRequestBytes},
+		{name: "zero selects default", value: "0", want: DefaultMaxRequestBytes},
+		{name: "explicit", value: "1024", want: 1024},
+		{name: "upper bound", value: strconv.Itoa(MaxRequestBytesLimit), want: MaxRequestBytesLimit},
+		{name: "above upper bound", value: strconv.Itoa(MaxRequestBytesLimit + 1), wantErr: "max_request_bytes"},
+		{name: "negative", value: "-1", wantErr: "max_request_bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := validYAML
+			if tc.value != "" {
+				yaml = strings.Replace(yaml, "  log_level: info", "  log_level: info\n  max_request_bytes: "+tc.value, 1)
+			}
+			cfg, err := Parse([]byte(yaml))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("err = %q, want substring %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if cfg.Server.MaxRequestBytes != tc.want {
+				t.Errorf("MaxRequestBytes = %d, want %d", cfg.Server.MaxRequestBytes, tc.want)
+			}
+		})
+	}
+}
+
+func TestMaxRequestBytesIndependentOfAccountMessageLimit(t *testing.T) {
+	yaml := strings.Replace(validYAML, "  log_level: info", "  log_level: info\n  max_request_bytes: 1024", 1)
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Server.MaxRequestBytes != 1024 {
+		t.Errorf("MaxRequestBytes = %d, want 1024", cfg.Server.MaxRequestBytes)
+	}
+	if cfg.Accounts[0].Limits.MaxMessageBytes != 10485760 {
+		t.Errorf("MaxMessageBytes = %d, want 10485760", cfg.Accounts[0].Limits.MaxMessageBytes)
 	}
 }
 

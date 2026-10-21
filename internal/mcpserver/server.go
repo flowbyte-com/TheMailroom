@@ -7,10 +7,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/flowbyte-com/themailroom/internal/accounts"
+	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/tools"
 	"github.com/flowbyte-com/themailroom/internal/version"
 )
@@ -27,13 +29,19 @@ type Options struct {
 	// Logger is used for diagnostic output. If nil, slog.Default() is
 	// used.
 	Logger *slog.Logger
+
+	// MaxRequestBytes caps one inbound MCP JSON-RPC frame before JSON
+	// decoding. The count excludes LF or CRLF framing. Zero selects the
+	// configuration default.
+	MaxRequestBytes int
 }
 
 // Server is the assembled MCP server.
 type Server struct {
-	mcp      *mcp.Server
-	registry *accounts.Registry
-	logger   *slog.Logger
+	mcp             *mcp.Server
+	registry        *accounts.Registry
+	logger          *slog.Logger
+	maxRequestBytes int
 }
 
 // New constructs a Server bound to the given account registry.
@@ -46,6 +54,15 @@ func New(reg *accounts.Registry, opts Options) (*Server, error) {
 	}
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
+	}
+	if opts.MaxRequestBytes == 0 {
+		opts.MaxRequestBytes = config.DefaultMaxRequestBytes
+	}
+	if opts.MaxRequestBytes < 0 || opts.MaxRequestBytes > config.MaxRequestBytesLimit {
+		return nil, fmt.Errorf(
+			"mcpserver: max_request_bytes %d invalid; want between 1 and %d bytes",
+			opts.MaxRequestBytes, config.MaxRequestBytesLimit,
+		)
 	}
 
 	mcpImpl := &mcp.Implementation{
@@ -60,21 +77,27 @@ func New(reg *accounts.Registry, opts Options) (*Server, error) {
 	tools.Register(mcpServer, reg, tools.WithLogger(opts.Logger))
 
 	return &Server{
-		mcp:      mcpServer,
-		registry: reg,
-		logger:   opts.Logger,
+		mcp:             mcpServer,
+		registry:        reg,
+		logger:          opts.Logger,
+		maxRequestBytes: opts.MaxRequestBytes,
 	}, nil
 }
 
 // Run starts the server on stdio and blocks until the context is
 // cancelled or the transport terminates.
 func (s *Server) Run(ctx context.Context) error {
+	return s.run(ctx, newBoundedTransport(os.Stdin, os.Stdout, s.maxRequestBytes))
+}
+
+func (s *Server) run(ctx context.Context, transport mcp.Transport) error {
 	s.logger.Info("starting themailroom",
 		"version", version.Version,
 		"commit", version.Commit,
 		"accounts", len(s.registry.All()),
+		"max_request_bytes", s.maxRequestBytes,
 	)
-	return s.mcp.Run(ctx, &mcp.StdioTransport{})
+	return s.mcp.Run(ctx, transport)
 }
 
 // MCPServer exposes the underlying MCP server. It exists so tests can

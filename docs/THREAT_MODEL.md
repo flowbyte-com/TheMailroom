@@ -274,7 +274,22 @@ certification; the authoritative record is
 **Mitigations.**
 
 - **(implemented)** Only the configured MCP transport is bound. There is no HTTP listener.
-- **(planned)** JSON-RPC framing errors are logged and the connection is closed; partial messages are not executed.
+- **(implemented)** `server.max_request_bytes` caps one inbound JSON-RPC
+  frame at the transport boundary (default 32 MiB, hard maximum 128 MiB).
+  The count excludes LF or CRLF framing and is checked before the SDK's
+  JSON decoder allocates the message. Exactly the limit is accepted;
+  limit+1 or a malformed/incomplete frame closes the connection without
+  dispatching a tool. Each physical line must be one complete JSON value,
+  so the SDK decoder cannot join multiple lines into an over-limit value.
+  No raw frame bytes are written to stdout or included in diagnostics.
+- **(implemented)** The MCP Go SDK is pinned to v1.5.0. Earlier releases
+  carried a data race on the negotiated protocol version inside the stdio
+  transport: the connection's read loop and the session-initialization
+  handler both touched it, and the race detector reports it whenever a
+  client initializes and then sends a legacy batch. v1.5.0 carries the
+  upstream fix, which guards the field with a mutex, and it re-enables the
+  SDK's own race test after the related data-race fixes. The race is fixed
+  upstream and is not suppressed or worked around locally.
 
 ### T11. SMTP downgrade, envelope injection and authentication exposure
 
@@ -299,14 +314,19 @@ certification; the authoritative record is
 
 These are recorded, not silently accepted as production-grade behaviour:
 
-- **Pre-limit JSON-RPC allocation.** `max_message_bytes` bounds message
-  composition and post-decode address/header preprocessing, but it is
-  not a transport request-size cap. Large `text`, `html` or attachment
-  arrays can be allocated by the JSON-RPC decoder before those checks
-  run. The MCP stdio transport has no explicit request-size limit in
-  TheMailroom. A transport-level cap and schema size/count limits are
-  Phase 3 work; the current risk is resource exhaustion, not
-  confidentiality or integrity.
+- **Pre-limit JSON-RPC allocation (per-frame boundary implemented).**
+  `server.max_request_bytes` (default 32 MiB, hard maximum 128 MiB)
+  bounds one inbound MCP frame before JSON decoding. The UTF-8 payload
+  byte count excludes LF/CRLF framing; exactly the limit is accepted,
+  limit+1 closes the connection before dispatch, and every physical line
+  must be one complete JSON value. The setting is deliberately
+  independent of account `max_message_bytes`. This establishes a
+  per-frame allocation boundary only, not an aggregate process-memory
+  limit: the SDK handler queue, concurrent in-flight requests,
+  tool-level argument amplification and response sizes remain separate
+  hardening concerns. Schema size/count limits are also still Phase 3
+  work; the remaining risk is resource exhaustion, not confidentiality
+  or integrity.
 - **IMAP credential-command buffering.** The pre-existing IMAP
   `password_command` path uses unbounded `bytes.Buffer` values for
   stdout/stderr and includes truncated stderr in internal errors. SMTP

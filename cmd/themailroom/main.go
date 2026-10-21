@@ -103,7 +103,8 @@ func loadAndServe(cfgPath string) error {
 	defer registry.Close()
 
 	server, err := mcpserver.New(registry, mcpserver.Options{
-		Logger: logger,
+		Logger:          logger,
+		MaxRequestBytes: cfg.Server.MaxRequestBytes,
 	})
 	if err != nil {
 		return err

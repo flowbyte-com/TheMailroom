@@ -25,6 +25,18 @@ Every tool:
 
 All account-scoped tools take `account_id` as a required string field. There is no implicit "current account"; `list_accounts` is the only account metadata tool.
 
+**Error channels.** A tool call can fail in two distinct ways, and clients
+must handle both. A *tool execution error* — a schema or business
+validation failure, a missing account, a missing capability — is returned
+as a normal JSON-RPC result whose `isError` is `true` and whose
+`structuredContent` carries the error object below. A *protocol error* is
+returned as a JSON-RPC error; the only one a client can trigger with a
+well-formed request is an unknown tool name (code `-32602`). Arguments
+that fail schema validation are tool execution errors, not protocol
+errors, so that a model sees the validation message and can retry with
+corrected arguments. This split follows the MCP specification and is
+pinned by `TestBoundedServerToolValidationErrorShape`.
+
 ## Common error model
 
 ```json
@@ -228,14 +240,19 @@ outcome category and typed error code. They never contain message
 bodies, attachment contents, credentials, raw SMTP transcripts or the
 full recipient list.
 
-**Known residual risks (Phase 3 hardening).** `max_message_bytes` bounds
-composition and post-decode preprocessing, not the initial JSON-RPC
-allocation of `text`, `html` or attachment arrays. The pre-existing IMAP
-`password_command` path uses unbounded stdout/stderr buffers and includes
-truncated stderr in internal errors; SMTP command output is bounded and
-excluded. Failure-outcome audit categories are not fully unit-tested.
-These do not change the documented Phase 2.3 acceptance results but are
-recorded in [`THREAT_MODEL.md`](THREAT_MODEL.md).
+**Known residual risks (Phase 3 hardening).** `server.max_request_bytes`
+caps one inbound MCP JSON-RPC frame before decoding (default 32 MiB,
+hard maximum 128 MiB; LF/CRLF framing excluded). It is a per-frame
+allocation boundary, not an aggregate process-memory limit: the SDK
+handler queue, concurrent in-flight requests, tool-level argument
+amplification and response sizes remain separate concerns. Account
+`max_message_bytes` still governs email composition and post-decode
+preprocessing. The pre-existing IMAP `password_command` path uses
+unbounded stdout/stderr buffers and includes truncated stderr in internal
+errors; SMTP command output is bounded and excluded. Failure-outcome
+audit categories are not fully unit-tested. These do not change the
+documented Phase 2.3 acceptance results but are recorded in
+[`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 The controlled external smoke test for this tool was executed against
 Purelymail on 2026-10-21 and passed. The authoritative results and
