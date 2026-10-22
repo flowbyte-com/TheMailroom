@@ -80,11 +80,31 @@ type listFixtureServer struct {
 	// reconnect attempt fails at authentication.
 	rejectLogin bool
 
+	// searchUIDs is the UID list the server returns for a UID SEARCH.
+	// A nil list means the search matched nothing.
+	searchUIDs []uint32
+
+	// searchMalformed makes the server answer a UID SEARCH with a
+	// field that is not a number, so the client sees a malformed
+	// response.
+	searchMalformed bool
+
+	// searchTruncate makes the server drop the connection after the
+	// untagged SEARCH response, without the tagged completion.
+	searchTruncate bool
+
+	// searchStall makes the server stop after the untagged SEARCH
+	// response: the tagged completion is never sent and the connection
+	// stays open.
+	searchStall bool
+
 	mu sync.Mutex
 	// commands records every client command line, in order.
 	commands []string
 	// fetchCommands records the UID FETCH command lines.
 	fetchCommands []string
+	// searchCommands records the UID SEARCH command lines.
+	searchCommands []string
 	// connections counts the accepted connections.
 	connections int
 	// servedMessages counts the FETCH responses written.
@@ -182,8 +202,12 @@ func (s *listFixtureServer) record(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commands = append(s.commands, strings.TrimSpace(line))
-	if strings.Contains(strings.ToUpper(line), "FETCH") {
+	upper := strings.ToUpper(line)
+	if strings.Contains(upper, "FETCH") {
 		s.fetchCommands = append(s.fetchCommands, strings.TrimSpace(line))
+	}
+	if strings.Contains(upper, "SEARCH") {
+		s.searchCommands = append(s.searchCommands, strings.TrimSpace(line))
 	}
 }
 
@@ -273,6 +297,12 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 			}
 			fmt.Fprintf(conn, "* %d EXISTS\r\n* OK [UIDVALIDITY 1] selected\r\n%s OK selected\r\n",
 				exists, firstField(line))
+		case strings.Contains(upper, "SEARCH"):
+			if s.serveSearch(conn, br, w, firstField(line)) {
+				// The server was configured to drop the connection
+				// mid-response.
+				return
+			}
 		case strings.Contains(upper, "FETCH"):
 			if s.serveFetch(conn, br, w, firstField(line)) {
 				// The server was configured to drop the connection
@@ -339,6 +369,81 @@ func (s *listFixtureServer) loginCount() int {
 	return s.logins
 }
 
+// serveSearch writes the configured UID SEARCH response.
+//
+// The response is the untagged `* SEARCH <uid> ...` line followed by the
+// tagged completion. The malformed and truncated variants stop before
+// the completion: the malformed one leaves the field invalid, the
+// truncated one drops the connection, so the client sees a broken
+// response.
+//
+// It reports whether the connection was dropped mid-response.
+func (s *listFixtureServer) serveSearch(conn net.Conn, br *bufio.Reader, w *imap.Writer, tag string) bool {
+	s.mu.Lock()
+	uids := s.searchUIDs
+	malformed := s.searchMalformed
+	truncate := s.searchTruncate
+	stall := s.searchStall
+	s.mu.Unlock()
+
+	fields := []interface{}{imap.RawString("SEARCH")}
+	for _, u := range uids {
+		fields = append(fields, u)
+	}
+	if malformed {
+		fields = append(fields, imap.RawString("not-a-number"))
+	}
+	resp := imap.NewUntaggedResp(fields)
+	if err := resp.WriteTo(w); err != nil {
+		return true
+	}
+	if err := w.Flush(); err != nil {
+		return true
+	}
+	if truncate {
+		// Drop the connection without the tagged completion, so the
+		// client sees a truncated response.
+		return true
+	}
+	if stall {
+		// Stop mid-response: the tagged completion is never sent and
+		// the connection stays open.
+		s.mu.Lock()
+		s.stalled++
+		s.mu.Unlock()
+		s.waitForPeerClose(conn, br)
+		return true
+	}
+	fmt.Fprintf(conn, "%s OK SEARCH completed\r\n", tag)
+	_ = w.Flush()
+	return false
+}
+
+// searchCount returns the number of UID SEARCH commands received.
+func (s *listFixtureServer) searchCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.searchCommands)
+}
+
+// lastSearch returns the last UID SEARCH command line.
+func (s *listFixtureServer) lastSearch() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.searchCommands) == 0 {
+		return ""
+	}
+	return s.searchCommands[len(s.searchCommands)-1]
+}
+
+// setSearchUIDs replaces the UID list the server answers a UID SEARCH
+// with.
+func (s *listFixtureServer) setSearchUIDs(uids []uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.searchUIDs = uids
+}
+
 // serveFetch writes the configured messages as untagged FETCH responses
 // and then the tagged completion. It reports whether the connection was
 // dropped mid-response.
@@ -402,6 +507,18 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.
 	if s.terminateSession() {
 		// End the session: the client sees BYE and then the end of the
 		// connection, so its session is logged out.
+		//
+		// The BYE is delayed briefly on purpose. The go-imap
+		// executor waits on a select between the command's result and
+		// the logged-out channel; if the BYE is delivered in the same
+		// instant as the tagged completion, the reader can close the
+		// logged-out channel before the waiting goroutine re-evaluates
+		// the select, and the select then picks between two ready
+		// cases at random. The command would be reported as failed
+		// even though the server answered it. A real server does not
+		// end a session in the same instant it completes a command
+		// either.
+		time.Sleep(sessionTerminationDelay)
 		fmt.Fprintf(conn, "* BYE the server is closing the connection\r\n")
 		s.mu.Lock()
 		s.terminated++
@@ -410,6 +527,11 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.
 	}
 	return false
 }
+
+// sessionTerminationDelay is how long the fixture waits before it ends
+// a session, so that the command the session ends after has completed
+// on the client.
+const sessionTerminationDelay = 100 * time.Millisecond
 
 // terminateSession reports whether the server must end the session after
 // the current response.

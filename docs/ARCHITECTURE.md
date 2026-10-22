@@ -216,6 +216,39 @@ IMAP4rev1 backend. It uses a narrow fork of
   the connection and closing it while a command is in flight is a
   data race. The aborted client is discarded together with its
   socket, so the next operation dials a fresh connection.
+- **Bounded search workload.** `search_messages` evaluates its
+  criteria on the server, so the result set can be arbitrarily
+  large: an empty query matches every message in the mailbox. The
+  same `max_list_scan_messages` budget bounds it, at two points:
+
+  1. *The UID SEARCH response.* The application issues the search
+     itself, with a response handler of its own, and counts the
+     UIDs the server returns. When the server returns more than the
+     budget allows, the search is refused with a typed error
+     **before** any FETCH is sent, so the server is never asked for
+     the envelopes of the matches.
+  2. *The UID FETCH response.* The application counts the messages
+     the FETCH handler delivers and aborts the transfer — by
+     closing the underlying socket — when the server delivers more
+     than the budget allows, exactly as the listing path does.
+
+  The first check is the one that carries the weight. The go-imap
+  reader materialises the whole SEARCH response before any handler
+  runs, so the application cannot bound that allocation; what it
+  bounds is everything downstream of it: the UIDs it retains, the
+  sequence set it builds, the messages it fetches and processes, and
+  the summaries it retains and sorts. The summaries are collected in
+  the same bounded top-K selector the listing path uses, which
+  preserves the established order — newest internal date first, UID
+  descending on a tie.
+
+  The search is otherwise unchanged: one logical `UID SEARCH` with
+  the same AND/OR semantics, the same criteria, the same date
+  granularity, the same result limit, and the UIDVALIDITY from the
+  same EXAMINE session. A refused search returns an error, never a
+  partial result. Unlike the listing refusal, narrowing the query
+  *does* help here, because the server evaluates the criteria, so
+  the refusal message says so.
 - Single shared connection per account under a mutex.
 - Automatic reconnect on connection drop or server error; a
   reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating

@@ -31,12 +31,14 @@ const (
 	DefaultMaxRecipients           = 50
 	DefaultMaxSearchResults        = 500
 	DefaultMaxBatchOperations      = 50
-	// DefaultMaxListScanMessages bounds how many messages one list
-	// operation may examine. Listing is ordered by internal date, which
-	// is unrelated to UID order, so an exact page can only be produced
-	// by examining every message in the mailbox. This bound caps that
-	// work; a mailbox with more messages than the bound is refused with
-	// an explicit error rather than answered approximately.
+	// DefaultMaxListScanMessages bounds how many messages one list or
+	// search operation may examine. Listing is ordered by internal date,
+	// which is unrelated to UID order, so an exact page can only be
+	// produced by examining every message in the mailbox. A search
+	// matches its criteria on the server, so its result set can be
+	// arbitrarily large. This bound caps both workloads; an operation
+	// that would examine more messages than the bound is refused with an
+	// explicit error rather than answered approximately.
 	DefaultMaxListScanMessages = 10000
 	// MaxListScanMessagesLimit is the largest value an operator may
 	// configure for limits.max_list_scan_messages.
@@ -166,11 +168,14 @@ type LimitsConfig struct {
 	MaxRecipients           int `yaml:"max_recipients,omitempty"`
 	MaxSearchResults        int `yaml:"max_search_results,omitempty"`
 	MaxBatchOperations      int `yaml:"max_batch_operations,omitempty"`
-	// MaxListScanMessages bounds how many messages one list operation
-	// may examine on the server. Listing is ordered by internal date,
-	// which is unrelated to UID order, so an exact page requires
-	// examining every message; this bound caps that work. A mailbox
-	// with more messages is refused with an explicit error.
+	// MaxListScanMessages bounds how many messages one list or search
+	// operation may examine on the server. Listing is ordered by
+	// internal date, which is unrelated to UID order, so an exact page
+	// requires examining every message; a search matches its criteria
+	// on the server, so its result set can be arbitrarily large. This
+	// bound caps both workloads. A list of an oversized mailbox, or a
+	// search that matches more messages, is refused with an explicit
+	// error.
 	MaxListScanMessages int `yaml:"max_list_scan_messages,omitempty"`
 	MaxMIMENesting      int `yaml:"max_mime_nesting,omitempty"`
 	MaxMIMEParts        int `yaml:"max_mime_parts,omitempty"`

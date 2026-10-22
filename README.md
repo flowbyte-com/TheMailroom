@@ -248,7 +248,7 @@ limits:
   max_recipients: 50             # unique To + Cc + Bcc recipients
   max_attachment_bytes: 6291456  # decoded bytes per local attachment
   max_total_attachment_bytes: 26214400
-  max_list_scan_messages: 10000 # messages one list operation may examine
+  max_list_scan_messages: 10000 # messages one list or search operation may examine
 attachment_send_paths:
   - /srv/themailroom/outbound    # absolute, existing directory
 ```
@@ -268,6 +268,17 @@ approximate page is returned. The `since` / `before` filters narrow the
 result but not the work: they run after the preflight and after the
 fetch, so they cannot make an oversized mailbox listable and are not
 offered as a recourse.
+
+`search_messages` evaluates its criteria on the server, so a query can
+match an arbitrarily large number of messages — an empty query matches
+every message in the mailbox. The same
+`limits.max_list_scan_messages` limit bounds that work: the UIDs the
+server returns are counted, and a search that matches more messages than
+the limit allows is refused with the `RateLimited` error code before
+the server is asked for any message bodies; the messages delivered in the
+follow-up fetch are counted as well. No partial or approximate result is
+returned. Unlike the listing refusal, narrowing the query does help
+here, because the server evaluates the criteria, so the error says so.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no

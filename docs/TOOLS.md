@@ -656,6 +656,19 @@ Empty query fields are ignored. The `limit` is clamped per-account.
 No requested criterion is silently ignored. If a criterion
 cannot be honoured, the tool returns an explicit error.
 
+**Scan budget.** The search criteria are evaluated by the server, so a
+query can match an arbitrarily large number of messages — an empty
+query matches every message in the mailbox. The per-account
+`max_list_scan_messages` limit (default 10 000, hard maximum 1 000 000)
+bounds that work. The bound is enforced twice: the UIDs the server
+returns are counted, and a search that matches more messages than the
+limit allows is refused with the `RateLimited` error code and a message
+naming the budget and the recourse — narrow the query or raise
+`max_list_scan_messages`; and the messages the server delivers in the
+follow-up fetch are counted as well, so a server that sends more than
+it was asked for is stopped. No partial or approximate result is ever
+returned.
+
 **Server-dependent matching.** `subject`, `from` and `to`
 matching is delegated to the IMAP server, so substring and
 case behaviour and RFC 2047 encoded-header handling can vary by

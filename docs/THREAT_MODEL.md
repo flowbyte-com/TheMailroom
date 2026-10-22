@@ -242,6 +242,7 @@ double-resolution approach described here.
 - **(planned)** Trash / Deleted Messages handling honours provider folder names (`Trash`, `INBOX.Trash`, `[Gmail]/Trash`).
 - **(implemented)** No read operation mutates: `read_message` and `read_attachment` use `UID FETCH BODY.PEEK[]` (does not set `\Seen`); `list_messages`, `search_messages`, `list_mailboxes` are pure queries. The IMAP backend issues `EXAMINE` (read-only `SELECT`) so the server-side state cannot accept `STORE` or `APPEND` through a read connection.
 - **(implemented, Phase 3 PR 3)** `list_messages` is bounded in both the memory it uses and the work it causes. Results are ordered by internal date, which is unrelated to UID order, so an exact page requires examining every message; the per-account `max_list_scan_messages` limit (default 10 000, hard maximum 1 000 000) bounds how many messages one call may examine. The bound is enforced twice. First, the server-reported mailbox size is checked in the EXAMINE response, so an oversized mailbox is refused with an explicit typed error before any FETCH is sent. Second, the messages the FETCH handler actually delivers are counted during the fetch, independently of the date filters and of the selector's retention; on delivery of message *budget + 1* the client records the overrun and aborts the transfer by closing the underlying TCP socket, without issuing another IMAP command, and then drains the response channel and awaits the completion of the in-flight FETCH before returning the typed error. The second check does not depend on the server's own count, so a server that under-reports its mailbox size is caught while the listing runs. The summaries are collected in a bounded top-K selector that retains at most `min(offset + limit, max_list_scan_messages)` of them, so the working set does not grow with the mailbox size. An over-budget mailbox yields an error, never a partial or approximate page.
+- **(implemented, Phase 3 PR 4)** `search_messages` is bounded by the same `max_list_scan_messages` limit. Its criteria are evaluated by the server, so the result set can be arbitrarily large — an empty query matches every message in the mailbox. The application issues the `UID SEARCH` itself with a response handler of its own and counts the UIDs the server returns; when the server returns more than the budget allows, the search is refused with the typed error `mailbox.ErrSearchTooLarge` **before** any FETCH is sent, so the server is never asked for the envelopes of the matches. The UID FETCH response is bounded by a second count: on delivery of message *budget + 1* the client aborts the transfer by closing the underlying socket, drains the response channel and awaits the FETCH completion, exactly as the listing path does. The summaries are collected in the same bounded top-K selector, so the retained set does not grow with the result set. A refused search yields an error, never a partial or approximate result. The search semantics are unchanged: one logical command, the same AND/OR semantics, the same date granularity, the same result limit and the same UIDVALIDITY from the same EXAMINE session.
 
 ### T8. SMTP duplicate sends and ambiguous outcomes
 
@@ -332,11 +333,36 @@ These are recorded, not silently accepted as production-grade behaviour:
   work; the remaining risk is resource exhaustion, not confidentiality
   or integrity.
 - **Unbounded IMAP search and mailbox-enumeration workloads.**
-  `list_messages` is bounded (see T7), but `search_messages` still
-  collects every matching summary in memory and `list_mailboxes` still
-  returns every mailbox the server reports. Both are separately tracked
-  hardening items; they are not covered by the list scan budget, and the
-  budget does not apply to them.
+  `list_messages` and `search_messages` are bounded (see T7), but
+  `list_mailboxes` still returns every mailbox the server reports. That
+  is a separately tracked hardening item; it is not covered by the scan
+  budget, and the budget does not apply to it.
+- **The go-imap reader materialises a whole SEARCH response before the
+  application sees it.** This is the residual that the search budget
+  does *not* close.
+
+  The reader parses a response line into a `[]interface{}` before any
+  response handler runs, and the fork's own `responses.Search` handler
+  then copies it into a `[]uint32`. `client.UidSearch` therefore
+  allocates the complete result before the application can enforce any
+  limit: measured on this fork, the parse and the handler together
+  allocate about **178 bytes per matched UID** (16 MB for 100 000
+  matches, 178 MB for 1 000 000). The application cannot prevent that
+  allocation; it can only refuse the result afterwards.
+
+  The application-level bound therefore covers everything downstream of
+  the parser: the UIDs the application retains, the sequence set it
+  builds, the messages it fetches and processes, and the summaries it
+  retains and sorts are all bounded by `max_list_scan_messages`. The
+  *transient* peak allocation while one SEARCH response is being
+  parsed is not bounded by it.
+
+  Closing that gap needs a decoder-level limit in the fork — for
+  example a cap on the number of response fields or on the bytes a
+  response may consume, alongside the existing `MaxLiteralSize` cap, or
+  a streaming search API that hands the UIDs to the caller one at a
+  time. That is dependency work on the pinned fork and is out of scope
+  for the application-side change.
 - **The list scan budget is an application-level delivery bound, not a
   protocol-level resource bound.** `max_list_scan_messages` bounds the
   messages the FETCH handler delivers to the application and that the

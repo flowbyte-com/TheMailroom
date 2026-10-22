@@ -217,7 +217,13 @@ var (
 	// The refusal is driven by the messages the server actually
 	// delivers, not only by the mailbox size it reports: a server that
 	// under-reports its size is caught while the listing is running.
-	ErrListTooLarge            = errors.New("mailbox: too many messages to list")
+	ErrListTooLarge = errors.New("mailbox: too many messages to list")
+	// ErrSearchTooLarge is returned when a search matches more messages
+	// than the configured scan budget. The search criteria are
+	// evaluated by the server, so a result set can be arbitrarily
+	// large; rather than fetch and process every match, the backend
+	// refuses the search.
+	ErrSearchTooLarge          = errors.New("mailbox: too many messages to search")
 	ErrMessageTooLarge         = errors.New("mailbox: message too large")
 	ErrNestingTooDeep          = errors.New("mailbox: mime nesting too deep")
 	ErrTooManyParts            = errors.New("mailbox: too many mime parts")

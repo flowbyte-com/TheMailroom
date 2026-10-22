@@ -107,6 +107,21 @@
 // docs/THREAT_MODEL.md §3.1. Explicit IMAP command timeouts are a
 // separate control.
 //
+// The search path uses the same budget. Its criteria are evaluated by
+// the server, so the result set can be arbitrarily large. The
+// application issues the UID SEARCH itself, with a response handler
+// of its own, and counts the UIDs the server returns; a search that
+// matches more messages than the budget allows is refused before any
+// FETCH is sent. The UID FETCH response is bounded by a second count,
+// and the transfer is aborted by closing the underlying socket when the
+// server delivers more messages than the budget allows.
+//
+// The go-imap reader materialises the whole SEARCH response before any
+// response handler runs, so the application cannot bound that
+// allocation; it bounds everything downstream of it. Closing that gap
+// needs a decoder-level limit in the fork. See docs/THREAT_MODEL.md
+// §3.1 for the measurement and the recommended dependency work.
+//
 // # Remaining limitations
 //
 // Fixing the literal-allocation vulnerability does NOT make the
@@ -296,11 +311,9 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	if limit <= 0 {
 		limit = 50
 	}
-	// The scan budget bounds how many messages one call may examine.
-	budget := b.limits.MaxListScanMessages
-	if budget <= 0 {
-		budget = config.DefaultMaxListScanMessages
-	}
+	// The scan budget bounds how many messages one list or search
+	// operation may examine.
+	budget := b.scanBudget()
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true) // true => EXAMINE (read-only)
@@ -695,6 +708,8 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	if limit <= 0 {
 		limit = 50
 	}
+	// The scan budget bounds how many messages one search may examine.
+	budget := b.scanBudget()
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
@@ -722,13 +737,21 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		// truncated to the day boundary because an IMAP
 		// search date carries no time (see
 		// internal/searchspec).
-		uids, err := searchUIDs(c, q)
+		//
+		// The search is bounded by the scan budget: a result
+		// that matches more messages than the budget allows is
+		// refused before any FETCH is sent, so the server is
+		// never asked for the envelopes of every match.
+		uids, err := searchUIDs(c, q, budget)
 		if err != nil {
 			return err
 		}
 		if len(uids) == 0 {
 			return nil
 		}
+		// The sequence set holds at most the budget UIDs, so its
+		// size and the size of the FETCH command line it produces
+		// are bounded.
 		seqset := new(imap.SeqSet)
 		seqset.AddNum(uids...)
 		items := []imap.FetchItem{
@@ -738,15 +761,56 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 			imap.FetchFlags,
 			imap.FetchUid,
 		}
+		// The number of summaries that can appear in the result is the
+		// limit. At most that many are retained, so the working set
+		// does not grow with the size of the result set.
+		keep := limit
+		if keep > budget {
+			keep = budget
+		}
 		ch := make(chan *imap.Message, 32)
 		done := make(chan error, 1)
 		go func() { done <- c.UidFetch(seqset, items, ch) }()
-		var out []mailbox.MessageSummary
+		// The summaries are collected in the bounded top-K selector,
+		// which keeps the same page a full sort of every summary
+		// would produce.
+		selector := &summarySelector{limit: keep}
+		// delivered counts every message the FETCH handler hands to
+		// this process. It is the second line of defence: the search
+		// already bounded the number of requested UIDs, but a server
+		// that sends more messages than it was asked for is caught
+		// here.
+		delivered := 0
+		overrun := false
 		for m := range ch {
 			if m == nil {
 				continue
 			}
-			out = append(out, mailbox.MessageSummary{
+			if overrun {
+				// Keep draining. The fork's response handler blocks
+				// on this channel, and a blocked handler stops the
+				// reader, so the command would never complete and
+				// the goroutine would leak. The channel is closed by
+				// the fork, never by us.
+				continue
+			}
+			delivered++
+			if delivered > budget {
+				// The server delivered more messages than the budget
+				// allows. Record the overrun and abort the transfer.
+				//
+				// The abort is the close of the underlying socket: it
+				// stops the server from sending the rest of the
+				// response and it writes nothing to the connection,
+				// so it cannot race the command writer the way an
+				// interleaved CLOSE or LOGOUT would. The client is
+				// unusable afterwards, but withClient discards it when
+				// this call returns the error below.
+				overrun = true
+				b.abortConn()
+				continue
+			}
+			selector.Add(mailbox.MessageSummary{
 				UID:          m.Uid,
 				Flags:        flagsToStrings(m.Flags),
 				InternalDate: m.InternalDate,
@@ -756,10 +820,23 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 				Subject:      envelopeSubject(m.Envelope),
 			})
 		}
-		if err := <-done; err != nil {
-			return err
+		// The fetch must complete before this function returns. The
+		// go-imap client does not serialise writes to the connection, so
+		// closing the connection while a command is in flight is a
+		// data race; waiting here is what orders the fetch's write
+		// before the close that withClient performs on the error path.
+		//
+		// After an abort the fetch fails with a connection error. That
+		// is the expected outcome, and the budget error below is the
+		// one that is reported.
+		fetchErr := <-done
+		if overrun {
+			return searchTooLargeError(budget)
 		}
-		sortSummaries(out)
+		if fetchErr != nil {
+			return fetchErr
+		}
+		out := selector.Sorted()
 		if len(out) > limit {
 			out = out[:limit]
 		}
@@ -915,6 +992,21 @@ func (b *Backend) releaseConn() {
 		_ = b.conn.Close()
 		b.conn = nil
 	}
+}
+
+// scanBudget returns the effective scan budget: the number of messages
+// one list or search operation may examine.
+//
+// The same limit bounds both workloads because it bounds the same
+// thing: the number of messages whose envelopes one operation may
+// fetch, parse and process. Zero means the configured limit is unset,
+// in which case the default applies.
+func (b *Backend) scanBudget() int {
+	budget := b.limits.MaxListScanMessages
+	if budget <= 0 {
+		budget = config.DefaultMaxListScanMessages
+	}
+	return budget
 }
 
 // abortConn closes the raw socket that backs the current client.

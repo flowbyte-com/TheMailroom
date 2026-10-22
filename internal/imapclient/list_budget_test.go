@@ -375,10 +375,11 @@ func TestListScanBudgetStallingServerDoesNotHang(t *testing.T) {
 		t.Errorf("the stalled call took %s, want it to abort well before the %s command timeout", elapsed, commandTimeout)
 	}
 	// The server observed the client closing the socket, which is what
-	// ended the stall.
-	if got := srv.stalledCount(); got != 1 {
-		t.Errorf("server stalled %d times, want 1", got)
-	}
+	// ended the stall. The stall is recorded by the server goroutine
+	// after its last write, so it can lag the client by a moment.
+	waitFor(t, 5*time.Second, "the server to stall", func() bool {
+		return srv.stalledCount() == 1
+	})
 	waitFor(t, 5*time.Second, "the server to observe the client close", func() bool {
 		return srv.peerClosedCount() == 1
 	})
