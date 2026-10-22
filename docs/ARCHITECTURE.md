@@ -278,6 +278,62 @@ IMAP4rev1 backend. It uses a narrow fork of
   The decoder's limits are per response. They do not bound the number
   of responses a server sends on one connection, the server-side
   search computation, or the duration of an operation.
+- **Bounded aggregate IMAP work.** A per-response limit cannot bound
+  the *total* protocol work: a server that sends an unlimited sequence
+  of individually valid responses consumes an unlimited number of input
+  bytes, parsing work, heap allocations and CPU time in the client's
+  reader goroutine. Measured on this fork, the reader parses and
+  dispatches about 67 000 unsolicited responses per second, at roughly
+  200 bytes of allocation each, and it does so for as long as the
+  server keeps sending.
+
+  The **server data budget** closes that gap at the transport layer.
+  It wraps the socket *below* the TLS layer, so it accounts every byte
+  the server sends, in both TLS modes and after a STARTTLS upgrade.
+  The check happens before the bytes reach the reader, so an
+  over-budget response is never parsed and never allocated: this is a
+  pre-allocation bound, not a post-parse check.
+
+  The budget is armed at the start of each backend operation, with an
+  allowance derived from that operation's expected inbound size, and
+  it drops back to a small idle allowance between operations. The
+  counter is therefore cumulative across the operation's commands *and*
+  across the unsolicited responses that arrive while they run, so
+  repeated responses cannot evade the accounting by crossing a command
+  boundary, and unsolicited responses cannot evade the active
+  command's accounting either.
+
+  | Operation | Allowance |
+  |---|---|
+  | a summary listing or a search | `scan budget × 4 KiB + 256 KiB` |
+  | a raw message or attachment fetch | `max_message_bytes + 1 MiB` |
+  | anything else | `256 KiB` |
+  | between operations (idle) | `256 KiB` |
+
+  The allowances are derived from the account's own configuration, so
+  no new public option is introduced and the aggregate bound follows
+  the limits the operator already sets. They are deliberately not one
+  enormous number: a search, a summary fetch and a raw message fetch
+  have materially different requirements, and a four kibibyte summary
+  allowance leaves room for long headers without making the aggregate
+  enormous. Every value is computed in `int64` and clamped, and is
+  never clamped to zero, because zero would mean "no limit".
+
+  A violation is reported as `mailbox.ErrServerDataBudgetExceeded`, a
+  condition distinct from the scan-budget refusal, from a decoder
+  violation, from a malformed response and from a message-size
+  violation. The connection is closed, because the response stream can
+  no longer be trusted, and the client and its socket are discarded
+  together.
+
+  **What the budget does not bound.** It bounds the inbound protocol
+  bytes of one operation; it does not bound the *number of operations*,
+  so the total work over a long-lived connection is proportional to the
+  number of legitimate operations, each of which is itself bounded. It
+  does not bound the server-side search computation, the number of
+  responses a server sends between the operations that are counted, or
+  the duration of an operation — that is the explicit per-command IMAP
+  timeout's job, and the two are complementary.
 
   The search is otherwise unchanged: one logical `UID SEARCH` with
   the same AND/OR semantics, the same criteria, the same date

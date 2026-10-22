@@ -230,12 +230,20 @@ var (
 	// It is distinct from ErrSearchTooLarge, which is the
 	// application's own scan budget, and from ErrMalformed, which is
 	// a response that could not be parsed at all.
-	ErrResponseTooLarge        = errors.New("mailbox: imap response exceeded a decoder limit")
-	ErrMessageTooLarge         = errors.New("mailbox: message too large")
-	ErrNestingTooDeep          = errors.New("mailbox: mime nesting too deep")
-	ErrTooManyParts            = errors.New("mailbox: too many mime parts")
-	ErrAttachmentTooLarge      = errors.New("mailbox: attachment too large")
-	ErrTotalAttachmentTooLarge = errors.New("mailbox: total attachment size too large")
-	ErrTooManyAttachments      = errors.New("mailbox: too many attachments")
-	ErrMalformed               = errors.New("mailbox: malformed message")
+	ErrResponseTooLarge = errors.New("mailbox: imap response exceeded a decoder limit")
+	// ErrServerDataBudgetExceeded is returned when the server sent more
+	// protocol data than the operation allows.
+	//
+	// The decoder's limits bound one response; this bound is the
+	// aggregate: the inbound bytes of the operation's commands and of
+	// the unsolicited responses that arrive while they run. The server
+	// sent too much data, so the connection was closed.
+	ErrServerDataBudgetExceeded = errors.New("mailbox: server sent more protocol data than the operation allows")
+	ErrMessageTooLarge          = errors.New("mailbox: message too large")
+	ErrNestingTooDeep           = errors.New("mailbox: mime nesting too deep")
+	ErrTooManyParts             = errors.New("mailbox: too many mime parts")
+	ErrAttachmentTooLarge       = errors.New("mailbox: attachment too large")
+	ErrTotalAttachmentTooLarge  = errors.New("mailbox: total attachment size too large")
+	ErrTooManyAttachments       = errors.New("mailbox: too many attachments")
+	ErrMalformed                = errors.New("mailbox: malformed message")
 )

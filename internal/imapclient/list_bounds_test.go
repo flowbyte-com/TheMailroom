@@ -109,6 +109,11 @@ type listFixtureServer struct {
 	// The client must refuse the announcement before it allocates.
 	fetchLiteralAnnounce int
 
+	// floodResponses makes the server send that many unsolicited
+	// EXISTS responses before it answers a command. It models a server
+	// that sends an unlimited sequence of individually valid responses.
+	floodResponses int
+
 	// badCharsetOnce makes the server answer the first UID SEARCH with
 	// NO [BADCHARSET], so the client retries the search with the
 	// US-ASCII charset.
@@ -400,6 +405,17 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 		}
 		s.record(line)
 		upper := strings.ToUpper(line)
+		flood := s.floodCount()
+		if flood > 0 {
+			// Send the unsolicited responses before answering the
+			// command. They are individually valid and each one is
+			// within the decoder's per-response limits.
+			for i := 0; i < flood; i++ {
+				if err := fc.writeLine("* %d EXISTS\r\n", i+1); err != nil {
+					return
+				}
+			}
+		}
 		switch {
 		case strings.Contains(upper, "STARTTLS"):
 			if err := fc.writeLine("%s OK Begin TLS negotiation now\r\n", firstField(line)); err != nil {
@@ -593,6 +609,22 @@ func (s *listFixtureServer) searchCommand(n int) string {
 		return ""
 	}
 	return s.searchCommands[n]
+}
+
+// floodCount returns the number of unsolicited responses the server
+// sends before answering a command.
+func (s *listFixtureServer) floodCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.floodResponses
+}
+
+// setFloodResponses sets the number of unsolicited responses the server
+// sends before answering a command.
+func (s *listFixtureServer) setFloodResponses(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.floodResponses = n
 }
 
 // setSearchUIDs replaces the UID list the server answers a UID SEARCH

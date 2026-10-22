@@ -127,6 +127,10 @@ func mapError(err error) *TypedError {
 		// server evaluates the criteria, so a narrower query matches
 		// fewer messages.
 		return typed(codeLimitExceeded, err.Error(), nil)
+	case errors.Is(err, mailbox.ErrServerDataBudgetExceeded):
+		// The message carries the recourse, so the caller can retry
+		// with a narrower request instead of retrying unchanged.
+		return typed(codeLimitExceeded, err.Error(), nil)
 	case errors.Is(err, mailbox.ErrResponseTooLarge):
 		// The message carries the recourse, so the caller can narrow
 		// the query or raise the limit instead of retrying unchanged.

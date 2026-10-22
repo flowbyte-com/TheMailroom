@@ -293,10 +293,14 @@ enables those limits and derives them from the same account limits, so
 a hostile server cannot make the client allocate an unbounded response.
 A response that exceeds one of them is refused with the `RateLimited`
 error code and the connection is closed, because the response stream is
-no longer trustworthy. The limit is per response: it does not bound the
-number of responses a server sends, the work the server does to
-evaluate a search, or how long an operation may take — the explicit
-command timeout is the separate control for that.
+no longer trustworthy. The limit is per response. A separate aggregate
+budget bounds the inbound protocol bytes one operation may consume,
+including the unsolicited responses a server sends while the
+operation's commands run; it is armed per operation from the same
+account limits, so a server that floods is cut off before the flood is
+parsed. Neither limit bounds the work the server does to evaluate a
+search, nor how long an operation may take — the explicit command
+timeout is the separate control for that.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no

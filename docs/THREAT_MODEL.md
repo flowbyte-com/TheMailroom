@@ -374,10 +374,25 @@ These are recorded, not silently accepted as production-grade behaviour:
   which is deliberately not the application's scan-budget refusal
   `mailbox.ErrSearchTooLarge`.
 
-  The per-response limit does **not** bound the number of responses a
-  server sends on one connection, nor the work the *server* does to
-  evaluate the search criteria, nor the wall-clock duration of the
-  operation. Those remain separate residual risks.
+  The per-response limit does **not** bound the aggregate: a server
+  that sends an unlimited sequence of individually valid responses
+  still consumes an unlimited number of input bytes, parsing work,
+  allocations and CPU time in the reader goroutine. The **server data
+  budget** closes that gap at the transport layer: it wraps the socket
+  below the TLS layer, so it accounts every byte the server sends in
+  both TLS modes and after a STARTTLS upgrade, and it refuses to read
+  past the allowance, so an over-budget response is never parsed and
+  never allocated. The budget is armed per backend operation with an
+  allowance derived from the account's configuration, so it is
+  cumulative across the operation's commands and across the
+  unsolicited responses that arrive while they run.
+
+  What the aggregate budget still does **not** bound: the number of
+  operations, and therefore the total work over a long-lived
+  connection, though each operation is itself bounded; the work the
+  *server* does to evaluate the search criteria; and the wall-clock
+  duration of an operation, which is the explicit per-command IMAP
+  timeout's separate guarantee.
 - **The list scan budget is an application-level delivery bound, not a
   protocol-level resource bound.** `max_list_scan_messages` bounds the
   messages the FETCH handler delivers to the application and that the

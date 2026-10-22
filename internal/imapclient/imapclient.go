@@ -197,8 +197,12 @@ type Backend struct {
 	// read so callers can compare against their own cached value.
 	// A zero value indicates the mailbox is not currently
 	// selected.
-	mu               sync.Mutex
-	client           *client.Client
+	mu     sync.Mutex
+	client *client.Client
+	// budget bounds the inbound protocol bytes the current connection
+	// may consume. It is the connection's serverDataBudget; it is nil
+	// when there is no connection.
+	budget           *serverDataBudget
 	selectedMailbox  string
 	selectedValidity uint32
 
@@ -284,7 +288,7 @@ func (b *Backend) Close() error {
 // IMAP LIST with the wildcard pattern "*".
 func (b *Backend) Mailboxes(ctx context.Context, accountID string) ([]mailbox.Mailbox, error) {
 	var out []mailbox.Mailbox
-	err := b.withClient(ctx, func(c *client.Client) error {
+	err := b.withClient(ctx, opPlain, func(c *client.Client) error {
 		ch := make(chan *imap.MailboxInfo, 64)
 		done := make(chan error, 1)
 		go func() { done <- c.List("", "*", ch) }()
@@ -324,7 +328,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	// server does to evaluate the search criteria.
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
-	err := b.withClient(ctx, func(c *client.Client) error {
+	err := b.withClient(ctx, opSummary, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true) // true => EXAMINE (read-only)
 		if err != nil {
 			return err
@@ -582,7 +586,7 @@ func (b *Backend) fetchRawMessage(ctx context.Context, accountID, mbx string, ui
 	if uidValidity == 0 {
 		return mailbox.ErrUIDMissing
 	}
-	err := b.withClient(ctx, func(c *client.Client) error {
+	err := b.withClient(ctx, opMessage, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
 		if err != nil {
 			return err
@@ -723,7 +727,7 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	// client cannot observe or limit it.
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
-	err := b.withClient(ctx, func(c *client.Client) error {
+	err := b.withClient(ctx, opSummary, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
 		if err != nil {
 			return err
@@ -890,7 +894,7 @@ func (b *Backend) MailboxUIDValidity(ctx context.Context, accountID, mbx string)
 		return 0, mailbox.ErrMailboxNotFound
 	}
 	var uv uint32
-	err := b.withClient(ctx, func(c *client.Client) error {
+	err := b.withClient(ctx, opPlain, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
 		if err != nil {
 			return err
@@ -931,7 +935,7 @@ func (b *Backend) MailboxUIDValidity(ctx context.Context, accountID, mbx string)
 //
 // fn MUST be synchronous and non-blocking; the IMAP client is not
 // safe for concurrent use. The connection is closed on error.
-func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error) error {
+func (b *Backend) withClient(ctx context.Context, kind opKind, fn func(*client.Client) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -954,22 +958,43 @@ func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error)
 			b.selectedMailbox = ""
 			b.selectedValidity = 0
 		}
-		c, conn, err := b.dialAndLogin(ctx)
+		c, conn, budget, err := b.dialAndLogin(ctx)
 		if err != nil {
+			// A server that floods before the client has issued a
+			// command exhausts the allowance while the connection is
+			// being established. That is the same condition as a flood
+			// during an operation, and it is reported the same way.
+			if budget != nil && budget.wasExceeded() {
+				return mailbox.ErrServerDataBudgetExceeded
+			}
 			return err
 		}
 		b.client = c
 		// The socket is adopted together with the client, so the
 		// abort path can never close a replacement connection.
 		b.conn = conn
+		b.budget = budget
 		// Force a re-EXAMINE on the next call by clearing the
 		// selected mailbox: a new connection cannot inherit the
 		// server-side state.
 		b.selectedMailbox = ""
 		b.selectedValidity = 0
 	}
+	// Arm the server data budget for this operation, so that the
+	// inbound protocol bytes of its commands and of the unsolicited
+	// responses that arrive while they run are bounded.
+	if b.budget != nil {
+		b.budget.setLimit(b.dataAllowance(kind))
+	}
 	err := fn(b.client)
 	if err != nil {
+		// A budget violation is reported as itself, not as the
+		// connection failure it causes: the connection died because
+		// the server sent too much data, and the caller can act on
+		// that.
+		if b.budget != nil && b.budget.wasExceeded() {
+			err = mailbox.ErrServerDataBudgetExceeded
+		}
 		// On error, close the client so the next call reconnects.
 		// We never silently retry a mutating operation; the
 		// backend is read-only and the only operations are
@@ -986,6 +1011,13 @@ func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error)
 		b.selectedValidity = 0
 		_ = c.Close()
 		b.releaseConn()
+	}
+	if b.budget != nil {
+		// Between operations the connection is idle and the server is
+		// expected to send very little, so the allowance drops back to
+		// the small idle one. A server that floods an idle connection
+		// therefore loses it quickly.
+		b.budget.setLimit(idleDataAllowance)
 	}
 	return err
 }
@@ -1189,7 +1221,7 @@ func (b *Backend) abortConn() {
 //
 // Every failure path releases the socket before returning, so a failed
 // connection setup leaks no file descriptor.
-func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, error) {
+func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, *serverDataBudget, error) {
 	addr := net.JoinHostPort(b.cfg.IMAP.Host, strconv.Itoa(b.cfg.IMAP.Port))
 	dialer := &net.Dialer{Timeout: b.dialTimeout}
 	tlsCfg := b.tlsConfig
@@ -1202,7 +1234,7 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, e
 	}
 	raw, err := dialer.Dial("tcp", addr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
+		return nil, nil, nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
 	}
 	// The socket is released on every failure path below. It is only
 	// handed back to the caller together with a client, and the caller
@@ -1213,7 +1245,13 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, e
 			_ = raw.Close()
 		}
 	}()
-	var conn net.Conn = raw
+	// The budget wraps the socket below the TLS layer, so it accounts
+	// every byte the server sends, in both TLS modes and after a
+	// STARTTLS upgrade. The greeting and the login are read through
+	// it, under the idle allowance.
+	budget := &serverDataBudget{Conn: raw}
+	budget.setLimit(idleDataAllowance)
+	var conn net.Conn = budget
 	// opts carries the protocol-level IMAP literal-size cap. It
 	// is applied at the *imap.Reader level, i.e. before the
 	// reader allocates a buffer for an announced literal. This
@@ -1239,45 +1277,45 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, e
 	// configuration, so that they bound the responses the account
 	// legitimately expects.
 	if b.limits.MaxMessageBytes > math.MaxUint32 {
-		return nil, nil, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
+		return nil, nil, budget, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
 	}
 	opts := b.decoderLimits(b.scanBudget())
 	switch {
 	case b.cfg.IMAP.TLS:
 		tlsConn := tls.Client(conn, tlsCfg)
 		if err := tlsConn.HandshakeContext(context.Background()); err != nil {
-			return nil, nil, fmt.Errorf("imap: tls handshake: %w", err)
+			return nil, nil, budget, fmt.Errorf("imap: tls handshake: %w", err)
 		}
 		conn = tlsConn
 	case b.cfg.IMAP.StartTLS:
 		c, err := client.NewWithOptions(conn, opts)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, budget, err
 		}
 		if b.commandTimeout > 0 {
 			c.Timeout = b.commandTimeout
 		}
 		if err := c.StartTLS(tlsCfg); err != nil {
 			_ = c.Close()
-			return nil, nil, fmt.Errorf("imap: starttls: %w", err)
+			return nil, nil, budget, fmt.Errorf("imap: starttls: %w", err)
 		}
 		pw, err := resolvePassword(ctx, b.cfg.IMAP)
 		if err != nil {
 			_ = c.Close()
-			return nil, nil, err
+			return nil, nil, budget, err
 		}
 		if err := c.Login(b.cfg.IMAP.Username, pw); err != nil {
 			_ = c.Close()
-			return nil, nil, fmt.Errorf("imap: login: %w", err)
+			return nil, nil, budget, fmt.Errorf("imap: login: %w", err)
 		}
 		handedOff = true
-		return c, raw, nil
+		return c, raw, budget, nil
 	default:
-		return nil, nil, errors.New("imap: tls or starttls must be enabled")
+		return nil, nil, budget, errors.New("imap: tls or starttls must be enabled")
 	}
 	c, err := client.NewWithOptions(conn, opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, budget, err
 	}
 	if b.commandTimeout > 0 {
 		c.Timeout = b.commandTimeout
@@ -1285,14 +1323,14 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, e
 	pw, err := resolvePassword(ctx, b.cfg.IMAP)
 	if err != nil {
 		_ = c.Close()
-		return nil, nil, err
+		return nil, nil, budget, err
 	}
 	if err := c.Login(b.cfg.IMAP.Username, pw); err != nil {
 		_ = c.Close()
-		return nil, nil, fmt.Errorf("imap: login: %w", err)
+		return nil, nil, budget, fmt.Errorf("imap: login: %w", err)
 	}
 	handedOff = true
-	return c, raw, nil
+	return c, raw, budget, nil
 }
 
 // listTooLargeError reports that a mailbox holds more messages than the
