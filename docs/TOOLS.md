@@ -680,9 +680,28 @@ derived from the same account configuration, so a response that would
 exceed them is refused before it is materialised. Such a response is
 reported with the `RateLimited` error code and the connection is
 closed, because a response that broke its limits cannot be trusted. The
-limits apply to one response: they do not bound the number of
-responses a server sends, the work the server does to evaluate a
-search, or the duration of an operation.
+limits apply to one response. An aggregate budget additionally
+bounds the inbound protocol bytes one operation may consume, including
+the unsolicited responses a server sends while the operation's commands
+run, so a server that floods is cut off before the flood is parsed. The
+allowance is armed per operation and the accounting is coordinated: a
+read that began under one allowance is re-validated against the
+allowance in force when it completes, so it cannot deliver bytes past
+it, and a connection that received exactly the permitted amount is not
+treated as having received more. A genuine violation leaves the
+connection unusable and is reported with the `RateLimited` error code
+and with the recourse that fits the operation: a **search** can be
+narrowed, because the server evaluates the criteria; a **summary
+listing** cannot, because its date filters run in the client after the
+fetch and do not reduce the server's work, so its refusal only
+describes what happened; a mailbox enumeration has no narrower form and
+is bounded by its own 4 MiB protocol-data allowance; a raw message
+fetch is bounded by the message size rather than by the search scan
+budget; and a violation detected between operations is reported as an
+idle-connection violation, while one detected during a small active
+operation is not.
+Neither limit bounds the work the server does to evaluate a search, nor
+the duration of an operation.
 
 **Server-dependent matching.** `subject`, `from` and `to`
 matching is delegated to the IMAP server, so substring and

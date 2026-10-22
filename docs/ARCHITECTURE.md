@@ -278,6 +278,142 @@ IMAP4rev1 backend. It uses a narrow fork of
   The decoder's limits are per response. They do not bound the number
   of responses a server sends on one connection, the server-side
   search computation, or the duration of an operation.
+- **Bounded aggregate IMAP work.** A per-response limit cannot bound
+  the *total* protocol work: a server that sends an unlimited sequence
+  of individually valid responses consumes an unlimited number of input
+  bytes, parsing work, heap allocations and CPU time in the client's
+  reader goroutine. Measured on this fork, the reader parses and
+  dispatches about 67 000 unsolicited responses per second, at roughly
+  200 bytes of allocation each, and it does so for as long as the
+  server keeps sending.
+
+  The **server data budget** closes that gap at the transport layer.
+  It wraps the socket *below* the TLS layer, so it accounts every byte
+  the server sends, in both TLS modes and after a STARTTLS upgrade.
+  The check happens before the bytes reach the reader, so an
+  over-budget response is never parsed and never allocated: this is a
+  pre-allocation bound, not a post-parse check.
+
+  The budget is armed at the start of each backend operation, with an
+  allowance derived from that operation's expected inbound size, and
+  it drops back to a small idle allowance between operations. The
+  counter is therefore cumulative across the operation's commands *and*
+  across the unsolicited responses that arrive while they run, so
+  repeated responses cannot evade the accounting by crossing a command
+  boundary, and unsolicited responses cannot evade the active
+  command's accounting either.
+
+  | Operation | Allowance |
+  |---|---|
+  | a summary listing or a search | `scan budget × 4 KiB + 256 KiB` |
+  | a raw message or attachment fetch | `max_message_bytes + 1 MiB` |
+  | a mailbox enumeration | `4 MiB` |
+  | anything else | `256 KiB` |
+  | between operations (idle) | `256 KiB` |
+
+  The allowances are derived from the account's own configuration, so
+  no new public option is introduced and the aggregate bound follows
+  the limits the operator already sets. They are deliberately not one
+  enormous number: a search, a summary fetch, a raw message fetch and
+  a mailbox enumeration have materially different requirements, and a
+  four kibibyte summary allowance leaves room for long headers without
+  making the aggregate enormous. Every value is computed in `int64` and
+  clamped, and is never clamped to zero: zero would mean "no limit", so
+  the budget fails closed instead and an unarmed window permits no
+  bytes at all.
+
+  **The accounting.** One mutex governs the byte counter, the window in
+  force and the violation record, so an allowance transition is a
+  *coordinated* transition and not a set of independent atomic loads and
+  stores. The counter is monotonic: it is never reset. A window
+  measures the consumption since it opened, so a transition cannot lose
+  accounting, and the bytes a read consumes while it is in flight are
+  committed against the window that is active when the read completes.
+
+  The read is in two phases. The allowance is checked and the read is
+  capped under the mutex; the blocking network read happens *outside*
+  it, so a transition is never blocked behind a pending read, and the
+  operation is never blocked behind a silent server; and the bytes are
+  then committed and re-validated under the mutex again. **That commit
+  is the linearization point**: a successful read's bytes are committed
+  against one window before they are returned to the decoder. A read
+  that no longer fits the allowance in force returns *no* payload
+  bytes, closes the connection and preserves the typed violation, so a
+  partially parsed response is never delivered. The bytes consumed from
+  the socket and the bytes handed to the decoder are accounted
+  separately, because a refused read consumes bytes without delivering
+  them.
+
+  **The exact boundary.** An exhausted allowance does not refuse
+  immediately. The reader performs a **one-byte probe**: it waits for
+  the server, and the first byte that arrives is the excess. A server
+  that sent exactly the permitted amount and is then silent is
+  therefore *not* declared to have received excess data — the probe
+  simply keeps waiting — while a server that sends one byte more is
+  refused and recorded. If a new window is armed while the probe is
+  pending, the byte is re-validated against that window and delivered
+  if it fits.
+
+  **The violation record belongs to the connection.** It survives every
+  window transition and is cleared only when the connection is
+  discarded. Arming a new window never erases it, so an idle violation
+  is not silently forgotten: the next operation recognises it, reports
+  it and discards the connection, and the operation after that
+  reconnects.
+
+  **Connection ownership.** The client, the raw socket that backs it
+  and the budget that accounts its inbound bytes always refer to the
+  same connection: they are set and cleared together, under the
+  per-account mutex, together with the selected mailbox and
+  UIDVALIDITY. A discarded connection never leaves a budget behind,
+  and the failure cause is preserved on the backend long enough for
+  the next operation to report it. A violation is checked after every
+  operation, **even when the backend callback appeared to succeed**: an
+  operation never reports a complete result for data a violation
+  invalidated.
+
+  A violation is reported as `mailbox.ErrServerDataBudgetExceeded`, a
+  condition distinct from the scan-budget refusal, from a decoder
+  violation, from a malformed response and from a message-size
+  violation. The wording is operation-appropriate, because the recourse
+  differs: a **search** can be narrowed, because the server evaluates
+  the criteria and a narrower query matches fewer messages; a
+  **summary listing** cannot, because its date filters are applied in
+  the client after the fetch and do not reduce the work the server
+  does, so its refusal only describes what happened; a mailbox
+  enumeration has no narrower form; a raw message fetch is bounded by
+  the message size and not by the search scan budget; and an **active**
+  small operation is described as such, while a violation detected
+  between operations is described as an idle-connection violation,
+  because the idle allowance was the one in force when the server sent
+  the data. The message never carries content from the server's
+  response. The connection is closed, because the response stream can
+  no longer be trusted, and the client, its socket and its budget are
+  discarded together.
+
+  **Mailbox enumeration.** The enumeration has its own, much larger
+  allowance. The small plain-operation allowance would refuse a
+  legitimate large LIST response — one response line is thirty to forty
+  bytes per mailbox, so a quarter of a mebibyte is only a few thousand
+  mailboxes, and servers with long nested label names reach it sooner —
+  and a user who could not enumerate their mailboxes could not use the
+  agent at all. Four mebibytes admits a list of about a hundred
+  thousand mailboxes.
+
+  This is a **resource-policy change**: the enumeration now has an
+  aggregate protocol-byte limit where it had none, and a mailbox list
+  beyond 4 MiB is refused with a typed error. The final mailbox-count
+  and enumeration-specific policy is deferred to the mailbox enumeration
+  hardening work; the byte allowance here is the interim bound.
+
+  **What the budget does not bound.** It bounds the inbound protocol
+  bytes of one operation; it does not bound the *number of operations*,
+  so the total work over a long-lived connection is proportional to the
+  number of legitimate operations, each of which is itself bounded. It
+  does not bound the server-side search computation, the number of
+  responses a server sends between the operations that are counted, or
+  the duration of an operation — that is the explicit per-command IMAP
+  timeout's job, and the two are complementary.
 
   The search is otherwise unchanged: one logical `UID SEARCH` with
   the same AND/OR semantics, the same criteria, the same date

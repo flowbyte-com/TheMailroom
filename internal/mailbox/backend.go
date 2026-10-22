@@ -230,12 +230,29 @@ var (
 	// It is distinct from ErrSearchTooLarge, which is the
 	// application's own scan budget, and from ErrMalformed, which is
 	// a response that could not be parsed at all.
-	ErrResponseTooLarge        = errors.New("mailbox: imap response exceeded a decoder limit")
-	ErrMessageTooLarge         = errors.New("mailbox: message too large")
-	ErrNestingTooDeep          = errors.New("mailbox: mime nesting too deep")
-	ErrTooManyParts            = errors.New("mailbox: too many mime parts")
-	ErrAttachmentTooLarge      = errors.New("mailbox: attachment too large")
-	ErrTotalAttachmentTooLarge = errors.New("mailbox: total attachment size too large")
-	ErrTooManyAttachments      = errors.New("mailbox: too many attachments")
-	ErrMalformed               = errors.New("mailbox: malformed message")
+	ErrResponseTooLarge = errors.New("mailbox: imap response exceeded a decoder limit")
+	// ErrServerDataBudgetExceeded is returned when the server sent more
+	// protocol data than the operation allows.
+	//
+	// The decoder's limits bound one response; this bound is the
+	// aggregate: the inbound bytes of the operation's commands and of
+	// the unsolicited responses that arrive while they run. The server
+	// sent too much data, so the connection was closed and the client,
+	// its socket and its budget were discarded together.
+	//
+	// The message that wraps it names the recourse that fits the
+	// operation: a search can be narrowed, because the server evaluates
+	// the criteria; a summary listing cannot, because its date filters
+	// run in the client after the fetch; a mailbox enumeration has no
+	// narrower form; a raw message fetch is bounded by the message
+	// size; and a violation detected between operations is an idle
+	// violation.
+	ErrServerDataBudgetExceeded = errors.New("mailbox: server sent more protocol data than the operation allows")
+	ErrMessageTooLarge          = errors.New("mailbox: message too large")
+	ErrNestingTooDeep           = errors.New("mailbox: mime nesting too deep")
+	ErrTooManyParts             = errors.New("mailbox: too many mime parts")
+	ErrAttachmentTooLarge       = errors.New("mailbox: attachment too large")
+	ErrTotalAttachmentTooLarge  = errors.New("mailbox: total attachment size too large")
+	ErrTooManyAttachments       = errors.New("mailbox: too many attachments")
+	ErrMalformed                = errors.New("mailbox: malformed message")
 )

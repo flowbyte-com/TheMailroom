@@ -374,10 +374,62 @@ These are recorded, not silently accepted as production-grade behaviour:
   which is deliberately not the application's scan-budget refusal
   `mailbox.ErrSearchTooLarge`.
 
-  The per-response limit does **not** bound the number of responses a
-  server sends on one connection, nor the work the *server* does to
-  evaluate the search criteria, nor the wall-clock duration of the
-  operation. Those remain separate residual risks.
+  The per-response limit does **not** bound the aggregate: a server
+  that sends an unlimited sequence of individually valid responses
+  still consumes an unlimited number of input bytes, parsing work,
+  allocations and CPU time in the reader goroutine. The **server data
+  budget** closes that gap at the transport layer: it wraps the socket
+  below the TLS layer, so it accounts every byte the server sends in
+  both TLS modes and after a STARTTLS upgrade, and it refuses to read
+  past the allowance, so an over-budget response is never parsed and
+  never allocated. The budget is armed per backend operation with an
+  allowance derived from the account's configuration, so it is
+  cumulative across the operation's commands and across the
+  unsolicited responses that arrive while they run.
+
+  The accounting is coordinated rather than approximate. One mutex
+  governs the byte counter, the window in force and the violation
+  record; the counter is monotonic and is never reset, so a transition
+  cannot lose accounting; the read is capped under the mutex, performed
+  outside it — so a transition is never blocked behind a pending read —
+  and then committed and re-validated under the mutex again, so a read
+  that began under one allowance cannot deliver bytes past a smaller
+  allowance that was installed while it was in flight. The bytes
+  consumed from the socket and the bytes handed to the decoder are
+  accounted separately, because a refused read consumes bytes without
+  delivering them.
+
+  The boundary is exact in both directions. A connection that received
+  *exactly* the permitted amount and is then silent is not declared to
+  have received excess data: the reader waits, with a one-byte probe
+  that distinguishes silence from excess, and the first byte that
+  arrives *is* the violation. A read that no longer fits the allowance
+  returns no payload bytes at all, so a partially parsed response is
+  never delivered.
+
+  The violation record belongs to the connection. It survives every
+  window transition and is cleared only when the connection is
+  discarded, so an idle violation is reported by the next operation
+  rather than silently erased; the client, its socket, its budget and
+  the selection metadata are always dropped together, and an operation
+  never reports a complete result for data a violation invalidated.
+
+  What the aggregate budget still does **not** bound: the number of
+  operations, and therefore the total work over a long-lived
+  connection, though each operation is itself bounded; the work the
+  *server* does to evaluate the search criteria; and the wall-clock
+  duration of an operation, which is the explicit per-command IMAP
+  timeout's separate guarantee.
+
+  **Mailbox enumeration is a resource-policy change.** The enumeration
+  now has an aggregate protocol-byte allowance of its own (4 MiB),
+  where it had none. The small plain-operation allowance would refuse
+  a legitimate large LIST response — a response line is thirty to forty
+  bytes per mailbox, so a quarter of a mebibyte is only a few thousand
+  mailboxes — and a user who cannot enumerate their mailboxes cannot
+  use the agent at all. A mailbox list beyond 4 MiB is refused with a
+  typed error, and the final mailbox-count and enumeration-specific
+  policy is deferred to the mailbox enumeration hardening work.
 - **The list scan budget is an application-level delivery bound, not a
   protocol-level resource bound.** `max_list_scan_messages` bounds the
   messages the FETCH handler delivers to the application and that the
@@ -406,6 +458,24 @@ These are recorded, not silently accepted as production-grade behaviour:
   by the fork's reader), which is separate work and is not part of the
   current fork. Explicit IMAP command timeouts remain a separate
   control and are independent of this budget.
+- **The go-imap reader updates the selected mailbox status in place.**
+  This is a pre-existing fork-level defect, not an aggregate-budget
+  regression, and it is recorded here because the aggregate-budget
+  tests can reach it. When the fork's reader handles an unsolicited
+  `EXISTS`, it writes the message count into the selected
+  `*imap.MailboxStatus` — the very struct the application received
+  from `EXAMINE` — under the client's own lock. The application reads
+  that count without that lock, so a server that sends an unsolicited
+  `EXISTS` while the application is reading the status is a data race.
+  The count is only used for the list scan budget's preflight refusal,
+  and the FETCH delivery count still bounds the work, so the exposure
+  is a stale or torn count rather than unbounded work. The application
+  cannot fix it: the fork exposes no accessor that returns a copy
+  under the lock. The fix is a fork change — update a copy of the
+  status, or expose an accessor that snapshots it — and it is tracked
+  separately from this work. Until then, the aggregate-budget fixture
+  floods before a mailbox is selected, where the reader has no selected
+  status to update.
 - **Credential-command trustworthiness.** Bounding the IMAP and SMTP
   credential-command output bounds TheMailroom's memory use and keeps the
   command's output out of errors and logs. It does not make the command
