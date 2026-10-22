@@ -387,12 +387,49 @@ These are recorded, not silently accepted as production-grade behaviour:
   cumulative across the operation's commands and across the
   unsolicited responses that arrive while they run.
 
+  The accounting is coordinated rather than approximate. One mutex
+  governs the byte counter, the window in force and the violation
+  record; the counter is monotonic and is never reset, so a transition
+  cannot lose accounting; the read is capped under the mutex, performed
+  outside it — so a transition is never blocked behind a pending read —
+  and then committed and re-validated under the mutex again, so a read
+  that began under one allowance cannot deliver bytes past a smaller
+  allowance that was installed while it was in flight. The bytes
+  consumed from the socket and the bytes handed to the decoder are
+  accounted separately, because a refused read consumes bytes without
+  delivering them.
+
+  The boundary is exact in both directions. A connection that received
+  *exactly* the permitted amount and is then silent is not declared to
+  have received excess data: the reader waits, with a one-byte probe
+  that distinguishes silence from excess, and the first byte that
+  arrives *is* the violation. A read that no longer fits the allowance
+  returns no payload bytes at all, so a partially parsed response is
+  never delivered.
+
+  The violation record belongs to the connection. It survives every
+  window transition and is cleared only when the connection is
+  discarded, so an idle violation is reported by the next operation
+  rather than silently erased; the client, its socket, its budget and
+  the selection metadata are always dropped together, and an operation
+  never reports a complete result for data a violation invalidated.
+
   What the aggregate budget still does **not** bound: the number of
   operations, and therefore the total work over a long-lived
   connection, though each operation is itself bounded; the work the
   *server* does to evaluate the search criteria; and the wall-clock
   duration of an operation, which is the explicit per-command IMAP
   timeout's separate guarantee.
+
+  **Mailbox enumeration is a resource-policy change.** The enumeration
+  now has an aggregate protocol-byte allowance of its own (4 MiB),
+  where it had none. The small plain-operation allowance would refuse
+  a legitimate large LIST response — a response line is thirty to forty
+  bytes per mailbox, so a quarter of a mebibyte is only a few thousand
+  mailboxes — and a user who cannot enumerate their mailboxes cannot
+  use the agent at all. A mailbox list beyond 4 MiB is refused with a
+  typed error, and the final mailbox-count and enumeration-specific
+  policy is deferred to the mailbox enumeration hardening work.
 - **The list scan budget is an application-level delivery bound, not a
   protocol-level resource bound.** `max_list_scan_messages` bounds the
   messages the FETCH handler delivers to the application and that the

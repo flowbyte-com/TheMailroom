@@ -298,9 +298,21 @@ budget bounds the inbound protocol bytes one operation may consume,
 including the unsolicited responses a server sends while the
 operation's commands run; it is armed per operation from the same
 account limits, so a server that floods is cut off before the flood is
-parsed. Neither limit bounds the work the server does to evaluate a
-search, nor how long an operation may take — the explicit command
-timeout is the separate control for that.
+parsed. The accounting is coordinated: one monotonic counter, one
+window, one mutex, and a read that is re-validated against the window
+in force when it completes, so a read that began under one allowance
+cannot deliver bytes past another. A connection that received exactly
+the permitted amount is not treated as having received more, and the
+connection stays unusable after a genuine violation. The refusal is
+reported with the `RateLimited` error code and with a recourse that
+matches the operation: a search can be narrowed, a mailbox enumeration
+has no narrower form, and a raw message fetch is bounded by the message
+size. Mailbox enumeration now has an aggregate protocol-byte limit of
+its own (4 MiB), where it had none; the final mailbox-count policy is
+deferred to the enumeration hardening work. Neither limit bounds the
+work the server does to evaluate a search, nor how long an operation
+may take — the explicit command timeout is the separate control for
+that.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no

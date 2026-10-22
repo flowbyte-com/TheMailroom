@@ -130,6 +130,53 @@
 // needs a decoder-level limit in the fork. See docs/THREAT_MODEL.md
 // §3.1 for the measurement and the recommended dependency work.
 //
+// # IMAP aggregate work: ENFORCED AT THE TRANSPORT LAYER
+//
+// The decoder's limits and the scan budget are both per operation, but
+// the number of responses a server sends on one connection is not
+// bounded by either. A server that sends an unlimited sequence of
+// individually valid responses consumes an unlimited number of input
+// bytes, parsing work, heap allocations and CPU time in the client's
+// reader goroutine.
+//
+// The server data budget (budget.go) closes that gap. It wraps the
+// socket below the TLS layer, so it accounts every byte the server
+// sends, in both TLS modes and after a STARTTLS upgrade, and it
+// refuses to read past the allowance, so an over-budget response is
+// never parsed and never allocated.
+//
+// The accounting is coordinated, not approximate:
+//
+//   - One mutex governs the byte counter, the window in force and the
+//     violation record, so an allowance transition is a coordinated
+//     transition and not a set of independent atomic loads and stores.
+//   - The counter is monotonic and is never reset. A window measures
+//     the consumption since it opened, so a transition cannot lose
+//     accounting.
+//   - The read is capped under the mutex, performed outside it - so a
+//     transition is never blocked behind a pending read - and then
+//     committed and re-validated under the mutex again. That commit is
+//     the linearization point: a read's bytes are committed against one
+//     window before they are returned to the decoder, and a read that
+//     no longer fits the allowance in force returns no payload bytes.
+//   - The bytes consumed from the socket and the bytes handed to the
+//     decoder are accounted separately, because a refused read consumes
+//     bytes without delivering them.
+//
+// The boundary is exact in both directions. An exhausted allowance
+// performs a one-byte probe instead of refusing, so a server that sent
+// exactly the permitted amount and is then silent is not mistaken for
+// an excess, while the first byte that arrives is the violation.
+//
+// The violation belongs to the connection: it survives every window
+// transition and is cleared only when the connection is discarded, so
+// an idle violation is reported by the next operation rather than
+// silently erased. The client, the socket that backs it, the budget
+// and the selection metadata are always dropped together.
+//
+// See docs/ARCHITECTURE.md and docs/THREAT_MODEL.md for the full
+// analysis, the allowances and the residual risks.
+//
 // # Remaining limitations
 //
 // Fixing the literal-allocation vulnerability does NOT make the
@@ -275,6 +322,7 @@ func (b *Backend) Close() error {
 	}
 	err := b.client.Close()
 	b.client = nil
+	b.budget = nil
 	b.selectedMailbox = ""
 	b.selectedValidity = 0
 	// The IMAP session is over, so the socket is released as well. It
@@ -288,7 +336,7 @@ func (b *Backend) Close() error {
 // IMAP LIST with the wildcard pattern "*".
 func (b *Backend) Mailboxes(ctx context.Context, accountID string) ([]mailbox.Mailbox, error) {
 	var out []mailbox.Mailbox
-	err := b.withClient(ctx, opPlain, func(c *client.Client) error {
+	err := b.withClient(ctx, opMailboxList, func(c *client.Client) error {
 		ch := make(chan *imap.MailboxInfo, 64)
 		done := make(chan error, 1)
 		go func() { done <- c.List("", "*", ch) }()
@@ -924,14 +972,20 @@ func (b *Backend) MailboxUIDValidity(ctx context.Context, accountID, mbx string)
 // logged out by the server, or the previous call returned an error,
 // a fresh connection is established.
 //
-// The client and the socket that backs it are owned together: they are
-// set and cleared in lockstep under the per-account mutex, so the
-// backend never holds a client without a socket, never holds a socket
-// without its client, and never holds the socket of a previous
-// connection. A session that the server has ended is invalidated —
-// client, socket and selection metadata — before the replacement
-// connection is attempted, so a failed reconnect leaves no obsolete
-// state behind.
+// The client, the socket that backs it and the budget that accounts
+// its inbound bytes are owned together: they are set and cleared in
+// lockstep under the per-account mutex, so the backend never holds a
+// client without a socket, never holds a socket without its client,
+// never holds a budget that belongs to a connection that no longer
+// exists, and never holds the socket of a previous connection. A
+// session that the server has ended is invalidated — client, socket,
+// budget and selection metadata — before the replacement connection is
+// attempted, so a failed reconnect leaves no obsolete state behind.
+//
+// The allowance in force is armed per operation. Between operations
+// the connection is idle and the server is expected to send very
+// little, so the allowance drops back to the small idle one and a
+// server that floods an idle connection loses it quickly.
 //
 // fn MUST be synchronous and non-blocking; the IMAP client is not
 // safe for concurrent use. The connection is closed on error.
@@ -942,21 +996,25 @@ func (b *Backend) withClient(ctx context.Context, kind opKind, fn func(*client.C
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.client == nil || isLoggedOut(b.client) {
-		if b.client != nil {
-			// The previous client was logged out by the server, so its
-			// session is over. The client and the socket that backed it
-			// are discarded together, before the replacement connection
-			// is attempted, and the selection metadata that belonged to
-			// that session is dropped with them.
-			//
-			// Doing this before the dial matters: if the replacement
-			// connection fails, the backend must not keep an obsolete
-			// client without an owned socket, nor a UIDVALIDITY that
-			// was observed on a session that no longer exists.
-			b.releaseConn()
-			b.client = nil
-			b.selectedMailbox = ""
-			b.selectedValidity = 0
+		// The previous session is over, so its client, socket, budget
+		// and selection metadata are discarded together, before the
+		// replacement connection is attempted.
+		//
+		// Doing this before the dial matters: if the replacement
+		// connection fails, the backend must not keep an obsolete
+		// client without an owned socket, nor a UIDVALIDITY that
+		// was observed on a session that no longer exists.
+		//
+		// The budget's violation record is captured before the budget
+		// is dropped: it is the cause of the session's end, and an
+		// idle violation must be reported rather than erased silently.
+		cause := b.discardLocked()
+		if cause != nil {
+			// The connection was invalidated by an aggregate-limit
+			// violation while it was idle. The violation is reported
+			// by the operation that recognises it; the following call
+			// reconnects.
+			return idleServerDataBudgetError()
 		}
 		c, conn, budget, err := b.dialAndLogin(ctx)
 		if err != nil {
@@ -964,8 +1022,8 @@ func (b *Backend) withClient(ctx context.Context, kind opKind, fn func(*client.C
 			// command exhausts the allowance while the connection is
 			// being established. That is the same condition as a flood
 			// during an operation, and it is reported the same way.
-			if budget != nil && budget.wasExceeded() {
-				return mailbox.ErrServerDataBudgetExceeded
+			if budget != nil && budget.violationErr() != nil {
+				return serverDataBudgetError(kind)
 			}
 			return err
 		}
@@ -983,18 +1041,21 @@ func (b *Backend) withClient(ctx context.Context, kind opKind, fn func(*client.C
 	// Arm the server data budget for this operation, so that the
 	// inbound protocol bytes of its commands and of the unsolicited
 	// responses that arrive while they run are bounded.
-	if b.budget != nil {
-		b.budget.setLimit(b.dataAllowance(kind))
-	}
+	b.budget.setLimit(b.dataAllowance(kind))
+
 	err := fn(b.client)
+
+	// A budget violation is reported as itself, not as the connection
+	// failure it causes: the connection died because the server sent
+	// too much data, and the caller can act on that.
+	//
+	// The check happens even when the callback appeared to succeed: a
+	// violation that invalidated the data the callback consumed must
+	// not be reported as a complete result.
+	if b.budget != nil && b.budget.violationErr() != nil {
+		err = serverDataBudgetError(kind)
+	}
 	if err != nil {
-		// A budget violation is reported as itself, not as the
-		// connection failure it causes: the connection died because
-		// the server sent too much data, and the caller can act on
-		// that.
-		if b.budget != nil && b.budget.wasExceeded() {
-			err = mailbox.ErrServerDataBudgetExceeded
-		}
 		// On error, close the client so the next call reconnects.
 		// We never silently retry a mutating operation; the
 		// backend is read-only and the only operations are
@@ -1006,20 +1067,53 @@ func (b *Backend) withClient(ctx context.Context, kind opKind, fn func(*client.C
 		// which is safe here because the caller has already awaited
 		// the completion of the command that failed.
 		c := b.client
-		b.client = nil
-		b.selectedMailbox = ""
-		b.selectedValidity = 0
-		_ = c.Close()
-		b.releaseConn()
+		if c != nil {
+			_ = c.Close()
+		}
+		b.discardLocked()
+		return err
 	}
+	// Between operations the connection is idle and the server is
+	// expected to send very little, so the allowance drops back to
+	// the small idle one. A server that floods an idle connection
+	// therefore loses it quickly.
+	//
+	// Arming a window does not erase the violation record: the record
+	// belongs to the connection, and it is cleared only when the
+	// connection is discarded.
+	b.budget.setLimit(idleDataAllowance)
+	return nil
+}
+
+// discardLocked drops the current connection.
+//
+// The client, the socket that backs it, the budget that accounts its
+// inbound bytes and the selection metadata that belonged to the
+// session are dropped together, so the backend never holds a client
+// without a socket, a socket without its client, or a budget that
+// belongs to a connection that no longer exists.
+//
+// It reports the budget violation that ended the session, if there was
+// one. The caller decides whether to report it: the operation that
+// ended the session has already reported it, and only a violation that
+// nobody has reported yet - an idle one - must still be surfaced.
+//
+// It writes nothing to the connection: closing the socket is enough to
+// end a session whose command has already completed.
+//
+// Called under the per-account mutex.
+func (b *Backend) discardLocked() error {
+	var cause error
 	if b.budget != nil {
-		// Between operations the connection is idle and the server is
-		// expected to send very little, so the allowance drops back to
-		// the small idle one. A server that floods an idle connection
-		// therefore loses it quickly.
-		b.budget.setLimit(idleDataAllowance)
+		cause = b.budget.violationErr()
+		b.budget.clearViolation()
 	}
-	return err
+	b.releaseConn()
+	b.client = nil
+	b.budget = nil
+	b.selectedMailbox = ""
+	b.selectedValidity = 0
+	return cause
 }
 
 // releaseConn closes the socket of the current client and forgets it.

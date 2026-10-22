@@ -128,8 +128,12 @@ func mapError(err error) *TypedError {
 		// fewer messages.
 		return typed(codeLimitExceeded, err.Error(), nil)
 	case errors.Is(err, mailbox.ErrServerDataBudgetExceeded):
-		// The message carries the recourse, so the caller can retry
-		// with a narrower request instead of retrying unchanged.
+		// The message carries the recourse, and the recourse is
+		// operation-appropriate: a listing or a search can be
+		// narrowed, a mailbox enumeration has no narrower form, a raw
+		// message fetch is bounded by the message size, and an idle
+		// flood is bounded by the idle allowance. The caller must
+		// not retry unchanged.
 		return typed(codeLimitExceeded, err.Error(), nil)
 	case errors.Is(err, mailbox.ErrResponseTooLarge):
 		// The message carries the recourse, so the caller can narrow

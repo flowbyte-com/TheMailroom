@@ -237,7 +237,14 @@ var (
 	// The decoder's limits bound one response; this bound is the
 	// aggregate: the inbound bytes of the operation's commands and of
 	// the unsolicited responses that arrive while they run. The server
-	// sent too much data, so the connection was closed.
+	// sent too much data, so the connection was closed and the client,
+	// its socket and its budget were discarded together.
+	//
+	// The message that wraps it names the recourse that fits the
+	// operation: a listing or a search can be narrowed, a mailbox
+	// enumeration has no narrower form, a raw message fetch is bounded
+	// by the message size, and an idle flood is bounded by the idle
+	// allowance.
 	ErrServerDataBudgetExceeded = errors.New("mailbox: server sent more protocol data than the operation allows")
 	ErrMessageTooLarge          = errors.New("mailbox: message too large")
 	ErrNestingTooDeep           = errors.New("mailbox: mime nesting too deep")

@@ -114,6 +114,27 @@ type listFixtureServer struct {
 	// that sends an unlimited sequence of individually valid responses.
 	floodResponses int
 
+	// floodAfterList makes the server send that many unsolicited
+	// EXISTS responses after it has answered a LIST command. Unlike
+	// floodResponses, the flood needs no further command to trigger
+	// it: it arrives while the client is idle.
+	floodAfterList int
+
+	// floodAfterExamine makes the server send that many unsolicited
+	// EXISTS responses after it has answered an EXAMINE command. The
+	// connection is established by then, so the flood is exercised
+	// against a live session rather than against the login.
+	floodAfterExamine int
+
+	// listMailboxes makes the server answer a LIST command with that
+	// many mailbox responses. The responses are generated and written
+	// one at a time, so a large list never has to be held in memory.
+	listMailboxes int
+
+	// listMailboxNameLength is the length of each generated mailbox
+	// name. It lets a test produce a LIST response of a chosen size.
+	listMailboxNameLength int
+
 	// badCharsetOnce makes the server answer the first UID SEARCH with
 	// NO [BADCHARSET], so the client retries the search with the
 	// US-ASCII charset.
@@ -330,6 +351,21 @@ func (c *listFixtureConn) writeResponse(write func(*imap.Writer) error) error {
 	return c.bw.Flush()
 }
 
+// writeBytes writes raw bytes on the connection.
+//
+// The buffered writer is flushed first, so the bytes cannot overtake a
+// buffered response. The write is not buffered afterwards: the caller
+// has already built the exact bytes it wants on the wire.
+func (c *listFixtureConn) writeBytes(b []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.bw.Flush(); err != nil {
+		return err
+	}
+	_, err := c.conn.Write(b)
+	return err
+}
+
 // endSession ends the session with a BYE.
 //
 // The buffered writer is flushed first, so the BYE cannot overtake a
@@ -449,10 +485,19 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 				exists, firstField(line)); err != nil {
 				return
 			}
+			if flood := s.examineFloodCount(); flood > 0 {
+				// The session is established by now, so the flood is
+				// exercised against a live connection.
+				fc.writeFlood(flood)
+			}
 		case strings.Contains(upper, "SEARCH"):
 			if s.serveSearch(fc, firstField(line)) {
 				// The server was configured to drop the connection
 				// mid-response.
+				return
+			}
+		case strings.Contains(upper, "LIST"):
+			if s.serveList(fc, firstField(line)) {
 				return
 			}
 		case strings.Contains(upper, "FETCH"):
@@ -627,6 +672,35 @@ func (s *listFixtureServer) setFloodResponses(n int) {
 	s.floodResponses = n
 }
 
+// setListMailboxes sets the size of the mailbox list the server serves
+// in answer to a LIST command, and the length of each generated name.
+//
+// The length of the name is what makes the response large: the fixture
+// generates the responses on the fly, so a list of any size costs a
+// bounded amount of memory.
+func (s *listFixtureServer) setListMailboxes(count, nameLength int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listMailboxes = count
+	s.listMailboxNameLength = nameLength
+}
+
+// examineFloodCount returns the number of unsolicited responses the
+// server sends after an EXAMINE command.
+func (s *listFixtureServer) examineFloodCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.floodAfterExamine
+}
+
+// setExamineFlood sets the number of unsolicited responses the server
+// sends after an EXAMINE command.
+func (s *listFixtureServer) setExamineFlood(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.floodAfterExamine = n
+}
+
 // setSearchUIDs replaces the UID list the server answers a UID SEARCH
 // with.
 func (s *listFixtureServer) setSearchUIDs(uids []uint32) {
@@ -719,6 +793,89 @@ func (s *listFixtureServer) countServed(n int) {
 	s.mu.Lock()
 	s.servedMessages += n
 	s.mu.Unlock()
+}
+
+// serveList writes the configured mailbox list and the tagged
+// completion.
+//
+// The responses are generated and written in chunks, so a list of any
+// size is served without the fixture holding it in memory. It reports
+// whether the connection was dropped mid-response.
+func (s *listFixtureServer) serveList(fc *listFixtureConn, tag string) bool {
+	s.mu.Lock()
+	count := s.listMailboxes
+	nameLen := s.listMailboxNameLength
+	flood := s.floodAfterList
+	s.mu.Unlock()
+
+	if nameLen <= 0 {
+		nameLen = 8
+	}
+	var buf []byte
+	for i := 0; i < count; i++ {
+		buf = append(buf, fmt.Sprintf("* LIST (\\HasNoChildren) \"/\" \"%0*d\"\r\n", nameLen, i)...)
+		if len(buf) >= 32<<10 {
+			if err := fc.writeBytes(buf); err != nil {
+				return true
+			}
+			buf = buf[:0]
+		}
+	}
+	if len(buf) > 0 {
+		if err := fc.writeBytes(buf); err != nil {
+			return true
+		}
+	}
+	if err := fc.writeLine("%s OK LIST completed\r\n", tag); err != nil {
+		return true
+	}
+	if flood > 0 {
+		// The flood follows the completion, so the client has already
+		// received the whole response when the extra data arrives.
+		fc.writeFlood(flood)
+	}
+	return false
+}
+
+// idleFloodNow makes every live connection send unsolicited responses.
+//
+// It models a server that keeps sending updates with no command from
+// the client to provoke them. The responses are individually valid, so
+// only the aggregate byte budget can stop them.
+//
+// The flood is written from its own goroutine, so the fixture's command
+// loop is not blocked by it.
+func (s *listFixtureServer) idleFloodNow(n int) {
+	s.mu.Lock()
+	conns := make([]*listFixtureConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	for _, c := range conns {
+		go c.writeFlood(n)
+	}
+}
+
+// writeFlood writes n unsolicited EXISTS responses.
+//
+// The responses are generated in chunks, so the flood costs a bounded
+// amount of memory whatever its size.
+func (c *listFixtureConn) writeFlood(n int) {
+	const line = "* 1 EXISTS\r\n"
+	var buf []byte
+	for i := 0; i < n; i++ {
+		buf = append(buf, line...)
+		if len(buf) >= 32<<10 {
+			if err := c.writeBytes(buf); err != nil {
+				return
+			}
+			buf = buf[:0]
+		}
+	}
+	if len(buf) > 0 {
+		_ = c.writeBytes(buf)
+	}
 }
 
 // waitForPeerClose blocks until the client closes the connection, or
