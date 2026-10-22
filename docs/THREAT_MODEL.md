@@ -458,6 +458,24 @@ These are recorded, not silently accepted as production-grade behaviour:
   by the fork's reader), which is separate work and is not part of the
   current fork. Explicit IMAP command timeouts remain a separate
   control and are independent of this budget.
+- **The go-imap reader updates the selected mailbox status in place.**
+  This is a pre-existing fork-level defect, not an aggregate-budget
+  regression, and it is recorded here because the aggregate-budget
+  tests can reach it. When the fork's reader handles an unsolicited
+  `EXISTS`, it writes the message count into the selected
+  `*imap.MailboxStatus` — the very struct the application received
+  from `EXAMINE` — under the client's own lock. The application reads
+  that count without that lock, so a server that sends an unsolicited
+  `EXISTS` while the application is reading the status is a data race.
+  The count is only used for the list scan budget's preflight refusal,
+  and the FETCH delivery count still bounds the work, so the exposure
+  is a stale or torn count rather than unbounded work. The application
+  cannot fix it: the fork exposes no accessor that returns a copy
+  under the lock. The fix is a fork change — update a copy of the
+  status, or expose an accessor that snapshots it — and it is tracked
+  separately from this work. Until then, the aggregate-budget fixture
+  floods before a mailbox is selected, where the reader has no selected
+  status to update.
 - **Credential-command trustworthiness.** Bounding the IMAP and SMTP
   credential-command output bounds TheMailroom's memory use and keeps the
   command's output out of errors and logs. It does not make the command

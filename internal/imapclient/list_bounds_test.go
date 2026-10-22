@@ -120,17 +120,19 @@ type listFixtureServer struct {
 	// it: it arrives while the client is idle.
 	floodAfterList int
 
-	// floodAfterExamine makes the server send that many unsolicited
-	// EXISTS responses after it has answered an EXAMINE command. The
-	// connection is established by then, so the flood is exercised
-	// against a live session rather than against the login.
-	floodAfterExamine int
-
 	// floodBeforeExamine makes the server send that many unsolicited
 	// EXISTS responses before it answers an EXAMINE command. The
 	// connection is established by then, and the command that is
 	// running when the flood lands fails, so the violation is
 	// deterministically part of that operation.
+	//
+	// The flood lands before any mailbox is selected, so the go-imap
+	// reader has no selected mailbox status to update. That matters:
+	// the fork updates the selected status in place when it handles
+	// an unsolicited EXISTS, and the application reads that status
+	// without the client's lock, so a flood that lands after a
+	// selection would expose that pre-existing race. See
+	// docs/THREAT_MODEL.md.
 	floodBeforeExamine int
 
 	// listMailboxes makes the server answer a LIST command with that
@@ -498,11 +500,6 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 				exists, firstField(line)); err != nil {
 				return
 			}
-			if flood := s.examineFloodCount(); flood > 0 {
-				// The session is established by now, so the flood is
-				// exercised against a live connection.
-				fc.writeFlood(flood)
-			}
 		case strings.Contains(upper, "SEARCH"):
 			if s.serveSearch(fc, firstField(line)) {
 				// The server was configured to drop the connection
@@ -698,28 +695,20 @@ func (s *listFixtureServer) setListMailboxes(count, nameLength int) {
 	s.listMailboxNameLength = nameLength
 }
 
-// examineFloodCount returns the number of unsolicited responses the
-// server sends after an EXAMINE command.
-func (s *listFixtureServer) examineFloodCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.floodAfterExamine
-}
-
-// setExamineFlood sets the number of unsolicited responses the server
-// sends after an EXAMINE command.
-func (s *listFixtureServer) setExamineFlood(n int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.floodAfterExamine = n
-}
-
 // examineFloodBefore returns the number of unsolicited responses the
 // server sends before an EXAMINE command is answered.
 func (s *listFixtureServer) examineFloodBefore() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.floodBeforeExamine
+}
+
+// setExamineFlood sets the number of unsolicited responses the server
+// sends before an EXAMINE command is answered.
+func (s *listFixtureServer) setExamineFlood(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.floodBeforeExamine = n
 }
 
 // setSearchUIDs replaces the UID list the server answers a UID SEARCH

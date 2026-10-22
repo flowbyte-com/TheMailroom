@@ -666,9 +666,9 @@ func TestServerDataBudgetIdleFloodUnderBothTLSModes(t *testing.T) {
 func TestServerDataBudgetDiscardsTheWholeConnection(t *testing.T) {
 	const budget = 10
 	srv := &listFixtureServer{
-		messages:          budgetMessages(budget),
-		searchUIDs:        []uint32{1},
-		floodAfterExamine: idleFloodResponses,
+		messages:           budgetMessages(budget),
+		searchUIDs:         []uint32{1},
+		floodBeforeExamine: idleFloodResponses,
 	}
 	addr, cleanup := srv.start(t)
 	defer cleanup()
@@ -703,9 +703,9 @@ func TestServerDataBudgetDiscardsTheWholeConnection(t *testing.T) {
 func TestServerDataBudgetReconnectsAfterADiscardedConnection(t *testing.T) {
 	const budget = 10
 	srv := &listFixtureServer{
-		messages:          budgetMessages(budget),
-		searchUIDs:        []uint32{1},
-		floodAfterExamine: idleFloodResponses,
+		messages:           budgetMessages(budget),
+		searchUIDs:         []uint32{1},
+		floodBeforeExamine: idleFloodResponses,
 	}
 	addr, cleanup := srv.start(t)
 	defer cleanup()
@@ -1081,9 +1081,9 @@ func TestServerDataBudgetLeavesNoBlockedGoroutines(t *testing.T) {
 func TestServerDataBudgetSearchRefusalCarriesSearchGuidance(t *testing.T) {
 	const budget = 10
 	srv := &listFixtureServer{
-		messages:          budgetMessages(1),
-		searchUIDs:        []uint32{1},
-		floodAfterExamine: idleFloodResponses,
+		messages:           budgetMessages(1),
+		searchUIDs:         []uint32{1},
+		floodBeforeExamine: idleFloodResponses,
 	}
 	addr, cleanup := srv.start(t)
 	defer cleanup()
@@ -1115,9 +1115,9 @@ func TestServerDataBudgetSearchRefusalCarriesSearchGuidance(t *testing.T) {
 func TestServerDataBudgetListingRefusalDoesNotRecommendNarrowing(t *testing.T) {
 	const budget = 10
 	srv := &listFixtureServer{
-		messages:          budgetMessages(1),
-		searchUIDs:        []uint32{1},
-		floodAfterExamine: idleFloodResponses,
+		messages:           budgetMessages(1),
+		searchUIDs:         []uint32{1},
+		floodBeforeExamine: idleFloodResponses,
 	}
 	addr, cleanup := srv.start(t)
 	defer cleanup()
