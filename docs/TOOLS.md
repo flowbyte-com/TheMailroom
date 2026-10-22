@@ -660,7 +660,10 @@ cannot be honoured, the tool returns an explicit error.
 query can match an arbitrarily large number of messages — an empty
 query matches every message in the mailbox. The per-account
 `max_list_scan_messages` limit (default 10 000, hard maximum 1 000 000)
-bounds that work. The bound is enforced twice: the UIDs the server
+bounds the client's share of that work, the messages it fetches and
+processes. It does not bound the work the server does to evaluate the
+criteria, which is server-side computation the client cannot observe or
+limit. The bound is enforced twice: the UIDs the server
 returns are counted, and a search that matches more messages than the
 limit allows is refused with the `RateLimited` error code and a message
 naming the budget and the recourse — narrow the query or raise
@@ -668,6 +671,18 @@ naming the budget and the recourse — narrow the query or raise
 follow-up fetch are counted as well, so a server that sends more than
 it was asked for is stopped. No partial or approximate result is ever
 returned.
+
+**Response limits.** The scan budget bounds the client's own work. The
+IMAP client additionally caps what a single response may cost it: the
+number of fields, the size of an atom or a quoted string, the total
+number of bytes, and the nesting depth of the lists. The limits are
+derived from the same account configuration, so a response that would
+exceed them is refused before it is materialised. Such a response is
+reported with the `RateLimited` error code and the connection is
+closed, because a response that broke its limits cannot be trusted. The
+limits apply to one response: they do not bound the number of
+responses a server sends, the work the server does to evaluate a
+search, or the duration of an operation.
 
 **Server-dependent matching.** `subject`, `from` and `to`
 matching is delegated to the IMAP server, so substring and

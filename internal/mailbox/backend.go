@@ -223,7 +223,14 @@ var (
 	// evaluated by the server, so a result set can be arbitrarily
 	// large; rather than fetch and process every match, the backend
 	// refuses the search.
-	ErrSearchTooLarge          = errors.New("mailbox: too many messages to search")
+	ErrSearchTooLarge = errors.New("mailbox: too many messages to search")
+	// ErrResponseTooLarge is returned when the IMAP response exceeded
+	// one of the decoder's per-response resource limits: too many
+	// fields, an oversized atom or quoted string, or too many bytes.
+	// It is distinct from ErrSearchTooLarge, which is the
+	// application's own scan budget, and from ErrMalformed, which is
+	// a response that could not be parsed at all.
+	ErrResponseTooLarge        = errors.New("mailbox: imap response exceeded a decoder limit")
 	ErrMessageTooLarge         = errors.New("mailbox: message too large")
 	ErrNestingTooDeep          = errors.New("mailbox: mime nesting too deep")
 	ErrTooManyParts            = errors.New("mailbox: too many mime parts")

@@ -31,9 +31,8 @@ func TestFailedReconnectDropsObsoleteSessionState(t *testing.T) {
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			srv := &listFixtureServer{
-				messages:            budgetMessages(3),
-				terminateAfterFetch: true,
-				startTLS:            mode.startTLS,
+				messages: budgetMessages(3),
+				startTLS: mode.startTLS,
 			}
 			addr, cleanup := srv.start(t)
 			defer cleanup()
@@ -60,10 +59,10 @@ func TestFailedReconnectDropsObsoleteSessionState(t *testing.T) {
 				t.Fatalf("selected state = (%q, %d), want (\"INBOX\", 1)", sel, validity)
 			}
 
-			// The server ends the session.
-			waitFor(t, 10*time.Second, "the server to end the session", func() bool {
-				return srv.terminatedCount() == 1
-			})
+			// The server ends the session. The listing above has
+			// returned, so the command it issued has completed on the
+			// client and the BYE cannot race that completion.
+			srv.endSessions()
 			waitFor(t, 10*time.Second, "the client to observe the logout", func() bool {
 				be.mu.Lock()
 				defer be.mu.Unlock()
@@ -136,8 +135,7 @@ func TestFailedReconnectDropsObsoleteSessionState(t *testing.T) {
 // a socket that belongs to a previous connection.
 func TestReconnectAfterLogoutKeepsClientAndSocketPaired(t *testing.T) {
 	srv := &listFixtureServer{
-		messages:            budgetMessages(3),
-		terminateAfterFetch: true,
+		messages: budgetMessages(3),
 	}
 	addr, cleanup := srv.start(t)
 	defer cleanup()
@@ -148,6 +146,9 @@ func TestReconnectAfterLogoutKeepsClientAndSocketPaired(t *testing.T) {
 	if _, err := be.ListMessages(t.Context(), "test", "INBOX", mailbox.ListOptions{Limit: 10}); err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
+	// The listing above has returned, so the command it issued has
+	// completed on the client and the BYE cannot race that completion.
+	srv.endSessions()
 	waitFor(t, 10*time.Second, "the client to observe the logout", func() bool {
 		be.mu.Lock()
 		defer be.mu.Unlock()

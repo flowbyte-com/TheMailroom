@@ -287,6 +287,19 @@ func mapErr(err error) error {
 	if errors.Is(err, mimeparse.ErrMalformed) {
 		return mailbox.ErrMalformed
 	}
+	// A decoder-limit violation is not a malformed response and not a
+	// message-size violation: the response was well formed, but it
+	// exceeded one of the reader's per-response resource limits. It is
+	// checked before the parse-error branch below, because the
+	// executor wraps a reader error in the connection-closed error.
+	//
+	// The message is fixed text: it never carries content from the
+	// server's response.
+	if errors.Is(err, imap.ErrResponseTooLarge) {
+		return fmt.Errorf("%w: the server sent an IMAP response that exceeded the decoder's resource limits, "+
+			"so the connection was closed. Narrow the query or raise limits.max_list_scan_messages",
+			mailbox.ErrResponseTooLarge)
+	}
 	// The IMAP literal-size evidence is concrete and typed.
 	// The go-imap fork (github.com/flowbyte-com/go-imap)
 	// returns imap.ErrLiteralSizeExceeded when the announced

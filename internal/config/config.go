@@ -32,13 +32,18 @@ const (
 	DefaultMaxSearchResults        = 500
 	DefaultMaxBatchOperations      = 50
 	// DefaultMaxListScanMessages bounds how many messages one list or
-	// search operation may examine. Listing is ordered by internal date,
-	// which is unrelated to UID order, so an exact page can only be
-	// produced by examining every message in the mailbox. A search
-	// matches its criteria on the server, so its result set can be
-	// arbitrarily large. This bound caps both workloads; an operation
-	// that would examine more messages than the bound is refused with an
-	// explicit error rather than answered approximately.
+	// search operation may fetch and process on the client side.
+	// Listing is ordered by internal date, which is unrelated to UID
+	// order, so an exact page can only be produced by examining every
+	// message in the mailbox. A search matches its criteria on the
+	// server, so its result set can be arbitrarily large. This bound
+	// caps both workloads; an operation that would fetch more messages
+	// than the bound is refused with an explicit error rather than
+	// answered approximately.
+	//
+	// The bound is on the client's own work. It does not bound the work
+	// the server does to evaluate the search criteria: that is
+	// server-side computation the client cannot observe or limit.
 	DefaultMaxListScanMessages = 10000
 	// MaxListScanMessagesLimit is the largest value an operator may
 	// configure for limits.max_list_scan_messages.
@@ -169,13 +174,17 @@ type LimitsConfig struct {
 	MaxSearchResults        int `yaml:"max_search_results,omitempty"`
 	MaxBatchOperations      int `yaml:"max_batch_operations,omitempty"`
 	// MaxListScanMessages bounds how many messages one list or search
-	// operation may examine on the server. Listing is ordered by
-	// internal date, which is unrelated to UID order, so an exact page
-	// requires examining every message; a search matches its criteria
-	// on the server, so its result set can be arbitrarily large. This
-	// bound caps both workloads. A list of an oversized mailbox, or a
-	// search that matches more messages, is refused with an explicit
-	// error.
+	// operation may fetch and process on the client side. Listing is
+	// ordered by internal date, which is unrelated to UID order, so an
+	// exact page requires examining every message; a search matches its
+	// criteria on the server, so its result set can be arbitrarily
+	// large. This bound caps both workloads. A list of an oversized
+	// mailbox, or a search that matches more messages, is refused with
+	// an explicit error.
+	//
+	// The bound is on the client's own work. It does not bound the work
+	// the server does to evaluate the search criteria: that is
+	// server-side computation the client cannot observe or limit.
 	MaxListScanMessages int `yaml:"max_list_scan_messages,omitempty"`
 	MaxMIMENesting      int `yaml:"max_mime_nesting,omitempty"`
 	MaxMIMEParts        int `yaml:"max_mime_parts,omitempty"`

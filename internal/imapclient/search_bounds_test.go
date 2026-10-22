@@ -34,6 +34,25 @@ import (
 //
 // The tests below use local, deterministic fixtures only.
 
+// requireResponseTooLarge asserts that err is the typed decoder-limit
+// error.
+//
+// It is a distinct condition from the application's own scan budget: the
+// decoder refused the response itself, before the application could
+// count its UIDs.
+func requireResponseTooLarge(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected the typed decoder-limit error, got nil")
+	}
+	if !errors.Is(err, mailbox.ErrResponseTooLarge) {
+		t.Fatalf("err = %v, want it to wrap %v", err, mailbox.ErrResponseTooLarge)
+	}
+	if errors.Is(err, mailbox.ErrSearchTooLarge) {
+		t.Errorf("err = %v, want it not to be classified as a search-too-large error", err)
+	}
+}
+
 // requireSearchTooLarge asserts that err is the typed search-too-large
 // error.
 func requireSearchTooLarge(t *testing.T, err error) {
@@ -167,6 +186,13 @@ func TestSearchBudgetPlusOneIsRefused(t *testing.T) {
 // TestSearchVeryLargeResultSetIsRefused checks that a search matching
 // far more messages than the budget is refused, and that the work
 // stops at the search.
+//
+// A result this large is refused by the *decoder's* field limit, which
+// is the tighter of the two bounds: the decoder's limit is
+// max(budget+2, 64) fields, so a result of thousands of UIDs never
+// reaches the application. The decoder's violation is reported as
+// ErrResponseTooLarge, not as the application's ErrSearchTooLarge: the
+// two are distinct conditions and the caller can tell them apart.
 func TestSearchVeryLargeResultSetIsRefused(t *testing.T) {
 	const budget = 50
 	const matches = 5000
@@ -183,7 +209,7 @@ func TestSearchVeryLargeResultSetIsRefused(t *testing.T) {
 	defer be.Close()
 
 	res, err := be.SearchMessages(t.Context(), "test", "INBOX", mailbox.SearchQuery{})
-	requireSearchTooLarge(t, err)
+	requireResponseTooLarge(t, err)
 	if len(res.Messages) != 0 {
 		t.Errorf("got %d messages, want 0", len(res.Messages))
 	}
@@ -541,10 +567,9 @@ func TestSearchAbortUnderImplicitTLSAndSTARTTLS(t *testing.T) {
 				fixtureMessage(1, baseTime.Add(-2*time.Hour), "m1-again"),
 			}
 			srv := &listFixtureServer{
-				messages:            msgs,
-				searchUIDs:          []uint32{1, 2},
-				startTLS:            mode.startTLS,
-				terminateAfterFetch: true,
+				messages:   msgs,
+				searchUIDs: []uint32{1, 2},
+				startTLS:   mode.startTLS,
 			}
 			addr, cleanup := srv.start(t)
 			defer cleanup()
@@ -643,6 +668,66 @@ func TestSearchStallingServerDoesNotHang(t *testing.T) {
 	waitFor(t, 5*time.Second, "the server to stall", func() bool {
 		return srv.stalledCount() == 1
 	})
+}
+
+// TestSearchBadCharsetFallbackRetriesWithUSASCII checks the charset
+// fallback.
+//
+// The application issues the UID SEARCH itself rather than through
+// client.UidSearch, so the fallback the go-imap client performs --
+// retrying the search with the US-ASCII charset when the server
+// answers NO [BADCHARSET] -- has to be reproduced exactly. Without it,
+// a server that does not support UTF-8 would fail every search.
+func TestSearchBadCharsetFallbackRetriesWithUSASCII(t *testing.T) {
+	msgs := []listFixtureMessage{
+		fixtureMessage(1, baseTime, "m1"),
+		fixtureMessage(2, baseTime.Add(-time.Hour), "m2"),
+	}
+	srv := &listFixtureServer{
+		messages:       msgs,
+		searchUIDs:     searchUIDsOf(msgs),
+		badCharsetOnce: true,
+	}
+	addr, cleanup := srv.start(t)
+	defer cleanup()
+
+	be := listFixtureBackend(t, addr, 100)
+	defer be.Close()
+
+	res, err := be.SearchMessages(t.Context(), "test", "INBOX", mailbox.SearchQuery{Subject: "m"})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(res.Messages) != 2 {
+		t.Fatalf("got %d messages, want 2", len(res.Messages))
+	}
+	// The search was issued twice: the first attempt with UTF-8, the
+	// retry with US-ASCII.
+	if n := srv.searchCount(); n != 2 {
+		t.Fatalf("server saw %d searches, want 2: one UTF-8 attempt and one US-ASCII retry", n)
+	}
+	first := strings.ToUpper(srv.searchCommand(0))
+	second := strings.ToUpper(srv.searchCommand(1))
+	if !strings.Contains(first, "UTF-8") {
+		t.Errorf("first search command = %q, want it to ask for UTF-8", first)
+	}
+	if !strings.Contains(second, "US-ASCII") {
+		t.Errorf("second search command = %q, want it to ask for US-ASCII", second)
+	}
+	// The retry must carry the same criteria, and the collector must
+	// not mix the two attempts: the result holds each message once.
+	if !strings.Contains(second, "SUBJECT") {
+		t.Errorf("second search command = %q, want it to carry the criteria", second)
+	}
+	seen := map[uint32]int{}
+	for _, m := range res.Messages {
+		seen[m.UID]++
+	}
+	for uid, n := range seen {
+		if n != 1 {
+			t.Errorf("UID %d appears %d times, want 1: the two attempts must not be mixed", uid, n)
+		}
+	}
 }
 
 // TestSearchErrorMessageGivesAccurateRecourse checks the text of the

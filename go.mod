@@ -6,7 +6,7 @@ require (
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.25.0
-	github.com/flowbyte-com/go-imap v1.2.1-themailroom.4
+	github.com/flowbyte-com/go-imap v1.2.1-themailroom.5
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	gopkg.in/yaml.v3 v3.0.1
 )

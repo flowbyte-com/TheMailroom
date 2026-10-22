@@ -32,7 +32,7 @@
 //
 // This backend uses a narrow fork of go-imap
 // (github.com/flowbyte-com/go-imap, module version
-// v1.2.1-themailroom.4) that adds:
+// v1.2.1-themailroom.5) that adds:
 //
 //   - client.DialOptions.MaxLiteralSize, which the backend sets
 //     to the per-account MaxMessageBytes. The fork's
@@ -43,6 +43,14 @@
 //   - imap.ErrLiteralSizeExceeded, an exported sentinel so the
 //     violation can be distinguished from an unrelated parse
 //     failure.
+//   - client.DialOptions.MaxResponseFields, MaxAtomSize,
+//     MaxQuotedStringSize, MaxResponseBytes and MaxListDepth, which
+//     bound the memory a single response can make the reader
+//     allocate. The reader counts every byte it consumes, so the
+//     limits apply to the whole response and not only to its
+//     literals. imap.ErrResponseTooLarge is the exported sentinel
+//     for a violation; it is a fatal parse error, so the connection
+//     is torn down and the cause is preserved.
 //   - A reader-side fix that closes the connection when a
 //     parse error desynchronises the response stream, and a
 //     typed connection-closed error that preserves the
@@ -312,7 +320,8 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		limit = 50
 	}
 	// The scan budget bounds how many messages one list or search
-	// operation may examine.
+	// operation may fetch and process. It does not bound the work the
+	// server does to evaluate the search criteria.
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
@@ -708,7 +717,10 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	if limit <= 0 {
 		limit = 50
 	}
-	// The scan budget bounds how many messages one search may examine.
+	// The scan budget bounds how many messages one search may fetch and
+	// process. It does not bound the work the server does to evaluate
+	// the search criteria: that computation is server-side and the
+	// client cannot observe or limit it.
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
@@ -994,8 +1006,143 @@ func (b *Backend) releaseConn() {
 	}
 }
 
+// decoderLimits returns the reader's resource limits for this account.
+//
+// The go-imap fork (v1.2.1-themailroom.5) bounds the memory a single
+// response can make its reader allocate: a maximum number of fields, a
+// maximum atom and quoted-string size, a maximum number of bytes per
+// response, and a maximum list nesting depth. They are configured
+// through client.DialOptions and applied by client.NewWithOptions
+// before the reader goroutine starts, so they are in effect for the
+// very first byte read from the connection.
+//
+// The limits are derived from the account's own configuration, so that
+// they bound exactly the responses the account legitimately expects:
+//
+//   - The field limit is the scan budget plus the response's name, so
+//     that a search result of budget+1 UIDs is still decodable and the
+//     application can produce its own typed refusal rather than a
+//     decoder error. A floor keeps an ordinary FETCH envelope usable
+//     whatever the scan budget is.
+//
+//   - The response-byte limit is the greater of the SEARCH response's
+//     own requirement and the largest legitimate literal body plus the
+//     protocol around it.
+//
+// The decoder's limits are a second line of defence. The
+// application-level bounds - the UID collector and the FETCH delivery
+// count - remain the primary ones, and a decoder limit never replaces
+// them.
+//
+// Every value is computed in int64 and clamped to the range the reader
+// can represent. A limit is never clamped to zero, because zero means
+// "no limit" and would disable the enforcement entirely.
+func (b *Backend) decoderLimits(scanBudget int) client.DialOptions {
+	opts := client.DialOptions{}
+
+	// The field limit: the scan budget plus the response's name, so
+	// that a result of budget+1 UIDs is still decodable.
+	fields := int64(scanBudget) + 2
+	if fields < decoderFieldLimitFloor {
+		fields = decoderFieldLimitFloor
+	}
+	opts.MaxResponseFields = clampDecoderLimit(fields)
+
+	opts.MaxAtomSize = decoderAtomSizeLimit
+	opts.MaxQuotedStringSize = decoderQuotedStringSizeLimit
+	opts.MaxListDepth = decoderListDepthLimit
+
+	// The largest literal one response can carry: the body plus the
+	// protocol around it must fit in the response budget, and the
+	// budget is a uint32. A configured maximum message size above
+	// that is reduced to what one response can carry; the value is
+	// never reduced to zero.
+	literal := int64(b.limits.MaxMessageBytes)
+	if literal < 0 {
+		literal = 0
+	}
+	if maxCarriable := int64(math.MaxUint32) - decoderLiteralOverhead; literal > maxCarriable {
+		literal = maxCarriable
+	}
+	if literal > 0 {
+		opts.MaxLiteralSize = client.MaxLiteralSize(literal)
+	}
+
+	// The SEARCH response's own requirement: budget+1 UIDs, each at
+	// most a separator and ten decimal digits, plus the protocol
+	// around the response.
+	search := decoderBytesPerUID*(int64(scanBudget)+1) + decoderSearchOverhead
+
+	// The literal's own requirement: the body plus the protocol around
+	// it.
+	body := literal + decoderLiteralOverhead
+
+	bytes := search
+	if body > bytes {
+		bytes = body
+	}
+	opts.MaxResponseBytes = clampDecoderLimit(bytes)
+
+	return opts
+}
+
+// clampDecoderLimit converts a computed limit to the uint32 the reader
+// uses.
+//
+// The value is never clamped to zero: zero means "no limit" in the
+// reader, so clamping to it would silently disable the enforcement.
+func clampDecoderLimit(v int64) uint32 {
+	if v <= 0 {
+		return 1
+	}
+	if v > int64(math.MaxUint32) {
+		return math.MaxUint32
+	}
+	return uint32(v)
+}
+
+// The decoder's limits and the allowances they are derived from.
+const (
+	// decoderFieldLimitFloor is the smallest number of fields one
+	// response may hold. An ordinary FETCH envelope holds about thirty
+	// fields - the sequence number, the name, the item list and every
+	// item inside it, including the nested envelope and address lists
+	// - so the floor keeps ordinary responses usable whatever the scan
+	// budget is.
+	decoderFieldLimitFloor = 64
+
+	// decoderAtomSizeLimit is the largest atom, in bytes, the reader
+	// accepts. It is generously above any legitimate atom: a UID, a
+	// mailbox name, a flag or a date.
+	decoderAtomSizeLimit = 64 << 10
+
+	// decoderQuotedStringSizeLimit is the largest quoted string, in
+	// bytes, the reader accepts. It is generously above any legitimate
+	// quoted string, such as a subject or a response-code argument.
+	decoderQuotedStringSizeLimit = 64 << 10
+
+	// decoderListDepthLimit is the deepest list nesting the reader
+	// accepts. It is generously above the deepest legitimate nesting,
+	// which is an envelope's address list.
+	decoderListDepthLimit = 64
+
+	// decoderSearchOverhead is the allowance for the protocol around a
+	// SEARCH response: the tag, the response name, the CRLF, the
+	// tagged completion and the separators.
+	decoderSearchOverhead = 1 << 10
+
+	// decoderLiteralOverhead is the allowance for the protocol around a
+	// literal: the FETCH items, the literal's length declaration, the
+	// CRLF and the envelope's own fields.
+	decoderLiteralOverhead = 64 << 10
+
+	// decoderBytesPerUID is the number of bytes one UID occupies in a
+	// SEARCH response: a separator and up to ten decimal digits.
+	decoderBytesPerUID = 11
+)
+
 // scanBudget returns the effective scan budget: the number of messages
-// one list or search operation may examine.
+// one list or search operation may fetch and process.
 //
 // The same limit bounds both workloads because it bounds the same
 // thing: the number of messages whose envelopes one operation may
@@ -1077,13 +1224,24 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, e
 	// applies identically to the implicit-TLS and STARTTLS
 	// paths: in both cases the Reader sees the *decrypted*
 	// IMAP byte stream.
-	opts := client.DialOptions{}
-	if b.limits.MaxMessageBytes > 0 {
-		if b.limits.MaxMessageBytes > math.MaxUint32 {
-			return nil, nil, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
-		}
-		opts.MaxLiteralSize = client.MaxLiteralSize(b.limits.MaxMessageBytes)
+	// opts carries the protocol-level limits: the literal-size cap and
+	// the decoder's per-response limits. They are applied at the
+	// *imap.Reader level, before the reader allocates anything, and
+	// before the reader goroutine starts.
+	//
+	// The literal-size cap is the pre-allocation control required by
+	// docs/PHASE2_DESIGN.md §10: the reader checks the announced size
+	// BEFORE the make([]byte, n) call, so an over-cap announcement is
+	// rejected without allocating a buffer proportional to it.
+	//
+	// The decoder's limits bound the memory one response can make the
+	// reader allocate. They are derived from the account's own
+	// configuration, so that they bound the responses the account
+	// legitimately expects.
+	if b.limits.MaxMessageBytes > math.MaxUint32 {
+		return nil, nil, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
 	}
+	opts := b.decoderLimits(b.scanBudget())
 	switch {
 	case b.cfg.IMAP.TLS:
 		tlsConn := tls.Client(conn, tlsCfg)
