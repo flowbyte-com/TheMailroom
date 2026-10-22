@@ -165,8 +165,8 @@ IMAP4rev1 backend. It uses a narrow fork of
     mailbox, and the final sort is over that set only.
   - *Server and network work.* The per-account
     `max_list_scan_messages` limit (default 10 000, hard maximum
-    1 000 000) bounds how many messages one call may examine. The
-    bound is enforced twice:
+    1 000 000) bounds how many messages one call may fetch and
+    process. The bound is enforced twice:
 
     1. *Before the fetch.* The server reports the mailbox size in
        the EXAMINE response, which RFC 3501 requires, so an
@@ -216,6 +216,76 @@ IMAP4rev1 backend. It uses a narrow fork of
   the connection and closing it while a command is in flight is a
   data race. The aborted client is discarded together with its
   socket, so the next operation dials a fresh connection.
+- **Bounded search workload.** `search_messages` evaluates its
+  criteria on the server, so the result set can be arbitrarily
+  large: an empty query matches every message in the mailbox. The
+  same `max_list_scan_messages` budget bounds it, at two points:
+
+  1. *The UID SEARCH response.* The application issues the search
+     itself, with a response handler of its own, and counts the
+     UIDs the server returns. When the server returns more than the
+     budget allows, the search is refused with a typed error
+     **before** any FETCH is sent, so the server is never asked for
+     the envelopes of the matches.
+  2. *The UID FETCH response.* The application counts the messages
+     the FETCH handler delivers and aborts the transfer — by
+     closing the underlying socket — when the server delivers more
+     than the budget allows, exactly as the listing path does.
+
+  The first check is the one that carries the weight. The go-imap
+  reader materialises the whole SEARCH response before any handler
+  runs, so the application cannot bound that allocation; what it
+  bounds is everything downstream of it: the UIDs it retains, the
+  sequence set it builds, the messages it fetches and processes, and
+  the summaries it retains and sorts. The summaries are collected in
+  the same bounded top-K selector the listing path uses, which
+  preserves the established order — newest internal date first, UID
+  descending on a tie.
+
+  The bound is on the client's share of the work: the messages it
+  fetches and processes. It does not bound the work the *server* does
+  to evaluate the criteria — the messages it reads, the CPU it spends
+  and the time it takes are server-side computation the client cannot
+  observe or limit. The only client-side control over that is the
+  per-command IMAP timeout, which bounds the client's wait, not the
+  server's work.
+
+- **Decoder-level per-response limits.** The application-level bounds
+  above count what the application keeps and processes. They do not
+  bound what the *reader* materialises while it parses a response: the
+  reader turns a response line into a slice of fields before any
+  handler runs. The go-imap fork therefore caps the reader itself —
+  the number of fields in a response, the size of an atom and of a
+  quoted string, the number of bytes one response may consume, and the
+  nesting depth of its lists — and the backend enables those limits,
+  deriving them from the account's own configuration:
+
+  | Option | Value | Why |
+  |---|---|---|
+  | `MaxResponseFields` | `max(max_list_scan_messages + 2, 64)` | the scan budget plus the response's name, so a result of *budget + 1* UIDs is still decodable and the application produces its own typed refusal; the floor keeps an ordinary FETCH envelope usable |
+  | `MaxAtomSize`, `MaxQuotedStringSize` | 64 KiB each | generously above any legitimate atom or quoted string |
+  | `MaxResponseBytes` | `max(11 * (budget + 1) + 1 KiB, max_message_bytes + 64 KiB)` | the SEARCH response's own requirement, and the largest legitimate literal body plus the protocol around it |
+  | `MaxListDepth` | 64 | generously above the deepest legitimate nesting |
+
+  The two layers are complementary. The application's bounds decide
+  *whether the operation is allowed*; the decoder's bounds decide *how
+  much memory one response may cost* even when the application would
+  have refused the result anyway. A decoder violation is a distinct
+  condition — `mailbox.ErrResponseTooLarge`, not
+  `mailbox.ErrSearchTooLarge` — and it tears the connection down,
+  because the response stream is no longer trustworthy.
+
+  The decoder's limits are per response. They do not bound the number
+  of responses a server sends on one connection, the server-side
+  search computation, or the duration of an operation.
+
+  The search is otherwise unchanged: one logical `UID SEARCH` with
+  the same AND/OR semantics, the same criteria, the same date
+  granularity, the same result limit, and the UIDVALIDITY from the
+  same EXAMINE session. A refused search returns an error, never a
+  partial result. Unlike the listing refusal, narrowing the query
+  *does* help here, because the server evaluates the criteria, so
+  the refusal message says so.
 - Single shared connection per account under a mutex.
 - Automatic reconnect on connection drop or server error; a
   reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating

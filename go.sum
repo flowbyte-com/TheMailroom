@@ -4,8 +4,8 @@ github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 h1:oP4q0fw+fOSWn3
 github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6/go.mod h1:iL2twTeMvZnrg54ZoPDNfJaJaqy0xIQFuBdrLsmspwQ=
 github.com/emersion/go-smtp v0.25.0 h1:krfiHrme2JbJYDh0DGuSRbvPpbnQTH/v9CIfPincl1I=
 github.com/emersion/go-smtp v0.25.0/go.mod h1:ZtRRkbTyp2XTHCA+BmyTFTrj8xY4I+b4McvHxCU2gsQ=
-github.com/flowbyte-com/go-imap v1.2.1-themailroom.4 h1:gTlU8jelY3Sx0lehCNWw9YcAgx6IkPc1XMQPitfW8Yg=
-github.com/flowbyte-com/go-imap v1.2.1-themailroom.4/go.mod h1:qYJjCPsYwVJXnyrkNFO5ysxvZIb6Y8VsZmLU2vbmNPY=
+github.com/flowbyte-com/go-imap v1.2.1-themailroom.5 h1:kMx/Mu+eld2bPXBx1oA43zmC0cyXH+brWS6UUkAlDo4=
+github.com/flowbyte-com/go-imap v1.2.1-themailroom.5/go.mod h1:qYJjCPsYwVJXnyrkNFO5ysxvZIb6Y8VsZmLU2vbmNPY=
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=

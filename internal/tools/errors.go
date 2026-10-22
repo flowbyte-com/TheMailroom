@@ -120,6 +120,17 @@ func mapError(err error) *TypedError {
 		// and after the fetch, so they cannot make an oversized
 		// mailbox listable.
 		return typed(codeLimitExceeded, err.Error(), nil)
+	case errors.Is(err, mailbox.ErrSearchTooLarge):
+		// The message carries the budget and the recourse, so the
+		// caller can narrow the query or raise the limit instead of
+		// retrying unchanged. Narrowing the query does help here: the
+		// server evaluates the criteria, so a narrower query matches
+		// fewer messages.
+		return typed(codeLimitExceeded, err.Error(), nil)
+	case errors.Is(err, mailbox.ErrResponseTooLarge):
+		// The message carries the recourse, so the caller can narrow
+		// the query or raise the limit instead of retrying unchanged.
+		return typed(codeLimitExceeded, err.Error(), nil)
 	case errors.Is(err, mailbox.ErrMessageTooLarge):
 		return typed(codeMessageTooLarge, "message exceeds size limit", nil)
 	case errors.Is(err, mailbox.ErrNestingTooDeep):

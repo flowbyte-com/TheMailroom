@@ -71,20 +71,58 @@ type listFixtureServer struct {
 	// Zero never stalls.
 	stallAfter int
 
-	// terminateAfterFetch ends the session after the first FETCH has
-	// been served: the server sends BYE and closes the connection, so
-	// the client observes a logged-out session.
-	terminateAfterFetch bool
-
 	// rejectLogin makes the server refuse the LOGIN command, so a
 	// reconnect attempt fails at authentication.
 	rejectLogin bool
+
+	// searchUIDs is the UID list the server returns for a UID SEARCH.
+	// A nil list means the search matched nothing.
+	searchUIDs []uint32
+
+	// searchMalformed makes the server answer a UID SEARCH with a
+	// field that is not a number, so the client sees a malformed
+	// response.
+	searchMalformed bool
+
+	// searchTruncate makes the server drop the connection after the
+	// untagged SEARCH response, without the tagged completion.
+	searchTruncate bool
+
+	// searchStall makes the server stop after the untagged SEARCH
+	// response: the tagged completion is never sent and the connection
+	// stays open.
+	searchStall bool
+
+	// rawSearchResponse, when set, is written verbatim in answer to a
+	// UID SEARCH, instead of the normal response. It lets a test
+	// produce a response the fixture would never send, such as an
+	// oversized atom.
+	rawSearchResponse string
+
+	// fetchLiteralBody, when set, makes the UID FETCH response carry a
+	// BODY[] literal with exactly these bytes. The client therefore
+	// receives a literal of exactly that size on the wire.
+	fetchLiteralBody []byte
+
+	// fetchLiteralAnnounce, when non-zero, makes the UID FETCH response
+	// announce a BODY[] literal of that size and never send the body.
+	// The client must refuse the announcement before it allocates.
+	fetchLiteralAnnounce int
+
+	// badCharsetOnce makes the server answer the first UID SEARCH with
+	// NO [BADCHARSET], so the client retries the search with the
+	// US-ASCII charset.
+	badCharsetOnce bool
 
 	mu sync.Mutex
 	// commands records every client command line, in order.
 	commands []string
 	// fetchCommands records the UID FETCH command lines.
 	fetchCommands []string
+	// searchCommands records the UID SEARCH command lines.
+	searchCommands []string
+	// searches counts the UID SEARCH commands received.
+	searches int
 	// connections counts the accepted connections.
 	connections int
 	// servedMessages counts the FETCH responses written.
@@ -97,6 +135,9 @@ type listFixtureServer struct {
 	stalled int
 	// terminated counts the sessions the server ended with BYE.
 	terminated int
+	// conns holds the live connections, so that a test can end the
+	// session on them.
+	conns map[*listFixtureConn]struct{}
 	// logins counts the LOGIN commands received.
 	logins int
 	// rejected counts the LOGIN commands the server refused.
@@ -182,8 +223,12 @@ func (s *listFixtureServer) record(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commands = append(s.commands, strings.TrimSpace(line))
-	if strings.Contains(strings.ToUpper(line), "FETCH") {
+	upper := strings.ToUpper(line)
+	if strings.Contains(upper, "FETCH") {
 		s.fetchCommands = append(s.fetchCommands, strings.TrimSpace(line))
+	}
+	if strings.Contains(upper, "SEARCH") {
+		s.searchCommands = append(s.searchCommands, strings.TrimSpace(line))
 	}
 }
 
@@ -214,6 +259,109 @@ func (s *listFixtureServer) commandCount(prefix string) int {
 	return n
 }
 
+// listFixtureConn is one accepted connection.
+//
+// The fixture writes the responses from the connection's goroutine, and
+// a test may end the session from another one, so every write is
+// serialised through the connection's mutex.
+//
+// A write always flushes the buffered writer first, so a write can
+// never overtake a response that is still buffered. That matters for
+// the BYE that ends a session: it must arrive after the responses
+// that preceded it.
+type listFixtureConn struct {
+	mu   sync.Mutex
+	conn net.Conn
+	br   *bufio.Reader
+	bw   *bufio.Writer
+	w    *imap.Writer
+}
+
+// newListFixtureConn wraps an accepted connection.
+func newListFixtureConn(conn net.Conn) *listFixtureConn {
+	c := &listFixtureConn{conn: conn}
+	c.reset(conn)
+	return c
+}
+
+// reset installs a (possibly upgraded) connection and its readers and
+// writers.
+func (c *listFixtureConn) reset(conn net.Conn) {
+	c.conn = conn
+	c.br = bufio.NewReader(conn)
+	c.bw = bufio.NewWriter(conn)
+	c.w = imap.NewWriter(c.bw)
+}
+
+// upgrade installs an upgraded connection. It is called from the
+// connection's own goroutine, but it takes the mutex because a test
+// may be writing the BYE at the same time.
+func (c *listFixtureConn) upgrade(conn net.Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reset(conn)
+}
+
+// writeLine writes a line to the connection. The buffered writer is
+// flushed first, so the line cannot overtake a buffered response.
+func (c *listFixtureConn) writeLine(format string, args ...any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.bw.Flush(); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(c.conn, format, args...)
+	return err
+}
+
+// writeResponse writes through the buffered writer and flushes it, so
+// the response is on the wire before the command that follows it.
+func (c *listFixtureConn) writeResponse(write func(*imap.Writer) error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := write(c.w); err != nil {
+		return err
+	}
+	return c.bw.Flush()
+}
+
+// endSession ends the session with a BYE.
+//
+// The buffered writer is flushed first, so the BYE cannot overtake a
+// response that is still buffered. The test calls this only after the
+// command it wants to interrupt has completed on the client, so the
+// BYE cannot race that command's completion.
+func (c *listFixtureConn) endSession() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.bw.Flush(); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(c.conn, "* BYE the server is closing the connection\r\n")
+	return err
+}
+
+// endSessions ends the session on every live connection.
+//
+// A test calls it after the operation it wants to interrupt has
+// returned, so the BYE is only ever sent on an idle connection and
+// cannot race the completion of the command that preceded it.
+func (s *listFixtureServer) endSessions() {
+	s.mu.Lock()
+	conns := make([]*listFixtureConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	for _, c := range conns {
+		if err := c.endSession(); err == nil {
+			s.mu.Lock()
+			s.terminated++
+			s.mu.Unlock()
+		}
+	}
+}
+
 func (s *listFixtureServer) handleConn(conn net.Conn) {
 	defer conn.Close()
 	if !s.startTLS && s.tlsConfig != nil {
@@ -227,13 +375,25 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 	if s.startTLS {
 		caps = "IMAP4rev1 STARTTLS"
 	}
-	fmt.Fprintf(conn, "* OK [CAPABILITY %s] ready\r\n", caps)
+	fc := newListFixtureConn(conn)
+	s.mu.Lock()
+	if s.conns == nil {
+		s.conns = make(map[*listFixtureConn]struct{})
+	}
+	s.conns[fc] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.conns, fc)
+		s.mu.Unlock()
+	}()
 
-	br := bufio.NewReader(conn)
-	bw := bufio.NewWriter(conn)
-	w := imap.NewWriter(bw)
+	if err := fc.writeLine("* OK [CAPABILITY %s] ready\r\n", caps); err != nil {
+		return
+	}
+
 	for {
-		line, err := br.ReadString('\n')
+		line, err := fc.br.ReadString('\n')
 		if err != nil {
 			s.recordPeerClose(err)
 			return
@@ -242,45 +402,53 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 		upper := strings.ToUpper(line)
 		switch {
 		case strings.Contains(upper, "STARTTLS"):
-			fmt.Fprintf(conn, "%s OK Begin TLS negotiation now\r\n", firstField(line))
-			if err := bw.Flush(); err != nil {
+			if err := fc.writeLine("%s OK Begin TLS negotiation now\r\n", firstField(line)); err != nil {
 				return
 			}
-			if br.Buffered() != 0 {
+			if fc.br.Buffered() != 0 {
 				// The client sent data before the handshake began.
 				// That is a protocol violation and the fixture
 				// refuses to guess where the TLS record starts.
 				return
 			}
-			tlsConn := tls.Server(conn, s.tlsConfig)
+			tlsConn := tls.Server(fc.conn, s.tlsConfig)
 			if err := tlsConn.Handshake(); err != nil {
 				return
 			}
-			conn = tlsConn
-			br = bufio.NewReader(conn)
-			bw = bufio.NewWriter(conn)
-			w = imap.NewWriter(bw)
+			fc.upgrade(tlsConn)
 		case strings.Contains(upper, "LOGIN"):
 			if s.rejectLoginNow() {
-				fmt.Fprintf(conn, "%s NO login refused\r\n", firstField(line))
+				fc.writeLine("%s NO login refused\r\n", firstField(line))
 				return
 			}
-			fmt.Fprintf(conn, "%s OK logged in\r\n", firstField(line))
+			if err := fc.writeLine("%s OK logged in\r\n", firstField(line)); err != nil {
+				return
+			}
 		case strings.Contains(upper, "EXAMINE") || strings.Contains(upper, "SELECT"):
 			msgs, exists := s.snapshot()
 			if exists == 0 {
 				exists = len(msgs)
 			}
-			fmt.Fprintf(conn, "* %d EXISTS\r\n* OK [UIDVALIDITY 1] selected\r\n%s OK selected\r\n",
-				exists, firstField(line))
+			if err := fc.writeLine("* %d EXISTS\r\n* OK [UIDVALIDITY 1] selected\r\n%s OK selected\r\n",
+				exists, firstField(line)); err != nil {
+				return
+			}
+		case strings.Contains(upper, "SEARCH"):
+			if s.serveSearch(fc, firstField(line)) {
+				// The server was configured to drop the connection
+				// mid-response.
+				return
+			}
 		case strings.Contains(upper, "FETCH"):
-			if s.serveFetch(conn, br, w, firstField(line)) {
+			if s.serveFetch(fc, firstField(line)) {
 				// The server was configured to drop the connection
 				// mid-response.
 				return
 			}
 		default:
-			fmt.Fprintf(conn, "%s OK done\r\n", firstField(line))
+			if err := fc.writeLine("%s OK done\r\n", firstField(line)); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -339,16 +507,130 @@ func (s *listFixtureServer) loginCount() int {
 	return s.logins
 }
 
+// serveSearch writes the configured UID SEARCH response.
+//
+// The response is the untagged `* SEARCH <uid> ...` line followed by the
+// tagged completion. The malformed and truncated variants stop before
+// the completion: the malformed one leaves the field invalid, the
+// truncated one drops the connection, so the client sees a broken
+// response.
+//
+// It reports whether the connection was dropped mid-response.
+func (s *listFixtureServer) serveSearch(fc *listFixtureConn, tag string) bool {
+	s.mu.Lock()
+	uids := s.searchUIDs
+	malformed := s.searchMalformed
+	truncate := s.searchTruncate
+	stall := s.searchStall
+	badCharset := s.badCharsetOnce && s.searches == 0
+	s.searches++
+	s.mu.Unlock()
+
+	if badCharset {
+		// Refuse the charset, the way a server that does not support
+		// UTF-8 does. The client is expected to retry the search with
+		// US-ASCII.
+		fc.writeLine("%s NO [BADCHARSET (\"US-ASCII\")] charset not supported\r\n", tag)
+		return false
+	}
+
+	if s.rawSearchResponse != "" {
+		fc.writeLine("%s", s.rawSearchResponse)
+		return false
+	}
+
+	fields := []interface{}{imap.RawString("SEARCH")}
+	for _, u := range uids {
+		fields = append(fields, u)
+	}
+	if malformed {
+		fields = append(fields, imap.RawString("not-a-number"))
+	}
+	resp := imap.NewUntaggedResp(fields)
+	if err := fc.writeResponse(resp.WriteTo); err != nil {
+		return true
+	}
+	if truncate {
+		// Drop the connection without the tagged completion, so the
+		// client sees a truncated response.
+		return true
+	}
+	if stall {
+		// Stop mid-response: the tagged completion is never sent and
+		// the connection stays open.
+		s.mu.Lock()
+		s.stalled++
+		s.mu.Unlock()
+		s.waitForPeerClose(fc)
+		return true
+	}
+	fc.writeLine("%s OK SEARCH completed\r\n", tag)
+	return false
+}
+
+// searchCount returns the number of UID SEARCH commands received.
+func (s *listFixtureServer) searchCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.searchCommands)
+}
+
+// lastSearch returns the last UID SEARCH command line.
+func (s *listFixtureServer) lastSearch() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.searchCommands) == 0 {
+		return ""
+	}
+	return s.searchCommands[len(s.searchCommands)-1]
+}
+
+// searchCommand returns the n-th UID SEARCH command line.
+func (s *listFixtureServer) searchCommand(n int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n < 0 || n >= len(s.searchCommands) {
+		return ""
+	}
+	return s.searchCommands[n]
+}
+
+// setSearchUIDs replaces the UID list the server answers a UID SEARCH
+// with.
+func (s *listFixtureServer) setSearchUIDs(uids []uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.searchUIDs = uids
+}
+
 // serveFetch writes the configured messages as untagged FETCH responses
 // and then the tagged completion. It reports whether the connection was
 // dropped mid-response.
-func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.Writer, tag string) bool {
+func (s *listFixtureServer) serveFetch(fc *listFixtureConn, tag string) bool {
 	items := []imap.FetchItem{
 		imap.FetchEnvelope,
 		imap.FetchInternalDate,
 		imap.FetchRFC822Size,
 		imap.FetchFlags,
 		imap.FetchUid,
+	}
+	if s.fetchLiteralAnnounce > 0 {
+		// Announce an over-cap literal and never send the body: the
+		// client must refuse the announcement before it allocates a
+		// buffer for it.
+		fc.writeLine("* 1 FETCH (UID 1 BODY[] {%d}\r\n", s.fetchLiteralAnnounce)
+		return true
+	}
+	if s.fetchLiteralBody != nil {
+		// A literal of exactly the given size, on the wire.
+		if err := fc.writeLine("* 1 FETCH (UID 1 BODY[] {%d}\r\n%s)\r\n",
+			len(s.fetchLiteralBody), string(s.fetchLiteralBody)); err != nil {
+			return true
+		}
+		if err := fc.writeLine("%s OK FETCH completed\r\n", tag); err != nil {
+			return true
+		}
+		return false
 	}
 	limit := s.serveLimit
 	messages, _ := s.snapshot()
@@ -371,7 +653,7 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.
 			s.mu.Lock()
 			s.stalled++
 			s.mu.Unlock()
-			s.waitForPeerClose(conn, br)
+			s.waitForPeerClose(fc)
 			return true
 		}
 		msg := imap.NewMessage(uint32(i+1), items)
@@ -386,10 +668,7 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.
 			To:      []*imap.Address{{MailboxName: "recipient", HostName: "example.test"}},
 		}
 		resp := imap.NewUntaggedResp([]interface{}{msg.SeqNum, imap.RawString("FETCH"), msg.Format()})
-		if err := resp.WriteTo(w); err != nil {
-			return true
-		}
-		if err := w.Flush(); err != nil {
+		if err := fc.writeResponse(resp.WriteTo); err != nil {
 			return true
 		}
 		// The counter is incremented as the response goes out, so a
@@ -397,26 +676,10 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.
 		// the responses that were actually delivered.
 		s.countServed(1)
 	}
-	fmt.Fprintf(conn, "%s OK FETCH completed\r\n", tag)
-	_ = w.Flush()
-	if s.terminateSession() {
-		// End the session: the client sees BYE and then the end of the
-		// connection, so its session is logged out.
-		fmt.Fprintf(conn, "* BYE the server is closing the connection\r\n")
-		s.mu.Lock()
-		s.terminated++
-		s.mu.Unlock()
+	if err := fc.writeLine("%s OK FETCH completed\r\n", tag); err != nil {
 		return true
 	}
 	return false
-}
-
-// terminateSession reports whether the server must end the session after
-// the current response.
-func (s *listFixtureServer) terminateSession() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.terminateAfterFetch
 }
 
 // countServed records the number of FETCH responses written.
@@ -429,11 +692,11 @@ func (s *listFixtureServer) countServed(n int) {
 // waitForPeerClose blocks until the client closes the connection, or
 // until the read deadline expires. The deadline is the safety net for a
 // client that never aborts: the fixture must not block forever.
-func (s *listFixtureServer) waitForPeerClose(conn net.Conn, br *bufio.Reader) {
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+func (s *listFixtureServer) waitForPeerClose(fc *listFixtureConn) {
+	_ = fc.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var buf [1]byte
 	for {
-		_, err := br.Read(buf[:])
+		_, err := fc.br.Read(buf[:])
 		if err != nil {
 			s.recordPeerClose(err)
 			return
@@ -445,7 +708,9 @@ func (s *listFixtureServer) waitForPeerClose(conn net.Conn, br *bufio.Reader) {
 // with the given scan budget.
 func listFixtureBackend(t *testing.T, addr string, budget int) *Backend {
 	t.Helper()
-	return listFixtureBackendMode(t, addr, budget, false, 0)
+	// A bounded command timeout, so that a fixture which does not
+	// answer fails the test instead of hanging it.
+	return listFixtureBackendMode(t, addr, budget, false, 30*time.Second)
 }
 
 // listFixtureBackendMode builds a Backend that talks to the fixture

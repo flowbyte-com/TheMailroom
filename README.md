@@ -248,7 +248,7 @@ limits:
   max_recipients: 50             # unique To + Cc + Bcc recipients
   max_attachment_bytes: 6291456  # decoded bytes per local attachment
   max_total_attachment_bytes: 26214400
-  max_list_scan_messages: 10000 # messages one list operation may examine
+  max_list_scan_messages: 10000 # messages one list or search operation may fetch
 attachment_send_paths:
   - /srv/themailroom/outbound    # absolute, existing directory
 ```
@@ -257,7 +257,8 @@ attachment_send_paths:
 ascend but are unrelated to internal dates, so an exact page can only be
 produced by examining every message in the mailbox.
 `limits.max_list_scan_messages` (default 10 000, hard maximum 1 000 000)
-bounds that work. The bound is enforced twice: the server-reported
+bounds that work: it caps the number of messages one operation may
+fetch and process. The bound is enforced twice: the server-reported
 mailbox size is checked in the EXAMINE response before any FETCH is
 sent, and the messages the server actually delivers are counted during
 the FETCH, so a server that under-reports its size is caught while the
@@ -268,6 +269,34 @@ approximate page is returned. The `since` / `before` filters narrow the
 result but not the work: they run after the preflight and after the
 fetch, so they cannot make an oversized mailbox listable and are not
 offered as a recourse.
+
+`search_messages` evaluates its criteria on the server, so a query can
+match an arbitrarily large number of messages — an empty query matches
+every message in the mailbox. The same
+`limits.max_list_scan_messages` limit bounds the client's share of that
+work — the messages it fetches and processes — but not the server's own
+evaluation of the criteria, which is server-side computation the client
+cannot observe or limit. The UIDs the server returns are counted, and a
+search that matches more messages than the limit allows is refused with
+the `RateLimited` error code before the server is asked for any message
+bodies; the messages delivered in the follow-up fetch are counted as
+well. No partial or approximate result is returned. Unlike the listing
+refusal, narrowing the query does help here, because the server
+evaluates the criteria, so the error says so.
+
+A second, independent bound protects the IMAP client itself. The IMAP
+reader turns a response into a slice of fields before the application
+sees it, so the pinned `go-imap` fork caps what one response may cost:
+the number of fields, the size of an atom or a quoted string, the total
+number of bytes, and the nesting depth of the lists. The backend
+enables those limits and derives them from the same account limits, so
+a hostile server cannot make the client allocate an unbounded response.
+A response that exceeds one of them is refused with the `RateLimited`
+error code and the connection is closed, because the response stream is
+no longer trustworthy. The limit is per response: it does not bound the
+number of responses a server sends, the work the server does to
+evaluate a search, or how long an operation may take — the explicit
+command timeout is the separate control for that.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no
