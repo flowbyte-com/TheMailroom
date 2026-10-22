@@ -585,8 +585,8 @@ func TestServerDataBudgetIdleFloodAfterACompletedOperation(t *testing.T) {
 		t.Errorf("err = %v, want it to name the idle allowance", err)
 	}
 
-	// The operation after that reconnects and succeeds.
-	srv.idleFloodNow(0)
+	// The operation after that reconnects and succeeds. The flood was a
+	// single burst, so the new connection is quiet.
 	if _, err := be.Mailboxes(t.Context(), "test"); err != nil {
 		t.Fatalf("Mailboxes after the idle flood: %v", err)
 	}
