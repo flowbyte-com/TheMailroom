@@ -65,6 +65,7 @@ accounts:
       max_recipients: 50
       max_search_results: 500
       max_batch_operations: 50
+      max_list_scan_messages: 10000   # messages one list operation may examine
       max_mime_nesting: 16
       max_mime_parts: 500
 
@@ -113,5 +114,6 @@ accounts:
       max_total_attachment_bytes: 10485760
       max_attachments: 10
       max_recipients: 20                # unique To + Cc + Bcc; duplicates collapse
+      max_list_scan_messages: 10000    # messages one list operation may examine
       max_mime_nesting: 8
       max_mime_parts: 200

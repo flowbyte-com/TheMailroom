@@ -2,6 +2,7 @@ package tools
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -247,6 +248,22 @@ func TestMapErrorAttachmentCodes(t *testing.T) {
 				t.Errorf("code = %q, want %q", got.Code, tc.code)
 			}
 		})
+	}
+}
+
+// TestMapErrorListTooLarge checks that a mailbox that is too large to
+// list exactly maps onto the documented limit-exceeded code and keeps
+// the actionable detail, so the agent can narrow the query or raise the
+// limit instead of retrying unchanged.
+func TestMapErrorListTooLarge(t *testing.T) {
+	err := fmt.Errorf("%w: mailbox %q holds %d messages, more than the list scan budget of %d",
+		mailbox.ErrListTooLarge, "INBOX", 50000, 10000)
+	got := mapError(err)
+	if got.Code != codeLimitExceeded {
+		t.Errorf("code = %q, want %q", got.Code, codeLimitExceeded)
+	}
+	if !strings.Contains(got.Message, "50000") || !strings.Contains(got.Message, "10000") {
+		t.Errorf("message = %q, want it to carry the message count and the budget", got.Message)
 	}
 }
 

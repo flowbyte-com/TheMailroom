@@ -199,15 +199,25 @@ func (m *Message) Subject() string { return m.Headers.Subject }
 // Common errors. Wrapping these lets tools map backend errors onto the
 // typed error codes in docs/TOOLS.md.
 var (
-	ErrBackendNotConfigured    = errors.New("mailbox: backend not configured")
-	ErrAccountNotFound         = errors.New("mailbox: account not found")
-	ErrMailboxNotFound         = errors.New("mailbox: mailbox not found")
-	ErrMessageNotFound         = errors.New("mailbox: message not found")
-	ErrAttachmentNotFound      = errors.New("mailbox: attachment not found")
-	ErrInvalidPart             = errors.New("mailbox: invalid attachment part")
-	ErrUIDMismatch             = errors.New("mailbox: uid/uid_validity mismatch")
-	ErrUIDMissing              = errors.New("mailbox: server did not report uid_validity")
-	ErrLimitExceeded           = errors.New("mailbox: limit exceeded")
+	ErrBackendNotConfigured = errors.New("mailbox: backend not configured")
+	ErrAccountNotFound      = errors.New("mailbox: account not found")
+	ErrMailboxNotFound      = errors.New("mailbox: mailbox not found")
+	ErrMessageNotFound      = errors.New("mailbox: message not found")
+	ErrAttachmentNotFound   = errors.New("mailbox: attachment not found")
+	ErrInvalidPart          = errors.New("mailbox: invalid attachment part")
+	ErrUIDMismatch          = errors.New("mailbox: uid/uid_validity mismatch")
+	ErrUIDMissing           = errors.New("mailbox: server did not report uid_validity")
+	ErrLimitExceeded        = errors.New("mailbox: limit exceeded")
+	// ErrListTooLarge is returned when a mailbox holds more messages
+	// than the configured list scan budget. Listing is ordered by
+	// internal date, which is unrelated to UID order, so an exact page
+	// can only be produced by examining every message. Rather than
+	// return an approximate page, the backend refuses the mailbox.
+	//
+	// The refusal is driven by the messages the server actually
+	// delivers, not only by the mailbox size it reports: a server that
+	// under-reports its size is caught while the listing is running.
+	ErrListTooLarge            = errors.New("mailbox: too many messages to list")
 	ErrMessageTooLarge         = errors.New("mailbox: message too large")
 	ErrNestingTooDeep          = errors.New("mailbox: mime nesting too deep")
 	ErrTooManyParts            = errors.New("mailbox: too many mime parts")

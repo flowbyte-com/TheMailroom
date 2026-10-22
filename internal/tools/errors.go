@@ -112,6 +112,14 @@ func mapError(err error) *TypedError {
 		return typed(codeUidMismatch, "uid/uid_validity mismatch", nil)
 	case errors.Is(err, mailbox.ErrLimitExceeded):
 		return typed(codeLimitExceeded, "limit exceeded", nil)
+	case errors.Is(err, mailbox.ErrListTooLarge):
+		// The message carries the counts, the scan budget and the
+		// recourse, so the caller can raise the limit instead of
+		// retrying unchanged. Narrowing the query with the date
+		// filters does not help: they run after the preflight check
+		// and after the fetch, so they cannot make an oversized
+		// mailbox listable.
+		return typed(codeLimitExceeded, err.Error(), nil)
 	case errors.Is(err, mailbox.ErrMessageTooLarge):
 		return typed(codeMessageTooLarge, "message exceeds size limit", nil)
 	case errors.Is(err, mailbox.ErrNestingTooDeep):

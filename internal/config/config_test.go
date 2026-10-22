@@ -110,6 +110,47 @@ accounts:
 	}
 }
 
+func TestMaxListScanMessages(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		want    int
+		wantErr string
+	}{
+		{name: "default", want: DefaultMaxListScanMessages},
+		{name: "zero selects default", value: "0", want: DefaultMaxListScanMessages},
+		{name: "explicit", value: "250", want: 250},
+		{name: "upper bound", value: strconv.Itoa(MaxListScanMessagesLimit), want: MaxListScanMessagesLimit},
+		{name: "above upper bound", value: strconv.Itoa(MaxListScanMessagesLimit + 1), wantErr: "max_list_scan_messages"},
+		{name: "negative", value: "-1", wantErr: "max_list_scan_messages"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := validYAML
+			if tc.value != "" {
+				yaml = strings.Replace(yaml, "      max_attachments: 10",
+					"      max_attachments: 10\n      max_list_scan_messages: "+tc.value, 1)
+			}
+			cfg, err := Parse([]byte(yaml))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("err = %q, want substring %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := cfg.Accounts[0].Limits.MaxListScanMessages; got != tc.want {
+				t.Errorf("MaxListScanMessages = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestServerMaxRequestBytes(t *testing.T) {
 	cases := []struct {
 		name    string
