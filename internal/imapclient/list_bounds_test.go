@@ -71,6 +71,15 @@ type listFixtureServer struct {
 	// Zero never stalls.
 	stallAfter int
 
+	// terminateAfterFetch ends the session after the first FETCH has
+	// been served: the server sends BYE and closes the connection, so
+	// the client observes a logged-out session.
+	terminateAfterFetch bool
+
+	// rejectLogin makes the server refuse the LOGIN command, so a
+	// reconnect attempt fails at authentication.
+	rejectLogin bool
+
 	mu sync.Mutex
 	// commands records every client command line, in order.
 	commands []string
@@ -86,6 +95,12 @@ type listFixtureServer struct {
 	peerClosed int
 	// stalled counts the FETCH responses that stalled mid-response.
 	stalled int
+	// terminated counts the sessions the server ended with BYE.
+	terminated int
+	// logins counts the LOGIN commands received.
+	logins int
+	// rejected counts the LOGIN commands the server refused.
+	rejected int
 }
 
 func (s *listFixtureServer) start(t *testing.T) (addr string, cleanup func()) {
@@ -246,6 +261,10 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 			bw = bufio.NewWriter(conn)
 			w = imap.NewWriter(bw)
 		case strings.Contains(upper, "LOGIN"):
+			if s.rejectLoginNow() {
+				fmt.Fprintf(conn, "%s NO login refused\r\n", firstField(line))
+				return
+			}
 			fmt.Fprintf(conn, "%s OK logged in\r\n", firstField(line))
 		case strings.Contains(upper, "EXAMINE") || strings.Contains(upper, "SELECT"):
 			msgs, exists := s.snapshot()
@@ -277,6 +296,47 @@ func (s *listFixtureServer) recordPeerClose(err error) {
 	s.mu.Lock()
 	s.peerClosed++
 	s.mu.Unlock()
+}
+
+// rejectLoginNow reports whether the server must refuse the LOGIN, and
+// records the attempt.
+func (s *listFixtureServer) rejectLoginNow() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logins++
+	if !s.rejectLogin {
+		return false
+	}
+	s.rejected++
+	return true
+}
+
+// setRejectLogin makes the server refuse or accept the LOGIN command.
+func (s *listFixtureServer) setRejectLogin(reject bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rejectLogin = reject
+}
+
+// terminatedCount returns the number of sessions the server ended.
+func (s *listFixtureServer) terminatedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.terminated
+}
+
+// rejectedLoginCount returns the number of refused LOGIN commands.
+func (s *listFixtureServer) rejectedLoginCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rejected
+}
+
+// loginCount returns the number of LOGIN commands received.
+func (s *listFixtureServer) loginCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.logins
 }
 
 // serveFetch writes the configured messages as untagged FETCH responses
@@ -339,7 +399,24 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.
 	}
 	fmt.Fprintf(conn, "%s OK FETCH completed\r\n", tag)
 	_ = w.Flush()
+	if s.terminateSession() {
+		// End the session: the client sees BYE and then the end of the
+		// connection, so its session is logged out.
+		fmt.Fprintf(conn, "* BYE the server is closing the connection\r\n")
+		s.mu.Lock()
+		s.terminated++
+		s.mu.Unlock()
+		return true
+	}
 	return false
+}
+
+// terminateSession reports whether the server must end the session after
+// the current response.
+func (s *listFixtureServer) terminateSession() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.terminateAfterFetch
 }
 
 // countServed records the number of FETCH responses written.

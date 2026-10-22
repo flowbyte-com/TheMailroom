@@ -220,6 +220,16 @@ IMAP4rev1 backend. It uses a narrow fork of
 - Automatic reconnect on connection drop or server error; a
   reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating
   operations are never silently retried.
+- The client and the socket that backs it are owned together, under
+  the same mutex: the backend never holds a client without a socket,
+  never holds the socket of a previous connection, and never holds a
+  socket that belongs to a client it has already discarded. A session
+  the server has ended is invalidated — client, socket and selection
+  metadata — *before* the replacement connection is attempted, so a
+  failed reconnect leaves no obsolete client, no owned socket and no
+  UIDVALIDITY from a session that no longer exists behind. The
+  operation is not retried: one failed reconnect is one failed
+  attempt, and the next operation tries again.
 - Refusal to dial without TLS or STARTTLS — plain IMAP is never
   accepted.
 

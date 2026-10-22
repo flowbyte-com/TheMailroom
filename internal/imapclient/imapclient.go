@@ -831,6 +831,15 @@ func (b *Backend) MailboxUIDValidity(ctx context.Context, accountID, mbx string)
 // logged out by the server, or the previous call returned an error,
 // a fresh connection is established.
 //
+// The client and the socket that backs it are owned together: they are
+// set and cleared in lockstep under the per-account mutex, so the
+// backend never holds a client without a socket, never holds a socket
+// without its client, and never holds the socket of a previous
+// connection. A session that the server has ended is invalidated —
+// client, socket and selection metadata — before the replacement
+// connection is attempted, so a failed reconnect leaves no obsolete
+// state behind.
+//
 // fn MUST be synchronous and non-blocking; the IMAP client is not
 // safe for concurrent use. The connection is closed on error.
 func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error) error {
@@ -841,10 +850,20 @@ func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error)
 	defer b.mu.Unlock()
 	if b.client == nil || isLoggedOut(b.client) {
 		if b.client != nil {
-			// The previous client was logged out by the server. Its
-			// socket is dead, so it is released here; otherwise the
-			// file descriptor would leak on every reconnect.
+			// The previous client was logged out by the server, so its
+			// session is over. The client and the socket that backed it
+			// are discarded together, before the replacement connection
+			// is attempted, and the selection metadata that belonged to
+			// that session is dropped with them.
+			//
+			// Doing this before the dial matters: if the replacement
+			// connection fails, the backend must not keep an obsolete
+			// client without an owned socket, nor a UIDVALIDITY that
+			// was observed on a session that no longer exists.
 			b.releaseConn()
+			b.client = nil
+			b.selectedMailbox = ""
+			b.selectedValidity = 0
 		}
 		c, conn, err := b.dialAndLogin(ctx)
 		if err != nil {
