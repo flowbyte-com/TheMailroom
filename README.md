@@ -104,13 +104,13 @@ confined attachment-resolution foundations; PR 2 added the bounded MIME
 composer; PR 3 added the authenticated SMTP sender.
 
 **Phase 3 (Hardening)** covers the remaining production gates. This
-change adds bounded inbound MCP request framing and bounds the IMAP
-credential command; bounded IMAP list/search workloads, explicit IMAP
-command timeouts, `has_attachments` for IMAP summaries, response-size
-limits, fuzz tests, installation docs, and a cross-platform release remain
-Phase 3 work. The Purelymail smoke test completed on 2026-10-21; other
-hardening items remain Phase 3 work. The smoke test is not production
-certification.
+change adds bounded inbound MCP request framing, bounds the IMAP
+credential command, and bounds the IMAP list workload; bounded IMAP
+search workloads, explicit IMAP command timeouts, `has_attachments` for
+IMAP summaries, response-size limits, fuzz tests, installation docs, and a
+cross-platform release remain Phase 3 work. The Purelymail smoke test
+completed on 2026-10-21; other hardening items remain Phase 3 work. The
+smoke test is not production certification.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and
@@ -248,9 +248,19 @@ limits:
   max_recipients: 50             # unique To + Cc + Bcc recipients
   max_attachment_bytes: 6291456  # decoded bytes per local attachment
   max_total_attachment_bytes: 26214400
+  max_list_scan_messages: 10000 # messages one list operation may examine
 attachment_send_paths:
   - /srv/themailroom/outbound    # absolute, existing directory
 ```
+
+`list_messages` is ordered by internal date, newest first. IMAP UIDs
+ascend but are unrelated to internal dates, so an exact page can only be
+produced by examining every message in the mailbox.
+`limits.max_list_scan_messages` (default 10 000, hard maximum 1 000 000)
+bounds that work. A mailbox with more messages than the limit is refused
+with the `RateLimited` error code and a message naming the message count,
+the budget and the recourse; no partial or approximate page is returned.
+The `since` / `before` filters narrow the result but not the work.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no

@@ -241,6 +241,7 @@ double-resolution approach described here.
 - **(planned)** `delete` is hard-disabled unless explicitly enabled; `archive` is a logical move, not a delete.
 - **(planned)** Trash / Deleted Messages handling honours provider folder names (`Trash`, `INBOX.Trash`, `[Gmail]/Trash`).
 - **(implemented)** No read operation mutates: `read_message` and `read_attachment` use `UID FETCH BODY.PEEK[]` (does not set `\Seen`); `list_messages`, `search_messages`, `list_mailboxes` are pure queries. The IMAP backend issues `EXAMINE` (read-only `SELECT`) so the server-side state cannot accept `STORE` or `APPEND` through a read connection.
+- **(implemented, Phase 3 PR 3)** `list_messages` is bounded in both the memory it uses and the work it causes. Results are ordered by internal date, which is unrelated to UID order, so an exact page requires examining every message; the per-account `max_list_scan_messages` limit (default 10 000, hard maximum 1 000 000) bounds how many messages one call may examine. The server reports the mailbox size in the EXAMINE response, so an oversized mailbox is refused with an explicit typed error before any FETCH is sent. The summaries are collected in a bounded top-K selector that retains at most `min(offset + limit, max_list_scan_messages)` of them, so the working set does not grow with the mailbox size. An over-budget mailbox yields an error, never a partial or approximate page.
 
 ### T8. SMTP duplicate sends and ambiguous outcomes
 
@@ -311,7 +312,7 @@ certification; the authoritative record is
 - Host OS compromise: TheMailroom assumes the host is trusted; if it isn't, no application-layer control helps.
 - MCP client compromise: see T1, T3 — the agent is treated as semi-trusted.
 - Network-level MITM with valid CA: TLS verification rejects invalid certificates and we never fall back to plain TCP for credentials (no IMAP `LOGIN` over cleartext, no SMTP AUTH over cleartext).
-- Denial of service from large numbers of accounts or messages: out of scope for v1; documented. This does not waive the specific pre-limit JSON-RPC allocation risk recorded below.
+- Denial of service from large numbers of accounts or messages: out of scope for v1; documented. This does not waive the specific pre-limit JSON-RPC allocation risk recorded below, nor the unbounded `search_messages` and `list_mailboxes` workloads recorded in §3.1.
 
 ### 3.1 Phase 3 hardening backlog (known residual risks)
 
@@ -330,6 +331,20 @@ These are recorded, not silently accepted as production-grade behaviour:
   hardening concerns. Schema size/count limits are also still Phase 3
   work; the remaining risk is resource exhaustion, not confidentiality
   or integrity.
+- **Unbounded IMAP search and mailbox-enumeration workloads.**
+  `list_messages` is bounded (see T7), but `search_messages` still
+  collects every matching summary in memory and `list_mailboxes` still
+  returns every mailbox the server reports. Both are separately tracked
+  hardening items; they are not covered by the list scan budget, and the
+  budget does not apply to them.
+- **List work bound rests on the server-reported mailbox size.**
+  `list_messages` refuses a mailbox whose size, as reported in the
+  EXAMINE response, exceeds `max_list_scan_messages`, and it does so
+  before sending any FETCH. A server that under-reports its size can
+  therefore still make the client read more than the limit; the client's
+  retained working set stays bounded, but the bytes read are not. The
+  per-command IMAP timeout, which is a separate Phase 3 item, is what
+  bounds such a read.
 - **Credential-command trustworthiness.** Bounding the IMAP and SMTP
   credential-command output bounds TheMailroom's memory use and keeps the
   command's output out of errors and logs. It does not make the command

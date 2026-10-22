@@ -98,6 +98,7 @@ type ViewLimits struct {
 	MaxRecipients           int `json:"max_recipients"`
 	MaxSearchResults        int `json:"max_search_results"`
 	MaxBatchOperations      int `json:"max_batch_operations"`
+	MaxListScanMessages     int `json:"max_list_scan_messages"`
 	MaxMIMENesting          int `json:"max_mime_nesting"`
 	MaxMIMEParts            int `json:"max_mime_parts"`
 }
@@ -267,6 +268,7 @@ func viewOf(a *Account) View {
 			MaxRecipients:           a.Limits.MaxRecipients,
 			MaxSearchResults:        a.Limits.MaxSearchResults,
 			MaxBatchOperations:      a.Limits.MaxBatchOperations,
+			MaxListScanMessages:     a.Limits.MaxListScanMessages,
 			MaxMIMENesting:          a.Limits.MaxMIMENesting,
 			MaxMIMEParts:            a.Limits.MaxMIMEParts,
 		},

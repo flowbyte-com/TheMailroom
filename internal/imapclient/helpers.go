@@ -1,6 +1,7 @@
 package imapclient
 
 import (
+	"container/heap"
 	"errors"
 	"fmt"
 	"sort"
@@ -38,6 +39,82 @@ func sortSummaries(s []mailbox.MessageSummary) {
 		}
 		return s[i].UID > s[j].UID
 	})
+}
+
+// summaryBetter reports whether a is preferred over b in the list
+// ordering: newest internal date first, higher UID first on a tie. It is
+// the same comparison sortSummaries uses, so a bounded selection and a
+// full sort agree on the order.
+func summaryBetter(a, b mailbox.MessageSummary) bool {
+	if !a.InternalDate.Equal(b.InternalDate) {
+		return a.InternalDate.After(b.InternalDate)
+	}
+	return a.UID > b.UID
+}
+
+// summarySelector keeps the best k summaries in the list ordering while
+// bounding the memory it uses.
+//
+// The ordering is a total order, because UIDs are unique within a
+// mailbox. The selector therefore keeps exactly the k best summaries: the
+// same page a full sort of every summary would produce, without holding
+// every summary in memory.
+//
+// The worst kept summary sits at the root of the heap, so a summary that
+// is better than it can replace it in constant time.
+type summarySelector struct {
+	items []mailbox.MessageSummary
+	limit int
+}
+
+// Len implements heap.Interface.
+func (s *summarySelector) Len() int { return len(s.items) }
+
+// Less implements heap.Interface. The root is the worst kept summary, so
+// that heap.Pop evicts it.
+func (s *summarySelector) Less(i, j int) bool {
+	return summaryBetter(s.items[j], s.items[i])
+}
+
+// Swap implements heap.Interface.
+func (s *summarySelector) Swap(i, j int) { s.items[i], s.items[j] = s.items[j], s.items[i] }
+
+// Push implements heap.Interface.
+func (s *summarySelector) Push(x any) {
+	s.items = append(s.items, x.(mailbox.MessageSummary))
+}
+
+// Pop implements heap.Interface.
+func (s *summarySelector) Pop() any {
+	old := s.items
+	n := len(old)
+	item := old[n-1]
+	s.items = old[:n-1]
+	return item
+}
+
+// Add offers a summary to the selector. It is retained only if it is
+// better than the worst summary already kept.
+func (s *summarySelector) Add(summary mailbox.MessageSummary) {
+	if s.limit <= 0 {
+		return
+	}
+	if len(s.items) < s.limit {
+		heap.Push(s, summary)
+		return
+	}
+	if summaryBetter(summary, s.items[0]) {
+		s.items[0] = summary
+		heap.Fix(s, 0)
+	}
+}
+
+// Sorted returns the retained summaries in the list ordering.
+func (s *summarySelector) Sorted() []mailbox.MessageSummary {
+	out := make([]mailbox.MessageSummary, len(s.items))
+	copy(out, s.items)
+	sortSummaries(out)
+	return out
 }
 
 func flagsToStrings(fs []string) []string {

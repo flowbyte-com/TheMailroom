@@ -31,8 +31,18 @@ const (
 	DefaultMaxRecipients           = 50
 	DefaultMaxSearchResults        = 500
 	DefaultMaxBatchOperations      = 50
-	DefaultMaxMIMENesting          = 16
-	DefaultMaxMIMEParts            = 500
+	// DefaultMaxListScanMessages bounds how many messages one list
+	// operation may examine. Listing is ordered by internal date, which
+	// is unrelated to UID order, so an exact page can only be produced
+	// by examining every message in the mailbox. This bound caps that
+	// work; a mailbox with more messages than the bound is refused with
+	// an explicit error rather than answered approximately.
+	DefaultMaxListScanMessages = 10000
+	// MaxListScanMessagesLimit is the largest value an operator may
+	// configure for limits.max_list_scan_messages.
+	MaxListScanMessagesLimit = 1000000
+	DefaultMaxMIMENesting    = 16
+	DefaultMaxMIMEParts      = 500
 
 	// DefaultMaxRequestBytes bounds one inbound MCP JSON-RPC frame before
 	// JSON decoding. The payload count excludes LF or CRLF framing.
@@ -156,8 +166,14 @@ type LimitsConfig struct {
 	MaxRecipients           int `yaml:"max_recipients,omitempty"`
 	MaxSearchResults        int `yaml:"max_search_results,omitempty"`
 	MaxBatchOperations      int `yaml:"max_batch_operations,omitempty"`
-	MaxMIMENesting          int `yaml:"max_mime_nesting,omitempty"`
-	MaxMIMEParts            int `yaml:"max_mime_parts,omitempty"`
+	// MaxListScanMessages bounds how many messages one list operation
+	// may examine on the server. Listing is ordered by internal date,
+	// which is unrelated to UID order, so an exact page requires
+	// examining every message; this bound caps that work. A mailbox
+	// with more messages is refused with an explicit error.
+	MaxListScanMessages int `yaml:"max_list_scan_messages,omitempty"`
+	MaxMIMENesting      int `yaml:"max_mime_nesting,omitempty"`
+	MaxMIMEParts        int `yaml:"max_mime_parts,omitempty"`
 }
 
 // WithDefaults returns a copy of c with zero-valued fields filled in.
@@ -212,6 +228,9 @@ func (c AccountConfig) WithDefaults() AccountConfig {
 	}
 	if c.Limits.MaxBatchOperations == 0 {
 		c.Limits.MaxBatchOperations = DefaultMaxBatchOperations
+	}
+	if c.Limits.MaxListScanMessages == 0 {
+		c.Limits.MaxListScanMessages = DefaultMaxListScanMessages
 	}
 	if c.Limits.MaxMIMENesting == 0 {
 		c.Limits.MaxMIMENesting = DefaultMaxMIMENesting
@@ -423,6 +442,12 @@ func validateLimits(l LimitsConfig) error {
 	}
 	if l.MaxBatchOperations < 0 {
 		return fmt.Errorf("limits.max_batch_operations must be non-negative")
+	}
+	if l.MaxListScanMessages < 0 {
+		return fmt.Errorf("limits.max_list_scan_messages must be non-negative")
+	}
+	if l.MaxListScanMessages > MaxListScanMessagesLimit {
+		return fmt.Errorf("limits.max_list_scan_messages must not exceed %d", MaxListScanMessagesLimit)
 	}
 	if l.MaxAttachmentBytes < 0 {
 		return fmt.Errorf("limits.max_attachment_bytes must be non-negative")

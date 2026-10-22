@@ -151,6 +151,38 @@ IMAP4rev1 backend. It uses a narrow fork of
   implicit TLS and STARTTLS. See `docs/PHASE2_DESIGN.md` §8 and
   §10 for the analysis, the fork's change set, and the route
   back to upstream.
+- **Bounded list workload.** `list_messages` is ordered by internal
+  date, newest first, with a descending UID tie-break. IMAP UIDs
+  ascend but are unrelated to internal dates, so an exact page can
+  only be produced by examining every message in the mailbox; a
+  bounded UID range would return the newest-by-UID messages, which
+  is a different set. Two bounds therefore apply:
+
+  - *Application memory.* The summaries are collected in a bounded
+    top-K selector, which retains at most
+    `min(offset + limit, max_list_scan_messages)` of them. The
+    working set therefore does not grow with the size of the
+    mailbox, and the final sort is over that set only.
+  - *Server and network work.* The per-account
+    `max_list_scan_messages` limit (default 10 000, hard maximum
+    1 000 000) bounds how many messages one call may examine. The
+    server reports the mailbox size in the EXAMINE response, which
+    RFC 3501 requires, so an oversized mailbox is refused with an
+    explicit typed error *before* any FETCH is sent.
+
+  A refused mailbox produces an error, never a partial or
+  approximate page. The `since` / `before` filters are applied
+  client-side after the fetch, so they narrow the result but not
+  the work.
+
+  The work bound rests on the count the server reports. A server
+  that under-reports its mailbox size can still make the client
+  read more than the limit; the working set stays bounded in that
+  case, because the selector does not depend on the count. The
+  in-flight FETCH is always completed before the connection is
+  closed, because the go-imap client does not serialise writes to
+  the connection and closing it while a command is in flight is a
+  data race.
 - Single shared connection per account under a mutex.
 - Automatic reconnect on connection drop or server error; a
   reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating

@@ -237,6 +237,11 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	if limit <= 0 {
 		limit = 50
 	}
+	// The scan budget bounds how many messages one call may examine.
+	budget := b.limits.MaxListScanMessages
+	if budget <= 0 {
+		budget = config.DefaultMaxListScanMessages
+	}
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true) // true => EXAMINE (read-only)
@@ -260,6 +265,34 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		if mboxStatus.Messages == 0 {
 			return nil
 		}
+		// Listing is ordered by internal date, which is unrelated to
+		// UID order, so an exact page can only be produced by examining
+		// every message in the mailbox. The scan budget bounds that
+		// work. The server reports the message count in the EXAMINE
+		// response, so an over-budget mailbox is refused before any
+		// FETCH is sent.
+		if mboxStatus.Messages > uint32(budget) {
+			return listTooLargeError(mbx, mboxStatus.Messages, budget)
+		}
+		// The number of summaries that can appear in the result is the
+		// offset plus the limit. At most that many are retained, so
+		// the working set does not grow with the size of the mailbox.
+		// The arithmetic saturates rather than overflowing, so a very
+		// large offset cannot wrap.
+		keep := limit
+		if keep > budget {
+			keep = budget
+		}
+		if opts.Offset > 0 {
+			switch {
+			case opts.Offset > budget:
+				keep = budget
+			case limit > budget-opts.Offset:
+				keep = budget
+			default:
+				keep = opts.Offset + limit
+			}
+		}
 		// Use UidFetch on the full sequence set; the body items
 		// below are non-mutating envelope / size / flag lookups.
 		seqset, _ := imap.ParseSeqSet("1:*")
@@ -273,7 +306,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		ch := make(chan *imap.Message, 32)
 		done := make(chan error, 1)
 		go func() { done <- c.UidFetch(seqset, items, ch) }()
-		var out []mailbox.MessageSummary
+		selector := &summarySelector{limit: keep}
 		for m := range ch {
 			if m == nil {
 				continue
@@ -284,7 +317,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 			if opts.Before != nil && !m.InternalDate.Before(*opts.Before) {
 				continue
 			}
-			summary := mailbox.MessageSummary{
+			selector.Add(mailbox.MessageSummary{
 				UID:          m.Uid,
 				Flags:        flagsToStrings(m.Flags),
 				InternalDate: m.InternalDate,
@@ -292,13 +325,17 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 				From:         envelopeFrom(m.Envelope),
 				To:           envelopeAddresses(m.Envelope, "To"),
 				Subject:      envelopeSubject(m.Envelope),
-			}
-			out = append(out, summary)
+			})
 		}
+		// The fetch must complete before this function returns. The
+		// go-imap client does not serialise writes to the connection, so
+		// closing the connection while a command is still in flight is a
+		// data race; waiting here is what orders the fetch's write
+		// before the close that withClient performs on the error path.
 		if err := <-done; err != nil {
 			return err
 		}
-		sortSummaries(out)
+		out := selector.Sorted()
 		if opts.Offset > 0 {
 			if opts.Offset >= len(out) {
 				out = nil
@@ -822,6 +859,15 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, error) {
 		return nil, fmt.Errorf("imap: login: %w", err)
 	}
 	return c, nil
+}
+
+// listTooLargeError reports that a mailbox holds more messages than the
+// list scan budget allows. The message names the counts and the recourse,
+// so a caller can act on it.
+func listTooLargeError(mbx string, messages uint32, budget int) error {
+	return fmt.Errorf("%w: mailbox %q holds %d messages, more than the list scan budget of %d; "+
+		"narrow the query with since/before or raise limits.max_list_scan_messages",
+		mailbox.ErrListTooLarge, mbx, messages, budget)
 }
 
 // setSelected records the mailbox we have just EXAMINEd and its
