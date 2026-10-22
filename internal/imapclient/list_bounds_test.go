@@ -3,6 +3,7 @@ package imapclient
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -43,6 +44,11 @@ type listFixtureServer struct {
 	// tlsConfig, when non-nil, wraps the accepted connections in TLS.
 	tlsConfig *tls.Config
 
+	// startTLS makes the listener plaintext and advertises STARTTLS,
+	// upgrading the connection on demand. The same fixture therefore
+	// serves both the implicit-TLS and the STARTTLS client paths.
+	startTLS bool
+
 	// messages are served on a UID FETCH.
 	messages []listFixtureMessage
 
@@ -59,11 +65,27 @@ type listFixtureServer struct {
 	// never disconnects.
 	disconnectAfter int
 
+	// stallAfter stops the response after that many FETCH responses
+	// have been sent: the tagged completion is not sent and the
+	// connection is not closed, so the server stalls mid-response.
+	// Zero never stalls.
+	stallAfter int
+
 	mu sync.Mutex
 	// commands records every client command line, in order.
 	commands []string
 	// fetchCommands records the UID FETCH command lines.
 	fetchCommands []string
+	// connections counts the accepted connections.
+	connections int
+	// servedMessages counts the FETCH responses written.
+	servedMessages int
+	// peerClosed counts the connections whose read loop ended because
+	// the peer closed the connection rather than because of a read
+	// deadline.
+	peerClosed int
+	// stalled counts the FETCH responses that stalled mid-response.
+	stalled int
 }
 
 func (s *listFixtureServer) start(t *testing.T) (addr string, cleanup func()) {
@@ -89,8 +111,56 @@ func (s *listFixtureServer) serve() {
 		if err != nil {
 			return
 		}
+		s.mu.Lock()
+		s.connections++
+		s.mu.Unlock()
 		go s.handleConn(conn)
 	}
+}
+
+// connectionCount returns the number of accepted connections.
+func (s *listFixtureServer) connectionCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.connections
+}
+
+// setMessages replaces the served messages and the reported mailbox size.
+// It lets a test change the fixture's behaviour between two calls on the
+// same backend.
+func (s *listFixtureServer) setMessages(msgs []listFixtureMessage, exists int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.messages = msgs
+	s.exists = exists
+}
+
+// snapshot returns the messages to serve and the mailbox size to report.
+func (s *listFixtureServer) snapshot() ([]listFixtureMessage, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.messages, s.exists
+}
+
+// servedCount returns the number of FETCH responses written.
+func (s *listFixtureServer) servedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.servedMessages
+}
+
+// peerClosedCount returns the number of connections the client closed.
+func (s *listFixtureServer) peerClosedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peerClosed
+}
+
+// stalledCount returns the number of FETCH responses that stalled.
+func (s *listFixtureServer) stalledCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stalled
 }
 
 func (s *listFixtureServer) record(line string) {
@@ -131,37 +201,61 @@ func (s *listFixtureServer) commandCount(prefix string) int {
 
 func (s *listFixtureServer) handleConn(conn net.Conn) {
 	defer conn.Close()
-	if s.tlsConfig != nil {
+	if !s.startTLS && s.tlsConfig != nil {
 		tlsConn := tls.Server(conn, s.tlsConfig)
 		if err := tlsConn.Handshake(); err != nil {
 			return
 		}
 		conn = tlsConn
 	}
-	fmt.Fprintf(conn, "* OK [CAPABILITY IMAP4rev1] ready\r\n")
+	caps := "IMAP4rev1"
+	if s.startTLS {
+		caps = "IMAP4rev1 STARTTLS"
+	}
+	fmt.Fprintf(conn, "* OK [CAPABILITY %s] ready\r\n", caps)
 
+	br := bufio.NewReader(conn)
 	bw := bufio.NewWriter(conn)
 	w := imap.NewWriter(bw)
-	br := bufio.NewReader(conn)
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
+			s.recordPeerClose(err)
 			return
 		}
 		s.record(line)
 		upper := strings.ToUpper(line)
 		switch {
+		case strings.Contains(upper, "STARTTLS"):
+			fmt.Fprintf(conn, "%s OK Begin TLS negotiation now\r\n", firstField(line))
+			if err := bw.Flush(); err != nil {
+				return
+			}
+			if br.Buffered() != 0 {
+				// The client sent data before the handshake began.
+				// That is a protocol violation and the fixture
+				// refuses to guess where the TLS record starts.
+				return
+			}
+			tlsConn := tls.Server(conn, s.tlsConfig)
+			if err := tlsConn.Handshake(); err != nil {
+				return
+			}
+			conn = tlsConn
+			br = bufio.NewReader(conn)
+			bw = bufio.NewWriter(conn)
+			w = imap.NewWriter(bw)
 		case strings.Contains(upper, "LOGIN"):
 			fmt.Fprintf(conn, "%s OK logged in\r\n", firstField(line))
 		case strings.Contains(upper, "EXAMINE") || strings.Contains(upper, "SELECT"):
-			exists := s.exists
+			msgs, exists := s.snapshot()
 			if exists == 0 {
-				exists = len(s.messages)
+				exists = len(msgs)
 			}
 			fmt.Fprintf(conn, "* %d EXISTS\r\n* OK [UIDVALIDITY 1] selected\r\n%s OK selected\r\n",
 				exists, firstField(line))
 		case strings.Contains(upper, "FETCH"):
-			if s.serveFetch(conn, w, firstField(line)) {
+			if s.serveFetch(conn, br, w, firstField(line)) {
 				// The server was configured to drop the connection
 				// mid-response.
 				return
@@ -172,10 +266,23 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 	}
 }
 
+// recordPeerClose notes that the client closed the connection. A read
+// that fails with a deadline exceeded is not a close: the fixture sets a
+// read deadline so a stalled server cannot block forever.
+func (s *listFixtureServer) recordPeerClose(err error) {
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return
+	}
+	s.mu.Lock()
+	s.peerClosed++
+	s.mu.Unlock()
+}
+
 // serveFetch writes the configured messages as untagged FETCH responses
 // and then the tagged completion. It reports whether the connection was
 // dropped mid-response.
-func (s *listFixtureServer) serveFetch(conn net.Conn, w *imap.Writer, tag string) bool {
+func (s *listFixtureServer) serveFetch(conn net.Conn, br *bufio.Reader, w *imap.Writer, tag string) bool {
 	items := []imap.FetchItem{
 		imap.FetchEnvelope,
 		imap.FetchInternalDate,
@@ -184,16 +291,27 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, w *imap.Writer, tag string
 		imap.FetchUid,
 	}
 	limit := s.serveLimit
+	messages, _ := s.snapshot()
 	if limit == 0 {
-		limit = len(s.messages)
+		limit = len(messages)
 	}
-	for i, m := range s.messages {
+	for i, m := range messages {
 		if i >= limit {
 			break
 		}
 		if s.disconnectAfter > 0 && i >= s.disconnectAfter {
 			// Drop the connection without the tagged completion, so the
 			// client sees a truncated response.
+			return true
+		}
+		if s.stallAfter > 0 && i >= s.stallAfter {
+			// Stall mid-response: the tagged completion is never sent
+			// and the connection stays open. The only way out is for
+			// the client to abort the transfer.
+			s.mu.Lock()
+			s.stalled++
+			s.mu.Unlock()
+			s.waitForPeerClose(conn, br)
 			return true
 		}
 		msg := imap.NewMessage(uint32(i+1), items)
@@ -214,15 +332,52 @@ func (s *listFixtureServer) serveFetch(conn net.Conn, w *imap.Writer, tag string
 		if err := w.Flush(); err != nil {
 			return true
 		}
+		// The counter is incremented as the response goes out, so a
+		// test that observes it while the server is still writing sees
+		// the responses that were actually delivered.
+		s.countServed(1)
 	}
 	fmt.Fprintf(conn, "%s OK FETCH completed\r\n", tag)
 	_ = w.Flush()
 	return false
 }
 
+// countServed records the number of FETCH responses written.
+func (s *listFixtureServer) countServed(n int) {
+	s.mu.Lock()
+	s.servedMessages += n
+	s.mu.Unlock()
+}
+
+// waitForPeerClose blocks until the client closes the connection, or
+// until the read deadline expires. The deadline is the safety net for a
+// client that never aborts: the fixture must not block forever.
+func (s *listFixtureServer) waitForPeerClose(conn net.Conn, br *bufio.Reader) {
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var buf [1]byte
+	for {
+		_, err := br.Read(buf[:])
+		if err != nil {
+			s.recordPeerClose(err)
+			return
+		}
+	}
+}
+
 // listFixtureBackend builds a Backend that talks to the fixture server
 // with the given scan budget.
 func listFixtureBackend(t *testing.T, addr string, budget int) *Backend {
+	t.Helper()
+	return listFixtureBackendMode(t, addr, budget, false, 0)
+}
+
+// listFixtureBackendMode builds a Backend that talks to the fixture
+// server with the given scan budget, over implicit TLS or over STARTTLS.
+//
+// commandTimeout bounds an IMAP command. Zero means the go-imap default
+// (no timeout), which makes a test that expects a prompt failure fail by
+// hanging instead: the tests that need a bound set one.
+func listFixtureBackendMode(t *testing.T, addr string, budget int, startTLS bool, commandTimeout time.Duration) *Backend {
 	t.Helper()
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -239,7 +394,8 @@ func listFixtureBackend(t *testing.T, addr string, budget int) *Backend {
 			Port:     port,
 			Username: "username",
 			Password: "password",
-			TLS:      true,
+			TLS:      !startTLS,
+			StartTLS: startTLS,
 		},
 		Limits: config.LimitsConfig{
 			MaxMessageBytes:         1 << 20,
@@ -255,8 +411,9 @@ func listFixtureBackend(t *testing.T, addr string, budget int) *Backend {
 		},
 	}
 	be, err := New(cfg, Options{
-		DialTimeout: 5 * time.Second,
-		TLSConfig:   &tls.Config{InsecureSkipVerify: true},
+		DialTimeout:    5 * time.Second,
+		TLSConfig:      &tls.Config{InsecureSkipVerify: true},
+		CommandTimeout: commandTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -729,18 +886,17 @@ func TestSummarySelectorEvictsWorst(t *testing.T) {
 }
 
 // TestListMessagesUnderReportedMailboxKeepsWorkingSetBounded covers a
-// server that under-reports its mailbox size and then sends more messages
-// than the budget allows.
+// server that under-reports its mailbox size and then sends more
+// messages than it said.
 //
-// The work bound relies on the message count the server reports in the
-// EXAMINE response, which RFC 3501 requires. A server that under-reports
-// it can still make the client read more than the budget; what must hold
-// in that case is that the client does not *retain* a summary per
-// message. The working set stays bounded by the selector, and the page
-// returned is still the correct one.
+// While the delivered messages stay within the scan budget the listing
+// succeeds and the page is the correct one; the working set stays
+// bounded by the selector, not by the mailbox size. A server that
+// delivers more than the budget is refused instead; see
+// TestListScanBudgetUnderReportedExistsCannotExceedBudget.
 func TestListMessagesUnderReportedMailboxKeepsWorkingSetBounded(t *testing.T) {
 	const budget = 100
-	const total = 5000
+	const total = 50
 	const subjectSize = 4096
 	big := strings.Repeat("x", subjectSize)
 	msgs := make([]listFixtureMessage, total)

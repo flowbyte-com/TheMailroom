@@ -213,6 +213,10 @@ var (
 	// internal date, which is unrelated to UID order, so an exact page
 	// can only be produced by examining every message. Rather than
 	// return an approximate page, the backend refuses the mailbox.
+	//
+	// The refusal is driven by the messages the server actually
+	// delivers, not only by the mailbox size it reports: a server that
+	// under-reports its size is caught while the listing is running.
 	ErrListTooLarge            = errors.New("mailbox: too many messages to list")
 	ErrMessageTooLarge         = errors.New("mailbox: message too large")
 	ErrNestingTooDeep          = errors.New("mailbox: mime nesting too deep")

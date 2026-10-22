@@ -68,6 +68,45 @@
 // for the full threat analysis, the fork's change set, and the
 // route back to upstream.
 //
+// # IMAP list workload: ENFORCED AT THE APPLICATION LEVEL
+//
+// Listing is ordered by internal date, which is unrelated to UID
+// order, so an exact page can only be produced by examining every
+// message in the mailbox. The per-account
+// limits.max_list_scan_messages (default 10 000, hard maximum
+// 1 000 000) bounds that work.
+//
+// The bound is enforced twice:
+//
+//   - Before the fetch, from the mailbox size the server reports in
+//     the EXAMINE response. An oversized mailbox is refused with
+//     mailbox.ErrListTooLarge before any FETCH is sent.
+//   - During the fetch, from the messages the FETCH handler actually
+//     delivers. On delivery of message budget+1 the client records
+//     the overrun and aborts the transfer by closing the underlying
+//     TCP socket, then drains the response channel and awaits the
+//     completion of the in-flight FETCH.
+//
+// The second check does not depend on the server's own count, so a
+// server that under-reports its mailbox size is caught while the
+// listing runs. The abort is a socket close because the go-imap
+// client has no way to cancel an in-flight command, and issuing
+// another command (CLOSE, LOGOUT) while a command is active would
+// write to the connection concurrently with the command's own write.
+//
+// The guarantee is precise: the limit bounds the messages delivered
+// by the FETCH handler and processed at the application level, and
+// detection necessarily observes message budget+1. It is not a
+// strict bound on all protocol work. It does not bound the raw
+// responses the server sends, the responses the fork discards
+// internally (a FETCH response without a UID is dropped by the
+// response handler and is never counted), the total bytes
+// transferred or buffered, the allocation for a single oversized
+// envelope, or the wall-clock duration of the call. The residual
+// decoder and byte-budget risks are tracked in
+// docs/THREAT_MODEL.md §3.1. Explicit IMAP command timeouts are a
+// separate control.
+//
 // # Remaining limitations
 //
 // Fixing the literal-allocation vulnerability does NOT make the
@@ -139,6 +178,21 @@ type Backend struct {
 	client           *client.Client
 	selectedMailbox  string
 	selectedValidity uint32
+
+	// conn is the raw TCP socket that backs client, so that an
+	// in-flight command can be aborted by closing the socket instead
+	// of issuing another IMAP command.
+	//
+	// It is set and cleared under mu, in lockstep with client: it is
+	// non-nil exactly when client is non-nil, and it always refers to
+	// the socket of the current client, never to a previous one. The
+	// go-imap client has no way to cancel an in-flight command, and
+	// issuing another command (CLOSE, LOGOUT) while a command is
+	// active would write to the connection concurrently with the
+	// command's own write. Closing the socket aborts the transfer
+	// without writing anything, so it cannot race the command
+	// writer.
+	conn net.Conn
 }
 
 // Options configure the IMAP backend at construction time.
@@ -189,12 +243,17 @@ func (b *Backend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.client == nil {
+		b.releaseConn()
 		return nil
 	}
 	err := b.client.Close()
 	b.client = nil
 	b.selectedMailbox = ""
 	b.selectedValidity = 0
+	// The IMAP session is over, so the socket is released as well. It
+	// is closed without writing anything, and no command is in flight
+	// at this point.
+	b.releaseConn()
 	return err
 }
 
@@ -307,8 +366,40 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		done := make(chan error, 1)
 		go func() { done <- c.UidFetch(seqset, items, ch) }()
 		selector := &summarySelector{limit: keep}
+		// delivered counts every message the FETCH handler hands to
+		// this process, independently of the date filters and of the
+		// selector's retention. It is the quantity the scan budget
+		// bounds: the budget limits how many messages one call may
+		// examine, and the filters run afterwards, so they cannot make
+		// an oversized mailbox cheap.
+		delivered := 0
+		overrun := false
 		for m := range ch {
 			if m == nil {
+				continue
+			}
+			if overrun {
+				// Keep draining. The fork's response handler blocks
+				// on this channel, and a blocked handler stops the
+				// reader, so the command would never complete and
+				// the goroutine would leak. The channel is closed by
+				// the fork, never by us.
+				continue
+			}
+			delivered++
+			if delivered > budget {
+				// The server delivered more messages than the budget
+				// allows. Record the overrun and abort the transfer.
+				//
+				// The abort is the close of the underlying socket: it
+				// stops the server from sending the rest of the
+				// response and it writes nothing to the connection,
+				// so it cannot race the command writer the way an
+				// interleaved CLOSE or LOGOUT would. The client is
+				// unusable afterwards, but withClient discards it when
+				// this call returns the error below.
+				overrun = true
+				b.abortConn()
 				continue
 			}
 			if opts.Since != nil && m.InternalDate.Before(*opts.Since) {
@@ -332,8 +423,16 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		// closing the connection while a command is still in flight is a
 		// data race; waiting here is what orders the fetch's write
 		// before the close that withClient performs on the error path.
-		if err := <-done; err != nil {
-			return err
+		//
+		// After an abort the fetch fails with a connection error. That
+		// is the expected outcome, and the budget error below is the
+		// one that is reported.
+		fetchErr := <-done
+		if overrun {
+			return listScanBudgetExceededError(mbx, budget)
+		}
+		if fetchErr != nil {
+			return fetchErr
 		}
 		out := selector.Sorted()
 		if opts.Offset > 0 {
@@ -741,11 +840,20 @@ func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.client == nil || isLoggedOut(b.client) {
-		c, err := b.dialAndLogin(ctx)
+		if b.client != nil {
+			// The previous client was logged out by the server. Its
+			// socket is dead, so it is released here; otherwise the
+			// file descriptor would leak on every reconnect.
+			b.releaseConn()
+		}
+		c, conn, err := b.dialAndLogin(ctx)
 		if err != nil {
 			return err
 		}
 		b.client = c
+		// The socket is adopted together with the client, so the
+		// abort path can never close a replacement connection.
+		b.conn = conn
 		// Force a re-EXAMINE on the next call by clearing the
 		// selected mailbox: a new connection cannot inherit the
 		// server-side state.
@@ -758,22 +866,72 @@ func (b *Backend) withClient(ctx context.Context, fn func(*client.Client) error)
 		// We never silently retry a mutating operation; the
 		// backend is read-only and the only operations are
 		// EXAMINE, FETCH, SEARCH and LIST.
+		//
+		// The client and its socket are dropped together, so no stale
+		// socket reference survives the failure and the next call
+		// dials a fresh connection. c.Close() writes a CLOSE command,
+		// which is safe here because the caller has already awaited
+		// the completion of the command that failed.
 		c := b.client
 		b.client = nil
 		b.selectedMailbox = ""
 		b.selectedValidity = 0
 		_ = c.Close()
+		b.releaseConn()
 	}
 	return err
 }
 
+// releaseConn closes the socket of the current client and forgets it.
+//
+// Closing a socket writes nothing to the connection, so it is safe
+// even when the connection is already broken. It is the same operation
+// the abort path uses, minus the semantics: the abort path keeps the
+// client in place until the operation returns, whereas releaseConn
+// accompanies the client being discarded.
+//
+// Called under the per-account mutex.
+func (b *Backend) releaseConn() {
+	if b.conn != nil {
+		_ = b.conn.Close()
+		b.conn = nil
+	}
+}
+
+// abortConn closes the raw socket that backs the current client.
+//
+// It aborts an in-flight command without issuing another IMAP command:
+// closing a socket does not write to the connection, so it cannot race
+// the command writer the way an interleaved CLOSE or LOGOUT would.
+//
+// The socket is not replaced here. The client stays in place until the
+// operation that called abortConn returns an error, at which point
+// withClient discards the client and its socket together and the next
+// operation dials a fresh connection.
+//
+// Called under the per-account mutex.
+func (b *Backend) abortConn() {
+	if b.conn != nil {
+		_ = b.conn.Close()
+	}
+}
+
 // dialAndLogin establishes one IMAP connection and authenticates it.
+//
+// It returns the client together with the raw TCP socket that backs it.
+// The socket is what the abort path closes to stop an in-flight command
+// without issuing another IMAP command. It is the same socket in both
+// TLS modes: with implicit TLS the client speaks over a tls.Conn that
+// wraps it, and with STARTTLS the connection is upgraded in place.
 //
 // ctx bounds the credential command: it is the caller's operation context
 // and is cancelled with it. The TLS handshake deliberately keeps using
 // context.Background(), as before, so that the existing implicit-TLS and
 // STARTTLS connection behaviour is unchanged.
-func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, error) {
+//
+// Every failure path releases the socket before returning, so a failed
+// connection setup leaks no file descriptor.
+func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, error) {
 	addr := net.JoinHostPort(b.cfg.IMAP.Host, strconv.Itoa(b.cfg.IMAP.Port))
 	dialer := &net.Dialer{Timeout: b.dialTimeout}
 	tlsCfg := b.tlsConfig
@@ -786,8 +944,17 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, error) {
 	}
 	raw, err := dialer.Dial("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
+		return nil, nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
 	}
+	// The socket is released on every failure path below. It is only
+	// handed back to the caller together with a client, and the caller
+	// then owns it for the lifetime of that client.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = raw.Close()
+		}
+	}()
 	var conn net.Conn = raw
 	// opts carries the protocol-level IMAP literal-size cap. It
 	// is applied at the *imap.Reader level, i.e. before the
@@ -802,7 +969,7 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, error) {
 	opts := client.DialOptions{}
 	if b.limits.MaxMessageBytes > 0 {
 		if b.limits.MaxMessageBytes > math.MaxUint32 {
-			return nil, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
+			return nil, nil, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
 		}
 		opts.MaxLiteralSize = client.MaxLiteralSize(b.limits.MaxMessageBytes)
 	}
@@ -810,41 +977,38 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, error) {
 	case b.cfg.IMAP.TLS:
 		tlsConn := tls.Client(conn, tlsCfg)
 		if err := tlsConn.HandshakeContext(context.Background()); err != nil {
-			_ = raw.Close()
-			return nil, fmt.Errorf("imap: tls handshake: %w", err)
+			return nil, nil, fmt.Errorf("imap: tls handshake: %w", err)
 		}
 		conn = tlsConn
 	case b.cfg.IMAP.StartTLS:
 		c, err := client.NewWithOptions(conn, opts)
 		if err != nil {
-			_ = raw.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		if b.commandTimeout > 0 {
 			c.Timeout = b.commandTimeout
 		}
 		if err := c.StartTLS(tlsCfg); err != nil {
 			_ = c.Close()
-			return nil, fmt.Errorf("imap: starttls: %w", err)
+			return nil, nil, fmt.Errorf("imap: starttls: %w", err)
 		}
 		pw, err := resolvePassword(ctx, b.cfg.IMAP)
 		if err != nil {
 			_ = c.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		if err := c.Login(b.cfg.IMAP.Username, pw); err != nil {
 			_ = c.Close()
-			return nil, fmt.Errorf("imap: login: %w", err)
+			return nil, nil, fmt.Errorf("imap: login: %w", err)
 		}
-		return c, nil
+		handedOff = true
+		return c, raw, nil
 	default:
-		_ = raw.Close()
-		return nil, errors.New("imap: tls or starttls must be enabled")
+		return nil, nil, errors.New("imap: tls or starttls must be enabled")
 	}
 	c, err := client.NewWithOptions(conn, opts)
 	if err != nil {
-		_ = raw.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if b.commandTimeout > 0 {
 		c.Timeout = b.commandTimeout
@@ -852,22 +1016,45 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, error) {
 	pw, err := resolvePassword(ctx, b.cfg.IMAP)
 	if err != nil {
 		_ = c.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if err := c.Login(b.cfg.IMAP.Username, pw); err != nil {
 		_ = c.Close()
-		return nil, fmt.Errorf("imap: login: %w", err)
+		return nil, nil, fmt.Errorf("imap: login: %w", err)
 	}
-	return c, nil
+	handedOff = true
+	return c, raw, nil
 }
 
 // listTooLargeError reports that a mailbox holds more messages than the
-// list scan budget allows. The message names the counts and the recourse,
-// so a caller can act on it.
+// list scan budget allows, as reported by the server in the EXAMINE
+// response. The message names the counts and the recourse, so a caller
+// can act on it.
+//
+// The recourse is to raise the limit. It is not to narrow the query: the
+// date filters run in the client after the preflight check and after the
+// fetch, so they cannot make an oversized mailbox listable.
 func listTooLargeError(mbx string, messages uint32, budget int) error {
 	return fmt.Errorf("%w: mailbox %q holds %d messages, more than the list scan budget of %d; "+
-		"narrow the query with since/before or raise limits.max_list_scan_messages",
-		mailbox.ErrListTooLarge, mbx, messages, budget)
+		"raise limits.max_list_scan_messages (maximum %d) to list it",
+		mailbox.ErrListTooLarge, mbx, messages, budget, config.MaxListScanMessagesLimit)
+}
+
+// listScanBudgetExceededError reports that the server delivered more
+// messages than the list scan budget allows.
+//
+// This is the observed overrun: the count is what this process actually
+// received, not the count the server claimed in the EXAMINE response. A
+// server that under-reports its mailbox size is caught here rather than
+// being believed.
+//
+// The recourse is to raise the limit. It is not to narrow the query: the
+// date filters run in the client after the fetch and do not reduce the
+// number of messages the server sends.
+func listScanBudgetExceededError(mbx string, budget int) error {
+	return fmt.Errorf("%w: the server delivered more than %d messages while listing mailbox %q, "+
+		"which is the list scan budget; raise limits.max_list_scan_messages (maximum %d) to list it",
+		mailbox.ErrListTooLarge, budget, mbx, config.MaxListScanMessagesLimit)
 }
 
 // setSelected records the mailbox we have just EXAMINEd and its

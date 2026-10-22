@@ -371,12 +371,17 @@ a descending UID tie-break. IMAP UIDs ascend but are unrelated to internal
 dates, so an exact page can only be produced by examining every message in
 the mailbox. The per-account `max_list_scan_messages` limit (default
 10 000, hard maximum 1 000 000) bounds how many messages one call may
-examine. A mailbox with more messages than the limit is refused with the
-`RateLimited` error code and a message naming the message count, the
-budget and the recourse; no partial or approximate page is ever returned.
-The `since` / `before` filters are applied by the client after the
-fetch, so they narrow the result but not the work: a filtered query over
-an oversized mailbox is still refused.
+examine. The bound is enforced twice: the mailbox size the server reports
+in the EXAMINE response is checked before any FETCH is sent, and the
+messages the server actually delivers are counted during the fetch, so a
+server that under-reports its size is caught while the listing runs. A
+mailbox over the limit is refused with the `RateLimited` error code and a
+message naming the budget and the recourse; no partial or approximate page
+is ever returned. The `since` / `before` filters are applied by the client
+after the fetch, so they narrow the result but not the work: a filtered
+query over an oversized mailbox is still refused. They are therefore not
+offered as a recourse — the recourse is to raise
+`max_list_scan_messages`, subject to its hard maximum.
 
 **Output.**
 

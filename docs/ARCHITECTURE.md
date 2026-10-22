@@ -166,23 +166,56 @@ IMAP4rev1 backend. It uses a narrow fork of
   - *Server and network work.* The per-account
     `max_list_scan_messages` limit (default 10 000, hard maximum
     1 000 000) bounds how many messages one call may examine. The
-    server reports the mailbox size in the EXAMINE response, which
-    RFC 3501 requires, so an oversized mailbox is refused with an
-    explicit typed error *before* any FETCH is sent.
+    bound is enforced twice:
+
+    1. *Before the fetch.* The server reports the mailbox size in
+       the EXAMINE response, which RFC 3501 requires, so an
+       oversized mailbox is refused with an explicit typed error
+       *before* any FETCH is sent.
+    2. *During the fetch.* The client counts every message the
+       FETCH handler delivers, independently of the date filters
+       and of the selector's retention. When the server delivers
+       message *budget + 1*, the client records the overrun and
+       aborts the transfer by closing the underlying TCP socket.
+       It issues no further IMAP command, so the abort cannot race
+       the command writer; it keeps draining the response channel,
+       because the go-imap response handler blocks on the channel
+       send and a blocked handler stops the reader; and it awaits
+       the completion of the in-flight FETCH before returning.
 
   A refused mailbox produces an error, never a partial or
   approximate page. The `since` / `before` filters are applied
   client-side after the fetch, so they narrow the result but not
-  the work.
+  the work. They cannot make an oversized mailbox listable, and
+  the refusal therefore does not suggest them: the recourse is to
+  raise `limits.max_list_scan_messages`, subject to its hard
+  maximum. When the refusal was triggered by the observed
+  deliveries rather than by the reported size, the message reports
+  the observation, not the server's count.
 
-  The work bound rests on the count the server reports. A server
-  that under-reports its mailbox size can still make the client
-  read more than the limit; the working set stays bounded in that
-  case, because the selector does not depend on the count. The
-  in-flight FETCH is always completed before the connection is
+  The second check is what makes the bound real, because it does not
+  depend on the server's own count: a server that under-reports its
+  mailbox size is caught while the listing runs, and the listing is
+  refused rather than continued.
+
+  The precise guarantee is that the limit bounds the messages
+  delivered by the FETCH handler and processed at the application
+  level; detection necessarily observes message *budget + 1*. It is
+  *not* a strict bound on all protocol work. In particular it does
+  not bound the raw responses the server sends, the responses the
+  fork discards internally (a FETCH response without a UID is
+  dropped by the response handler and is never counted), the total
+  bytes transferred or buffered, the allocation for a single
+  oversized envelope, or the wall-clock duration of the call. Those
+  residuals are tracked in `docs/THREAT_MODEL.md` §3.1. Explicit
+  IMAP command timeouts are a separate control and remain
+  independent of this budget.
+
+  The in-flight FETCH is always completed before the connection is
   closed, because the go-imap client does not serialise writes to
   the connection and closing it while a command is in flight is a
-  data race.
+  data race. The aborted client is discarded together with its
+  socket, so the next operation dials a fresh connection.
 - Single shared connection per account under a mutex.
 - Automatic reconnect on connection drop or server error; a
   reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating

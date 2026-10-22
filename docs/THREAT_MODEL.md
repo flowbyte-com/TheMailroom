@@ -241,7 +241,7 @@ double-resolution approach described here.
 - **(planned)** `delete` is hard-disabled unless explicitly enabled; `archive` is a logical move, not a delete.
 - **(planned)** Trash / Deleted Messages handling honours provider folder names (`Trash`, `INBOX.Trash`, `[Gmail]/Trash`).
 - **(implemented)** No read operation mutates: `read_message` and `read_attachment` use `UID FETCH BODY.PEEK[]` (does not set `\Seen`); `list_messages`, `search_messages`, `list_mailboxes` are pure queries. The IMAP backend issues `EXAMINE` (read-only `SELECT`) so the server-side state cannot accept `STORE` or `APPEND` through a read connection.
-- **(implemented, Phase 3 PR 3)** `list_messages` is bounded in both the memory it uses and the work it causes. Results are ordered by internal date, which is unrelated to UID order, so an exact page requires examining every message; the per-account `max_list_scan_messages` limit (default 10 000, hard maximum 1 000 000) bounds how many messages one call may examine. The server reports the mailbox size in the EXAMINE response, so an oversized mailbox is refused with an explicit typed error before any FETCH is sent. The summaries are collected in a bounded top-K selector that retains at most `min(offset + limit, max_list_scan_messages)` of them, so the working set does not grow with the mailbox size. An over-budget mailbox yields an error, never a partial or approximate page.
+- **(implemented, Phase 3 PR 3)** `list_messages` is bounded in both the memory it uses and the work it causes. Results are ordered by internal date, which is unrelated to UID order, so an exact page requires examining every message; the per-account `max_list_scan_messages` limit (default 10 000, hard maximum 1 000 000) bounds how many messages one call may examine. The bound is enforced twice. First, the server-reported mailbox size is checked in the EXAMINE response, so an oversized mailbox is refused with an explicit typed error before any FETCH is sent. Second, the messages the FETCH handler actually delivers are counted during the fetch, independently of the date filters and of the selector's retention; on delivery of message *budget + 1* the client records the overrun and aborts the transfer by closing the underlying TCP socket, without issuing another IMAP command, and then drains the response channel and awaits the completion of the in-flight FETCH before returning the typed error. The second check does not depend on the server's own count, so a server that under-reports its mailbox size is caught while the listing runs. The summaries are collected in a bounded top-K selector that retains at most `min(offset + limit, max_list_scan_messages)` of them, so the working set does not grow with the mailbox size. An over-budget mailbox yields an error, never a partial or approximate page.
 
 ### T8. SMTP duplicate sends and ambiguous outcomes
 
@@ -337,14 +337,34 @@ These are recorded, not silently accepted as production-grade behaviour:
   returns every mailbox the server reports. Both are separately tracked
   hardening items; they are not covered by the list scan budget, and the
   budget does not apply to them.
-- **List work bound rests on the server-reported mailbox size.**
-  `list_messages` refuses a mailbox whose size, as reported in the
-  EXAMINE response, exceeds `max_list_scan_messages`, and it does so
-  before sending any FETCH. A server that under-reports its size can
-  therefore still make the client read more than the limit; the client's
-  retained working set stays bounded, but the bytes read are not. The
-  per-command IMAP timeout, which is a separate Phase 3 item, is what
-  bounds such a read.
+- **The list scan budget is an application-level delivery bound, not a
+  protocol-level resource bound.** `max_list_scan_messages` bounds the
+  messages the FETCH handler delivers to the application and that the
+  application processes. Detection necessarily observes message
+  *budget + 1*, so the bound is inclusive of the budget and exclusive
+  of the next delivery. It is explicitly **not** a bound on:
+
+  - the raw responses the server sends, including responses the client
+    never parses;
+  - the responses the go-imap fork discards internally — a FETCH
+    response without a UID is dropped by the response handler and is
+    never counted, so a server can make the client discard an unbounded
+    number of such responses within the budget;
+  - the total bytes transferred or buffered, and the buffer growth of
+    the connection;
+  - the allocation for a single oversized envelope (the literal-size cap
+    of T4 bounds that one, but it is a per-envelope bound, not a
+    per-listing one);
+  - the wall-clock duration of the call.
+
+  The abort that stops the transfer is a socket close, so it stops the
+  *delivery*; it does not bound what the server had already produced
+  or what the decoder had already allocated. Establishing a strict
+  protocol-work bound needs a decoder-level or byte-level budget (for
+  example a cap on the bytes the FETCH response may consume, enforced
+  by the fork's reader), which is separate work and is not part of the
+  current fork. Explicit IMAP command timeouts remain a separate
+  control and are independent of this budget.
 - **Credential-command trustworthiness.** Bounding the IMAP and SMTP
   credential-command output bounds TheMailroom's memory use and keeps the
   command's output out of errors and logs. It does not make the command
