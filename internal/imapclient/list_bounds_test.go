@@ -99,6 +99,16 @@ type listFixtureServer struct {
 	// oversized atom.
 	rawSearchResponse string
 
+	// fetchLiteralBody, when set, makes the UID FETCH response carry a
+	// BODY[] literal with exactly these bytes. The client therefore
+	// receives a literal of exactly that size on the wire.
+	fetchLiteralBody []byte
+
+	// fetchLiteralAnnounce, when non-zero, makes the UID FETCH response
+	// announce a BODY[] literal of that size and never send the body.
+	// The client must refuse the announcement before it allocates.
+	fetchLiteralAnnounce int
+
 	// badCharsetOnce makes the server answer the first UID SEARCH with
 	// NO [BADCHARSET], so the client retries the search with the
 	// US-ASCII charset.
@@ -603,6 +613,24 @@ func (s *listFixtureServer) serveFetch(fc *listFixtureConn, tag string) bool {
 		imap.FetchRFC822Size,
 		imap.FetchFlags,
 		imap.FetchUid,
+	}
+	if s.fetchLiteralAnnounce > 0 {
+		// Announce an over-cap literal and never send the body: the
+		// client must refuse the announcement before it allocates a
+		// buffer for it.
+		fc.writeLine("* 1 FETCH (UID 1 BODY[] {%d}\r\n", s.fetchLiteralAnnounce)
+		return true
+	}
+	if s.fetchLiteralBody != nil {
+		// A literal of exactly the given size, on the wire.
+		if err := fc.writeLine("* 1 FETCH (UID 1 BODY[] {%d}\r\n%s)\r\n",
+			len(s.fetchLiteralBody), string(s.fetchLiteralBody)); err != nil {
+			return true
+		}
+		if err := fc.writeLine("%s OK FETCH completed\r\n", tag); err != nil {
+			return true
+		}
+		return false
 	}
 	limit := s.serveLimit
 	messages, _ := s.snapshot()

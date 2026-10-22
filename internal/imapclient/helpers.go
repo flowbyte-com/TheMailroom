@@ -253,6 +253,33 @@ func convertAttachment(a mimeparse.Attachment, index int) mailbox.Attachment {
 	}
 }
 
+// isParseError reports whether the error, or any error it wraps, is a
+// parse error produced by the IMAP reader.
+//
+// The fork's imap.IsParseError inspects the error itself: it does not
+// unwrap. The executor wraps a reader error in its typed
+// connection-closed error, so a parse error that failed inside
+// ReadResp reaches the application one level down. Walking the chain
+// finds it.
+//
+// The walk cannot mistake a transport failure for a parse error: the
+// executor only records a cause when the reader reported a parse
+// error, so a plain EOF, a timeout or a reset arrives without a cause
+// and is left alone.
+func isParseError(err error) bool {
+	for err != nil {
+		if imap.IsParseError(err) {
+			return true
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}
+
 // mapErr converts a low-level go-imap error into one of the
 // package-level typed errors. Any unrecognised error is returned
 // verbatim so callers can format it; the server is the source of
@@ -293,11 +320,20 @@ func mapErr(err error) error {
 	// checked before the parse-error branch below, because the
 	// executor wraps a reader error in the connection-closed error.
 	//
+	// The wording is deliberately neutral. The violation can be any of
+	// the decoder's limits - the number of fields, the size of an atom
+	// or of a quoted string, the total number of bytes, or the nesting
+	// depth of the response's lists - so neither narrowing the query
+	// nor raising the scan budget necessarily resolves it, and the
+	// message does not claim that it does.
+	//
 	// The message is fixed text: it never carries content from the
 	// server's response.
 	if errors.Is(err, imap.ErrResponseTooLarge) {
-		return fmt.Errorf("%w: the server sent an IMAP response that exceeded the decoder's resource limits, "+
-			"so the connection was closed. Narrow the query or raise limits.max_list_scan_messages",
+		return fmt.Errorf("%w: the server sent an IMAP response that exceeded the IMAP client's per-response limits "+
+			"(the number of fields, the size of an atom or of a quoted string, the total size of the response, "+
+			"or the nesting depth of its lists). The response was refused before it was processed, "+
+			"so the connection was closed",
 			mailbox.ErrResponseTooLarge)
 	}
 	// The IMAP literal-size evidence is concrete and typed.
@@ -315,7 +351,7 @@ func mapErr(err error) error {
 		return mailbox.ErrMessageTooLarge
 	}
 	msg := err.Error()
-	if imap.IsParseError(err) {
+	if isParseError(err) {
 		return mailbox.ErrMalformed
 	}
 	switch {
