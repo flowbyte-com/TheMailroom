@@ -305,9 +305,14 @@ cannot deliver bytes past another. A connection that received exactly
 the permitted amount is not treated as having received more, and the
 connection stays unusable after a genuine violation. The refusal is
 reported with the `RateLimited` error code and with a recourse that
-matches the operation: a search can be narrowed, a mailbox enumeration
-has no narrower form, and a raw message fetch is bounded by the message
-size. Mailbox enumeration now has an aggregate protocol-byte limit of
+matches the operation: a search can be narrowed, because the server
+evaluates the criteria, while a summary listing cannot, because its
+date filters run in the client after the fetch and do not reduce the
+server's work; a mailbox enumeration has no narrower form, and a raw
+message fetch is bounded by the message size. A violation detected
+between operations is reported as an idle-connection violation; one
+detected during a small active operation is not. Mailbox enumeration
+now has an aggregate protocol-byte limit of
 its own (4 MiB), where it had none; the final mailbox-count policy is
 deferred to the enumeration hardening work. Neither limit bounds the
 work the server does to evaluate a search, nor how long an operation

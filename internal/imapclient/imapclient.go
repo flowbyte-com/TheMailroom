@@ -376,7 +376,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	// server does to evaluate the search criteria.
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
-	err := b.withClient(ctx, opSummary, func(c *client.Client) error {
+	err := b.withClient(ctx, opList, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true) // true => EXAMINE (read-only)
 		if err != nil {
 			return err
@@ -775,7 +775,7 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	// client cannot observe or limit it.
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
-	err := b.withClient(ctx, opSummary, func(c *client.Client) error {
+	err := b.withClient(ctx, opSearch, func(c *client.Client) error {
 		mboxStatus, err := c.Select(mbx, true)
 		if err != nil {
 			return err

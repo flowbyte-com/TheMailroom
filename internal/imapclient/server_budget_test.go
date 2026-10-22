@@ -949,7 +949,8 @@ func TestServerDataBudgetArmsTheAllowancePerOperation(t *testing.T) {
 		want int64
 	}{
 		{name: "plain", kind: opPlain, want: plainDataAllowance},
-		{name: "summary", kind: opSummary, want: summaryDataAllowanceFor(100)},
+		{name: "search", kind: opSearch, want: summaryDataAllowanceFor(100)},
+		{name: "list", kind: opList, want: summaryDataAllowanceFor(100)},
 		{name: "message", kind: opMessage, want: messageDataAllowanceFor(1 << 20)},
 		{name: "mailbox list", kind: opMailboxList, want: mailboxListDataAllowance},
 	}
@@ -1072,19 +1073,195 @@ func TestServerDataBudgetLeavesNoBlockedGoroutines(t *testing.T) {
 	assertNoBlockedFetchGoroutine(t)
 }
 
+// TestServerDataBudgetSearchRefusalCarriesSearchGuidance checks the
+// refusal of an aggregate violation during a search.
+//
+// The server evaluates the criteria, so a narrower query matches fewer
+// messages and the fetch is smaller: the guidance says so.
+func TestServerDataBudgetSearchRefusalCarriesSearchGuidance(t *testing.T) {
+	const budget = 10
+	srv := &listFixtureServer{
+		messages:          budgetMessages(1),
+		searchUIDs:        []uint32{1},
+		floodAfterExamine: idleFloodResponses,
+	}
+	addr, cleanup := srv.start(t)
+	defer cleanup()
+
+	be := listFixtureBackend(t, addr, budget)
+	defer be.Close()
+
+	_, err := be.SearchMessages(t.Context(), "test", "INBOX", mailbox.SearchQuery{})
+	if err == nil {
+		t.Fatal("expected the flood to be refused")
+	}
+	if !errors.Is(err, mailbox.ErrServerDataBudgetExceeded) {
+		t.Errorf("err = %v, want errors.Is(err, mailbox.ErrServerDataBudgetExceeded)", err)
+	}
+	if !strings.Contains(err.Error(), "narrow") {
+		t.Errorf("err = %q, want it to carry the search recourse", err)
+	}
+	if strings.Contains(err.Error(), "idle") {
+		t.Errorf("err = %q, want it not to blame the idle allowance for an active search", err)
+	}
+}
+
+// TestServerDataBudgetListingRefusalDoesNotRecommendNarrowing checks
+// the refusal of an aggregate violation during a listing.
+//
+// The date filters run in the client after the fetch, so narrowing them
+// cannot reduce the work the server does: the refusal must not offer
+// that remedy.
+func TestServerDataBudgetListingRefusalDoesNotRecommendNarrowing(t *testing.T) {
+	const budget = 10
+	srv := &listFixtureServer{
+		messages:          budgetMessages(1),
+		searchUIDs:        []uint32{1},
+		floodAfterExamine: idleFloodResponses,
+	}
+	addr, cleanup := srv.start(t)
+	defer cleanup()
+
+	be := listFixtureBackend(t, addr, budget)
+	defer be.Close()
+
+	res, err := be.ListMessages(t.Context(), "test", "INBOX", mailbox.ListOptions{Limit: 10})
+	if err == nil {
+		t.Fatal("expected the flood to be refused")
+	}
+	if !errors.Is(err, mailbox.ErrServerDataBudgetExceeded) {
+		t.Errorf("err = %v, want errors.Is(err, mailbox.ErrServerDataBudgetExceeded)", err)
+	}
+	if strings.Contains(err.Error(), "narrow") {
+		t.Errorf("err = %q, want it not to recommend narrowing the request: the date filters run after the fetch", err)
+	}
+	if !strings.Contains(err.Error(), "listing") {
+		t.Errorf("err = %q, want it to describe the listing's aggregate-data refusal", err)
+	}
+	if len(res.Messages) != 0 {
+		t.Errorf("got %d messages, want 0: a refused listing must not return a partial page", len(res.Messages))
+	}
+}
+
+// TestServerDataBudgetActivePlainRefusalDoesNotClaimAnIdleViolation
+// checks the refusal of an aggregate violation during an active small
+// operation.
+//
+// The violation happened while the operation was running, so the
+// refusal must not blame the idle allowance.
+func TestServerDataBudgetActivePlainRefusalDoesNotClaimAnIdleViolation(t *testing.T) {
+	srv := &listFixtureServer{
+		messages:           budgetMessages(1),
+		floodBeforeExamine: idleFloodResponses,
+	}
+	addr, cleanup := srv.start(t)
+	defer cleanup()
+
+	be := listFixtureBackend(t, addr, 100)
+	defer be.Close()
+
+	_, err := be.MailboxUIDValidity(t.Context(), "test", "INBOX")
+	if err == nil {
+		t.Fatal("expected the flood to be refused")
+	}
+	if !errors.Is(err, mailbox.ErrServerDataBudgetExceeded) {
+		t.Errorf("err = %v, want errors.Is(err, mailbox.ErrServerDataBudgetExceeded)", err)
+	}
+	if strings.Contains(err.Error(), "idle") {
+		t.Errorf("err = %q, want it not to claim an idle violation for an active operation", err)
+	}
+	if !strings.Contains(err.Error(), "small response") {
+		t.Errorf("err = %q, want it to describe the active operation's aggregate-data refusal", err)
+	}
+}
+
+// TestServerDataBudgetIdleRefusalKeepsItsIdleClassification checks
+// that a genuine idle violation keeps its own classification.
+//
+// The idle wording and the active-operation wording are different
+// conditions, and a caller that sees the idle one knows the server
+// sent unsolicited data while nothing was running.
+func TestServerDataBudgetIdleRefusalKeepsItsIdleClassification(t *testing.T) {
+	const budget = 100
+	srv := &listFixtureServer{
+		messages:   budgetMessages(1),
+		searchUIDs: []uint32{1},
+	}
+	addr, cleanup := srv.start(t)
+	defer cleanup()
+
+	be := listFixtureBackend(t, addr, budget)
+	defer be.Close()
+
+	if _, err := be.SearchMessages(t.Context(), "test", "INBOX", mailbox.SearchQuery{}); err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+
+	be.mu.Lock()
+	conn := be.client
+	be.mu.Unlock()
+	if conn == nil {
+		t.Fatal("the backend holds no client after a successful operation")
+	}
+
+	// The server floods the idle connection: unsolicited data, with no
+	// command to provoke it.
+	srv.idleFloodNow(idleFloodResponses)
+
+	select {
+	case <-conn.LoggedOut():
+	case <-time.After(30 * time.Second):
+		t.Fatal("the idle flood did not invalidate the connection")
+	}
+
+	_, err := be.Mailboxes(t.Context(), "test")
+	if err == nil {
+		t.Fatal("the operation after the idle flood returned no error")
+	}
+	if !errors.Is(err, mailbox.ErrServerDataBudgetExceeded) {
+		t.Errorf("err = %v, want errors.Is(err, mailbox.ErrServerDataBudgetExceeded)", err)
+	}
+	if !strings.Contains(err.Error(), "idle") {
+		t.Errorf("err = %q, want it to keep the idle classification", err)
+	}
+	if strings.Contains(err.Error(), "small response") {
+		t.Errorf("err = %q, want it not to use the active-operation wording", err)
+	}
+}
+
 // TestServerDataBudgetErrorMessagesAreOperationAppropriate checks the
 // wording of the refusal.
 //
 // The recourse must be meaningful for the operation that was refused:
-// there is no narrower query for a mailbox enumeration, and the search
+// there is no narrower query for a mailbox enumeration, the date
+// filters of a listing cannot reduce the server's work, and the search
 // scan budget has nothing to do with a message fetch.
 func TestServerDataBudgetErrorMessagesAreOperationAppropriate(t *testing.T) {
-	summary := serverDataBudgetError(opSummary)
-	if !errors.Is(summary, mailbox.ErrServerDataBudgetExceeded) {
-		t.Errorf("the summary refusal %v does not carry the sentinel", summary)
+	search := serverDataBudgetError(opSearch)
+	if !errors.Is(search, mailbox.ErrServerDataBudgetExceeded) {
+		t.Errorf("the search refusal %v does not carry the sentinel", search)
 	}
-	if !strings.Contains(summary.Error(), "narrow") {
-		t.Errorf("the summary refusal %q does not carry the recourse", summary)
+	if !strings.Contains(search.Error(), "narrow") {
+		t.Errorf("the search refusal %q does not carry the recourse", search)
+	}
+
+	listing := serverDataBudgetError(opList)
+	if !errors.Is(listing, mailbox.ErrServerDataBudgetExceeded) {
+		t.Errorf("the listing refusal %v does not carry the sentinel", listing)
+	}
+	if !strings.Contains(listing.Error(), "listing") {
+		t.Errorf("the listing refusal %q does not name the listing", listing)
+	}
+	if strings.Contains(listing.Error(), "narrow") {
+		t.Errorf("the listing refusal %q suggests narrowing a query, which does not reduce the work", listing)
+	}
+
+	plain := serverDataBudgetError(opPlain)
+	if !errors.Is(plain, mailbox.ErrServerDataBudgetExceeded) {
+		t.Errorf("the plain refusal %v does not carry the sentinel", plain)
+	}
+	if strings.Contains(plain.Error(), "idle") {
+		t.Errorf("the plain refusal %q blames the idle allowance for an active operation", plain)
 	}
 
 	enumeration := serverDataBudgetError(opMailboxList)
@@ -1121,9 +1298,11 @@ func TestServerDataBudgetErrorMessagesAreOperationAppropriate(t *testing.T) {
 	}
 
 	// The refusals carry no content from the server's response.
-	for _, err := range []error{summary, enumeration, message, idle} {
-		if strings.Contains(err.Error(), "EXISTS") || strings.Contains(err.Error(), "LIST") {
-			t.Errorf("the refusal %q carries content from the server's response", err)
+	for _, err := range []error{search, listing, plain, enumeration, message, idle} {
+		for _, marker := range []string{"EXISTS", "FETCH", "LIST (", "OK ", "UID ", "BODY[]"} {
+			if strings.Contains(err.Error(), marker) {
+				t.Errorf("the refusal %q carries content from the server's response (%q)", err, marker)
+			}
 		}
 	}
 }

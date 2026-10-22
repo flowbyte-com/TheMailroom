@@ -241,10 +241,12 @@ var (
 	// its socket and its budget were discarded together.
 	//
 	// The message that wraps it names the recourse that fits the
-	// operation: a listing or a search can be narrowed, a mailbox
-	// enumeration has no narrower form, a raw message fetch is bounded
-	// by the message size, and an idle flood is bounded by the idle
-	// allowance.
+	// operation: a search can be narrowed, because the server evaluates
+	// the criteria; a summary listing cannot, because its date filters
+	// run in the client after the fetch; a mailbox enumeration has no
+	// narrower form; a raw message fetch is bounded by the message
+	// size; and a violation detected between operations is an idle
+	// violation.
 	ErrServerDataBudgetExceeded = errors.New("mailbox: server sent more protocol data than the operation allows")
 	ErrMessageTooLarge          = errors.New("mailbox: message too large")
 	ErrNestingTooDeep           = errors.New("mailbox: mime nesting too deep")

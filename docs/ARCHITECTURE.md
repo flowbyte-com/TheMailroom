@@ -376,13 +376,20 @@ IMAP4rev1 backend. It uses a narrow fork of
   condition distinct from the scan-budget refusal, from a decoder
   violation, from a malformed response and from a message-size
   violation. The wording is operation-appropriate, because the recourse
-  differs: a summary listing or a search can be narrowed, a mailbox
-  enumeration has no narrower form, a raw message fetch is bounded by
-  the message size and not by the search scan budget, and an idle flood
-  is bounded by the idle allowance. The message never carries content
-  from the server's response. The connection is closed, because the
-  response stream can no longer be trusted, and the client, its socket
-  and its budget are discarded together.
+  differs: a **search** can be narrowed, because the server evaluates
+  the criteria and a narrower query matches fewer messages; a
+  **summary listing** cannot, because its date filters are applied in
+  the client after the fetch and do not reduce the work the server
+  does, so its refusal only describes what happened; a mailbox
+  enumeration has no narrower form; a raw message fetch is bounded by
+  the message size and not by the search scan budget; and an **active**
+  small operation is described as such, while a violation detected
+  between operations is described as an idle-connection violation,
+  because the idle allowance was the one in force when the server sent
+  the data. The message never carries content from the server's
+  response. The connection is closed, because the response stream can
+  no longer be trusted, and the client, its socket and its budget are
+  discarded together.
 
   **Mailbox enumeration.** The enumeration has its own, much larger
   allowance. The small plain-operation allowance would refuse a

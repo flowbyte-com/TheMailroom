@@ -126,6 +126,13 @@ type listFixtureServer struct {
 	// against a live session rather than against the login.
 	floodAfterExamine int
 
+	// floodBeforeExamine makes the server send that many unsolicited
+	// EXISTS responses before it answers an EXAMINE command. The
+	// connection is established by then, and the command that is
+	// running when the flood lands fails, so the violation is
+	// deterministically part of that operation.
+	floodBeforeExamine int
+
 	// listMailboxes makes the server answer a LIST command with that
 	// many mailbox responses. The responses are generated and written
 	// one at a time, so a large list never has to be held in memory.
@@ -477,6 +484,12 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 				return
 			}
 		case strings.Contains(upper, "EXAMINE") || strings.Contains(upper, "SELECT"):
+			if flood := s.examineFloodBefore(); flood > 0 {
+				// The flood lands while the command is running, so the
+				// command fails and the violation is part of the
+				// operation.
+				fc.writeFlood(flood)
+			}
 			msgs, exists := s.snapshot()
 			if exists == 0 {
 				exists = len(msgs)
@@ -699,6 +712,14 @@ func (s *listFixtureServer) setExamineFlood(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.floodAfterExamine = n
+}
+
+// examineFloodBefore returns the number of unsolicited responses the
+// server sends before an EXAMINE command is answered.
+func (s *listFixtureServer) examineFloodBefore() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.floodBeforeExamine
 }
 
 // setSearchUIDs replaces the UID list the server answers a UID SEARCH

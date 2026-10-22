@@ -129,11 +129,13 @@ func mapError(err error) *TypedError {
 		return typed(codeLimitExceeded, err.Error(), nil)
 	case errors.Is(err, mailbox.ErrServerDataBudgetExceeded):
 		// The message carries the recourse, and the recourse is
-		// operation-appropriate: a listing or a search can be
-		// narrowed, a mailbox enumeration has no narrower form, a raw
-		// message fetch is bounded by the message size, and an idle
-		// flood is bounded by the idle allowance. The caller must
-		// not retry unchanged.
+		// operation-appropriate: a search can be narrowed, because the
+		// server evaluates the criteria; a summary listing cannot,
+		// because its date filters run in the client after the fetch; a
+		// mailbox enumeration has no narrower form; a raw message fetch
+		// is bounded by the message size; and a violation detected
+		// between operations is an idle violation. The caller must not
+		// retry unchanged.
 		return typed(codeLimitExceeded, err.Error(), nil)
 	case errors.Is(err, mailbox.ErrResponseTooLarge):
 		// The message carries the recourse, so the caller can narrow

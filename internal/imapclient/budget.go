@@ -260,18 +260,30 @@ func (b *serverDataBudget) probe(p []byte) (int, error) {
 // opKind selects the inbound data allowance and the wording of a
 // refusal.
 //
-// The operations have materially different requirements: a summary
-// fetch transfers one summary per scanned message, a raw message fetch
-// transfers one message body, a mailbox enumeration transfers one
-// response per mailbox, and the rest transfer a small response.
+// The operations have materially different requirements: a search
+// transfers one summary per matching message, a listing transfers one
+// summary per scanned message, a raw message fetch transfers one
+// message body, a mailbox enumeration transfers one response per
+// mailbox, and the rest transfer a small response.
+//
+// A search and a listing draw the same allowance - they produce the
+// same summaries - but their remedies differ, so they are distinct
+// kinds: narrowing the server-side search criteria can reduce what a
+// search fetches, while the date filters of a listing are applied
+// after the fetch and cannot reduce the work the server does.
 type opKind int
 
 const (
-	// opPlain is an operation that expects only a small response.
+	// opPlain is an active operation that expects only a small
+	// response.
 	opPlain opKind = iota
-	// opSummary is an operation that fetches one summary per scanned
-	// message: a listing or a search.
-	opSummary
+	// opSearch is a search: the server evaluates the criteria, so a
+	// narrower query matches fewer messages.
+	opSearch
+	// opList is a summary listing: the date filters run in the client
+	// after the fetch, so they cannot make an oversized mailbox
+	// listable.
+	opList
 	// opMessage is an operation that fetches one raw message.
 	opMessage
 	// opMailboxList is a mailbox enumeration.
@@ -286,7 +298,7 @@ const (
 // public option is needed.
 func (b *Backend) dataAllowance(kind opKind) int64 {
 	switch kind {
-	case opSummary:
+	case opSearch, opList:
 		return summaryDataAllowanceFor(b.scanBudget())
 	case opMessage:
 		return messageDataAllowanceFor(b.limits.MaxMessageBytes)
@@ -301,14 +313,29 @@ func (b *Backend) dataAllowance(kind opKind) int64 {
 // recourse.
 //
 // The wording never suggests an action that would not help: there is no
-// narrower query for a mailbox enumeration, and the search scan budget
-// has nothing to do with a message fetch. It never contains content
-// from the server's response.
+// narrower query for a mailbox enumeration, the date filters of a
+// listing run after the fetch and cannot reduce the server's work, and
+// the search scan budget has nothing to do with a message fetch. It
+// never contains content from the server's response.
+//
+// It describes a violation of an *active* operation's allowance. An
+// idle violation - one detected between operations - is reported by
+// idleServerDataBudgetError, because the allowance that was in force
+// when the server sent the data was the idle one.
 func serverDataBudgetError(kind opKind) error {
 	switch kind {
-	case opSummary:
+	case opSearch:
+		// The server evaluates the criteria, so a narrower query
+		// matches fewer messages and the fetch is smaller.
 		return fmt.Errorf("%w: the server returned more protocol data than this operation permits; "+
 			"reduce the requested workload, for example by narrowing the query", mailbox.ErrServerDataBudgetExceeded)
+	case opList:
+		// The date filters run in the client after the fetch, so they
+		// cannot reduce the work the server does. The refusal is
+		// described, not given a remedy that would not help.
+		return fmt.Errorf("%w: the server returned more protocol data than this listing permits; "+
+			"the date filters are applied after the fetch, so they do not reduce the work the server does",
+			mailbox.ErrServerDataBudgetExceeded)
 	case opMailboxList:
 		return fmt.Errorf("%w: the mailbox enumeration exceeded its server-data allowance",
 			mailbox.ErrServerDataBudgetExceeded)
@@ -316,8 +343,11 @@ func serverDataBudgetError(kind opKind) error {
 		return fmt.Errorf("%w: the message retrieval exceeded the protocol-data allowance",
 			mailbox.ErrServerDataBudgetExceeded)
 	default:
-		return fmt.Errorf("%w: the server exceeded the idle connection allowance",
-			mailbox.ErrServerDataBudgetExceeded)
+		// An active operation that expects only a small response. The
+		// wording must not blame the idle allowance: the violation
+		// happened while the operation was running.
+		return fmt.Errorf("%w: the server returned more protocol data than this operation permits; "+
+			"the operation expects only a small response", mailbox.ErrServerDataBudgetExceeded)
 	}
 }
 
