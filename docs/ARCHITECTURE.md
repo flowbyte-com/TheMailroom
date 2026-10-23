@@ -435,16 +435,18 @@ IMAP4rev1 backend. It uses a narrow fork of
   *does* help here, because the server evaluates the criteria, so
   the refusal message says so.
 - **Finite deadlines and interruptible cancellation.** Every operation
-  has an absolute end-to-end deadline that covers the wait for the
-  account, the connection establishment, the authentication and every
-  command of the operation, and each command has its own ceiling: a
-  control command is bounded by `imap.control_command_timeout`, and a
-  command that transfers a bulk response is bounded by the time its own
-  byte allowance needs at the assumed minimum transfer rate
-  (`imap.transfer_rate`). The absolute deadline always wins: the
-  go-imap client rewrites the socket deadline at the start of every
-  command, so a **deadline-clamping socket wrapper** sits between the
-  client and the aggregate byte budget and answers every request with
+  has an absolute end-to-end deadline that covers the connection
+  establishment, the authentication and every command of the operation,
+  and each command has its own ceiling: a control command is bounded by
+  `imap.control_command_timeout`, and a command that transfers a bulk
+  response is bounded by the time its own byte allowance needs at the
+  assumed minimum transfer rate
+  (`imap.transfer_rate`). The wait for the account is bounded
+  separately, by `imap.operation_allowance`, and the operation deadline
+  starts when the account is acquired. The absolute deadline always
+  wins: the go-imap client rewrites the socket deadline at the start of
+  every command, so a **deadline-clamping socket wrapper** sits between
+  the client and the aggregate byte budget and answers every request with
   the earliest of the requested instant, the absolute operation deadline
   and the armed command ceiling. The wrapper's transitions are
   serialised with the socket deadline itself, and an idle connection

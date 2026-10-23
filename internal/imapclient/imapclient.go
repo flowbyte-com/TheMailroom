@@ -374,6 +374,13 @@ func (b *Backend) Close() error {
 	b.mu.Unlock()
 	if op != nil {
 		op.abort(errBackendClosed)
+		// The watcher is joined, so when Close returns no watcher of
+		// this backend is still running: a late callback cannot reach
+		// the connection or a replacement of it. The join is bounded:
+		// the watcher only closes a socket, which returns promptly, and
+		// it never waits for the operation itself - an operation inside
+		// an unpreemptible MIME parse is not waited for.
+		op.stop()
 	}
 
 	// Drop the session. The client, its socket, its budget and the
@@ -1212,7 +1219,30 @@ func (b *Backend) maxOperationTimeout() time.Duration {
 // It is derived from the account's own limits, so the deadline follows
 // the limits the operator already set instead of a fixed number.
 func (b *Backend) transferAllowance(kind opKind) time.Duration {
-	return time.Duration(b.dataAllowance(kind)/b.transferRate()) * time.Second
+	allowance := b.dataAllowance(kind)
+	rate := b.transferRate()
+	if allowance <= 0 || rate <= 0 {
+		return time.Second
+	}
+	// The division is done with a ceiling, so a positive allowance and
+	// a positive rate always yield a positive duration. An integer
+	// division would round a fast transfer down to zero seconds, which
+	// would expire the command instantly.
+	seconds := allowance / rate
+	remainder := allowance % rate
+	d := time.Duration(seconds) * time.Second
+	if remainder > 0 {
+		// The remainder contributes a fraction of a second, rounded
+		// up. The arithmetic cannot overflow: the remainder is smaller
+		// than the rate, and the rate is bounded by the configuration
+		// range.
+		fraction := (remainder*int64(time.Second) + rate - 1) / rate
+		d += time.Duration(fraction)
+	}
+	if d <= 0 {
+		d = time.Second
+	}
+	return d
 }
 
 // operationDeadline is the absolute deadline of one operation.
@@ -1330,7 +1360,22 @@ func (b *Backend) ensureConnection(opCtx context.Context, op *opRun, kind opKind
 		return nil, idleServerDataBudgetError()
 	}
 	if !needDial {
-		// The session is reused: arm this operation's deadlines on it.
+		// The session is reused. Its socket is published to this
+		// operation's cancellation handle, so a cancellation can
+		// interrupt a blocked command on the reused connection exactly
+		// as it can on a freshly dialled one.
+		//
+		// The publication is refused once the operation is no longer
+		// active, so a cancellation that already won never starts
+		// another command on the connection. The socket reference is
+		// immutable, so the watcher of this operation can only ever
+		// close the connection it is using.
+		b.mu.Lock()
+		raw := b.conn
+		b.mu.Unlock()
+		if !op.publish(raw) {
+			return nil, op.cancelCause(context.Cause(opCtx))
+		}
 		b.armOperation(deadline, op)
 		return c, nil
 	}

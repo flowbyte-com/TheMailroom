@@ -273,14 +273,15 @@ limits instead of a fixed number. `imap.max_operation_timeout` (default
 900 s, range 60 s to 3 600 s) caps the derived end-to-end operation
 deadline.
 
-The operation deadline covers the account's queue wait, the connection
-establishment, the authentication and every command of the operation. An
-operation that cannot acquire the account within
-`imap.operation_allowance` fails with the `ImapTimeout` error code
-instead of waiting behind the operation in progress. A cancelled
-operation is reported with the `Canceled` code. After a successful
-operation the connection carries no deadline, so it can be reused; the
-idle aggregate byte budget remains the idle protection.
+The wait for the account is bounded separately by
+`imap.operation_allowance`: an operation that cannot acquire the account
+within it fails with the `ImapTimeout` error code instead of queueing
+indefinitely behind the operation in progress. The operation deadline
+starts when the account is acquired and covers the connection
+establishment, the authentication and every command of the operation. A
+cancelled operation is reported with the `Canceled` code. After a
+successful operation the connection carries no deadline, so it can be
+reused; the idle aggregate byte budget remains the idle protection.
 
 `list_messages` is ordered by internal date, newest first. IMAP UIDs
 ascend but are unrelated to internal dates, so an exact page can only be

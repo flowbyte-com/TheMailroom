@@ -453,15 +453,21 @@ These are recorded, not silently accepted as production-grade behaviour:
 
   **Command and operation deadlines are implemented and always finite.**
   The IMAP backend bounds every operation in time as well as in bytes.
-  An operation has an absolute end-to-end deadline that covers the wait
-  for the account, the connection establishment, the authentication and
-  every command of the operation, and each command additionally has its
-  own ceiling: a control command (LOGIN, EXAMINE, CAPABILITY, NOOP) is
-  bounded by `imap.control_command_timeout`, and a command that
-  transfers a bulk response is bounded by the time its own byte
-  allowance needs at the assumed minimum transfer rate. The absolute
-  deadline always wins: a later command can never extend it, and a
-  command ceiling never outlives its command.
+  An operation has an absolute end-to-end deadline that covers the
+  connection establishment, the authentication and every command of the
+  operation, and each command additionally has its own ceiling: a
+  control command (LOGIN, EXAMINE, CAPABILITY, NOOP) is bounded by
+  `imap.control_command_timeout`, and a command that transfers a bulk
+  response is bounded by the time its own byte allowance needs at the
+  assumed minimum transfer rate. The absolute deadline always wins: a
+  later command can never extend it, and a command ceiling never
+  outlives its command.
+
+  The wait for the account is bounded separately, by
+  `imap.operation_allowance`: an operation that cannot acquire the
+  account in that time fails with a timeout instead of queueing
+  indefinitely, and the operation deadline starts when the account is
+  acquired.
 
   The deadlines are derived from the account's own limits rather than
   from fixed numbers. The operation deadline is the fixed allowance

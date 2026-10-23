@@ -38,6 +38,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -113,6 +114,11 @@ type opRun struct {
 	finished chan struct{}
 	wg       sync.WaitGroup
 	stopOnce sync.Once
+
+	// watcherDone records that the cancellation watcher has terminated.
+	// It makes the shutdown ordering observable: when it is set, no
+	// callback of this operation can still run.
+	watcherDone atomic.Bool
 }
 
 // newOpRun returns an operation state with no socket published yet.
@@ -162,6 +168,13 @@ func (o *opRun) abort(cause error) {
 	o.mu.Lock()
 	o.state = opAborted
 	o.mu.Unlock()
+}
+
+// currentState returns the operation's state under its lock.
+func (o *opRun) currentState() opState {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.state
 }
 
 // isActive reports whether the operation has not reached a terminal
@@ -225,26 +238,45 @@ func (o *opRun) recordedCause() error {
 func (o *opRun) commit(ctx context.Context, outcome error) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.state != opActive {
-		// A watcher already decided. Its cause is the outcome.
+	switch o.state {
+	case opActive:
+		// The operation has not been interrupted. The supplied outcome
+		// is the final error, chosen by the caller after every security
+		// violation has been inspected.
+		if outcome != nil {
+			o.state = opFailed
+			o.cause = outcome
+			return outcome
+		}
+		if err := context.Cause(ctx); err != nil {
+			o.state = opFailed
+			o.cause = err
+			return err
+		}
+		o.state = opFinished
+		return nil
+	case opAborting, opAborted:
+		// The watcher interrupted the I/O. The interruption explains
+		// why the command stopped, but it does not replace the error
+		// the caller selected after inspecting the security
+		// violations: an aggregate-budget violation and a decoder-limit
+		// failure are the cause that matters, and a concurrent
+		// cancellation must not mask them.
+		if outcome != nil {
+			o.state = opFailed
+			o.cause = outcome
+			return outcome
+		}
+		if o.cause != nil {
+			o.state = opFailed
+			return o.cause
+		}
+		o.state = opFailed
+		return errOperationCanceled
+	default:
+		// The outcome was already committed. It is never rewritten.
 		return o.cause
 	}
-	if o.cause != nil {
-		o.state = opFailed
-		return o.cause
-	}
-	if outcome != nil {
-		o.state = opFailed
-		o.cause = outcome
-		return outcome
-	}
-	if err := context.Cause(ctx); err != nil {
-		o.state = opFailed
-		o.cause = err
-		return err
-	}
-	o.state = opFinished
-	return nil
 }
 
 // start launches the cancellation watcher.
@@ -256,6 +288,7 @@ func (o *opRun) start(ctx context.Context) {
 	o.wg.Add(1)
 	go func() {
 		defer o.wg.Done()
+		defer o.watcherDone.Store(true)
 		select {
 		case <-ctx.Done():
 			o.abort(context.Cause(ctx))
