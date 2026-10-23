@@ -96,6 +96,12 @@ specification and is pinned by `TestBoundedServerToolValidationErrorShape`.
   account's exact `allowed_recipients` policy.
 - `TooManyRecipients` — unique To + Cc + Bcc recipients exceed
   `max_recipients`.
+- `ImapTimeout` — an IMAP operation exceeded its deadline: the
+  end-to-end operation deadline, a per-command ceiling, or the time an
+  operation may wait for the account. The message names the phase.
+- `Canceled` — the caller's context withdrew the request while an IMAP
+  operation was running or waiting to start. A cancelled operation was
+  not slow, it was withdrawn.
 - `SmtpAuthFailed` — SMTP credential resolution failed, the server does
   not advertise AUTH PLAIN, or authentication was rejected.
 - `SmtpTLSFailed` — verified TLS could not be established, including a

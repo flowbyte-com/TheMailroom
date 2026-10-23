@@ -249,9 +249,39 @@ limits:
   max_attachment_bytes: 6291456  # decoded bytes per local attachment
   max_total_attachment_bytes: 26214400
   max_list_scan_messages: 10000 # messages one list or search operation may fetch
+imap:
+  operation_allowance: 30s       # fixed part of an operation's time budget
+  control_command_timeout: 30s   # ceiling of one control command
+  transfer_rate: 65536           # assumed minimum inbound rate, bytes/second
+  max_operation_timeout: 900s    # cap on the derived operation deadline
 attachment_send_paths:
   - /srv/themailroom/outbound    # absolute, existing directory
 ```
+
+The IMAP deadlines are finite and always active; zero means "use the
+default", and a value outside the accepted range is rejected at start-up
+rather than silently clamped. `imap.operation_allowance` (default 30 s,
+accepted range 1 s to 300 s) is the fixed part of an operation's time
+budget and is also the time an operation may wait for the account.
+`imap.control_command_timeout` (default 30 s, range 1 s to 120 s) bounds
+one control command - LOGIN, EXAMINE, CAPABILITY or NOOP.
+`imap.transfer_rate` (default 65 536 bytes per second, range 4 096 to
+16 777 216) is the assumed minimum sustainable inbound transfer rate; it
+is how the time budget of a data-transferring command is derived from
+that command's byte allowance, so the deadline follows the account's own
+limits instead of a fixed number. `imap.max_operation_timeout` (default
+900 s, range 60 s to 3 600 s) caps the derived end-to-end operation
+deadline.
+
+The wait for the account is bounded separately by
+`imap.operation_allowance`: an operation that cannot acquire the account
+within it fails with the `ImapTimeout` error code instead of queueing
+indefinitely behind the operation in progress. The operation deadline
+starts when the account is acquired and covers the connection
+establishment, the authentication and every command of the operation. A
+cancelled operation is reported with the `Canceled` code. After a
+successful operation the connection carries no deadline, so it can be
+reused; the idle aggregate byte budget remains the idle protection.
 
 `list_messages` is ordered by internal date, newest first. IMAP UIDs
 ascend but are unrelated to internal dates, so an exact page can only be

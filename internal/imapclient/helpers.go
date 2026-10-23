@@ -2,8 +2,10 @@ package imapclient
 
 import (
 	"container/heap"
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -280,6 +282,29 @@ func isParseError(err error) bool {
 	return false
 }
 
+// isTimeoutError reports whether err is a transport timeout.
+//
+// A socket deadline expiry is reported by the operating system as a
+// timeout, and it also satisfies errors.Is(err, context.DeadlineExceeded)
+// because both use os.ErrDeadlineExceeded. It must therefore never be
+// inferred from the proximity of a failure to an expected deadline: only
+// an observed timeout is classified as one.
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// isDecoderLimit reports whether err is the fork's decoder-limit
+// failure.
+//
+// The decoder evidence is more specific than a deadline or a transport
+// failure, so it keeps its own classification: a response that broke a
+// per-response limit is not reclassified as a timeout, however close it
+// happened to be to an expected deadline.
+func isDecoderLimit(err error) bool {
+	return errors.Is(err, imap.ErrResponseTooLarge)
+}
+
 // mapErr converts a low-level go-imap error into one of the
 // package-level typed errors. Any unrecognised error is returned
 // verbatim so callers can format it; the server is the source of
@@ -287,6 +312,52 @@ func isParseError(err error) bool {
 func mapErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	// Mapping is idempotent. An error that already carries a public
+	// classification keeps it, so the operation that maps an error at
+	// the backend boundary and the tool layer that maps it again cannot
+	// lose the phase that was already identified. Without this, a
+	// classified timeout would be reclassified on the second pass,
+	// because context.DeadlineExceeded also satisfies the transport
+	// timeout test.
+	if errors.Is(err, mailbox.ErrTimeout) ||
+		errors.Is(err, mailbox.ErrCanceled) ||
+		errors.Is(err, mailbox.ErrBackendClosed) {
+		return err
+	}
+	// The deadline and cancellation causes are classified first, so a
+	// timeout is never reported as a transport failure and a cancelled
+	// operation is never reported as a slow one.
+	//
+	// The messages are fixed text: they name the phase that expired and
+	// never carry content from the server.
+	switch {
+	case errors.Is(err, errQueueTimeout):
+		return fmt.Errorf("%w: %w: the account was busy for longer than the queue allowance",
+			mailbox.ErrTimeout, context.DeadlineExceeded)
+	case errors.Is(err, errOperationTimeout):
+		return fmt.Errorf("%w: %w: the operation deadline was exceeded",
+			mailbox.ErrTimeout, context.DeadlineExceeded)
+	case errors.Is(err, errCommandTimeout):
+		return fmt.Errorf("%w: %w: the command deadline was exceeded",
+			mailbox.ErrTimeout, context.DeadlineExceeded)
+	case errors.Is(err, errBackendClosed):
+		return mailbox.ErrBackendClosed
+	case errors.Is(err, errOperationCanceled):
+		return fmt.Errorf("%w: %w", mailbox.ErrCanceled, context.Canceled)
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%w: %w", mailbox.ErrCanceled, context.Canceled)
+	case err == context.DeadlineExceeded:
+		// The caller's own deadline expired.
+		return fmt.Errorf("%w: %w: the caller's deadline was exceeded",
+			mailbox.ErrTimeout, context.DeadlineExceeded)
+	case isTimeoutError(err):
+		// A socket timeout that no deadline wrapper recorded: the
+		// transport gave up waiting. It is a timeout, not a transport
+		// failure, but the identity of the expired deadline is
+		// unknown here, so the outer bound is reported.
+		return fmt.Errorf("%w: %w: the operation deadline was exceeded",
+			mailbox.ErrTimeout, context.DeadlineExceeded)
 	}
 	// mimeparse errors are wrapped through; unwrap to the typed
 	// public errors so the tool layer can map them.

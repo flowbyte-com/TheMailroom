@@ -434,7 +434,52 @@ IMAP4rev1 backend. It uses a narrow fork of
   partial result. Unlike the listing refusal, narrowing the query
   *does* help here, because the server evaluates the criteria, so
   the refusal message says so.
-- Single shared connection per account under a mutex.
+- **Finite deadlines and interruptible cancellation.** Every operation
+  has an absolute end-to-end deadline that covers the connection
+  establishment, the authentication and every command of the operation,
+  and each command has its own ceiling: a control command is bounded by
+  `imap.control_command_timeout`, and a command that transfers a bulk
+  response is bounded by the time its own byte allowance needs at the
+  assumed minimum transfer rate
+  (`imap.transfer_rate`). The wait for the account is bounded
+  separately, by `imap.operation_allowance`, and the operation deadline
+  starts when the account is acquired. The absolute deadline always
+  wins: the go-imap client rewrites the socket deadline at the start of
+  every command, so a **deadline-clamping socket wrapper** sits between
+  the client and the aggregate byte budget and answers every request with
+  the earliest of the requested instant, the absolute operation deadline
+  and the armed command ceiling. The wrapper's transitions are
+  serialised with the socket deadline itself, and an idle connection
+  carries no deadline at all, so an expired command ceiling cannot
+  terminate a connection that is about to be reused.
+
+  The wrapper also observes a socket timeout before the IMAP client can
+  replace it with a generic connection-closed error, so a per-command
+  timeout and the overall operation deadline stay distinguishable and a
+  genuine EOF stays a transport failure.
+
+- **An interruptible operation gate, separate from the state mutex.**
+  The account's operations are serialised by a semaphore rather than a
+  mutex, so a request that waits for the account honours its caller's
+  cancellation and the queue allowance instead of waiting indefinitely;
+  the queue wait is bounded independently of the operation deadline, and
+  a request that cannot acquire the account in time fails with an
+  actionable busy error. The state mutex is now held only for short,
+  non-blocking critical sections and is never held across a network
+  operation, so a cancellation never waits for it.
+
+- **Cancellation reaches the socket without writing a command.** The
+  backend owns a lifetime context that `Close` cancels, and every
+  operation derives its context from it, so a closure interrupts the
+  dial, the handshake, the authentication and any blocked command. A
+  cancelled or timed-out operation closes the raw socket: that writes
+  nothing to the connection, so it cannot race the command writer the
+  way an interleaved CLOSE or LOGOUT would. The socket is published to
+  the operation's cancellation handle as soon as it exists, and the
+  handle holds an immutable per-operation reference, so a late
+  cancellation can never close a connection another operation adopted.
+
+- Single shared connection per account, serialised by the operation gate.
 - Automatic reconnect on connection drop or server error; a
   reconnect re-EXAMINEs and re-validates UIDVALIDITY. Mutating
   operations are never silently retried.

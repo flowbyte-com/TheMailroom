@@ -11,7 +11,8 @@
 > PR #20 is **MERGED**
 > (`9c235899f8f7cce2ead175552e9f5a6ab1bb9129`): the pinned fork release
 > is `v1.2.1-themailroom.6`, which resolves the two fork-level client
-> defects recorded in §3.2. Phase 3 PR 6 has not begun. Controls marked
+> defects recorded in §3.2. Phase 3 PR 6 adds the finite IMAP command
+> and operation deadlines recorded in T7. Controls marked
 > **(implemented)** are present in the current code; controls marked
 > **(planned)** are not. The controlled Purelymail smoke-test campaign
 > was executed on 2026-10-21 and passed; the authoritative record is
@@ -249,6 +250,22 @@ double-resolution approach described here.
 - **(implemented, Phase 3 PR 3)** `list_messages` is bounded in both the memory it uses and the work it causes. Results are ordered by internal date, which is unrelated to UID order, so an exact page requires examining every message; the per-account `max_list_scan_messages` limit (default 10 000, hard maximum 1 000 000) bounds how many messages one call may examine. The bound is enforced twice. First, the server-reported mailbox size is checked in the EXAMINE response, so an oversized mailbox is refused with an explicit typed error before any FETCH is sent. Second, the messages the FETCH handler actually delivers are counted during the fetch, independently of the date filters and of the selector's retention; on delivery of message *budget + 1* the client records the overrun and aborts the transfer by closing the underlying TCP socket, without issuing another IMAP command, and then drains the response channel and awaits the completion of the in-flight FETCH before returning the typed error. The second check does not depend on the server's own count, so a server that under-reports its mailbox size is caught while the listing runs. The summaries are collected in a bounded top-K selector that retains at most `min(offset + limit, max_list_scan_messages)` of them, so the working set does not grow with the mailbox size. An over-budget mailbox yields an error, never a partial or approximate page.
 - **(implemented, Phase 3 PR 4)** `search_messages` is bounded by the same `max_list_scan_messages` limit, on the client's share of the work. Its criteria are evaluated by the server, so the result set can be arbitrarily large — an empty query matches every message in the mailbox. The application issues the `UID SEARCH` itself with a response handler of its own and counts the UIDs the server returns; when the server returns more than the budget allows, the search is refused with the typed error `mailbox.ErrSearchTooLarge` **before** any FETCH is sent, so the server is never asked for the envelopes of the matches. The UID FETCH response is bounded by a second count: on delivery of message *budget + 1* the client aborts the transfer by closing the underlying socket, drains the response channel and awaits the FETCH completion, exactly as the listing path does. The summaries are collected in the same bounded top-K selector, so the retained set does not grow with the result set. A refused search yields an error, never a partial or approximate result. The search semantics are unchanged: one logical command, the same AND/OR semantics, the same date granularity, the same result limit and the same UIDVALIDITY from the same EXAMINE session. The limit bounds the messages the client fetches and processes; it does not bound the work the server does to evaluate the criteria, which is server-side computation the client cannot observe or limit. A second line of defence bounds the reader itself: the go-imap fork's per-response limits (the number of fields, the size of an atom and of a quoted string, the number of bytes one response may consume, and the nesting depth of its lists) are derived from the account's configuration and enabled by the backend, so a hostile or broken server cannot make the reader materialise an unbounded response. A decoder violation is reported as `mailbox.ErrResponseTooLarge`, which is distinct from the scan-budget refusal `mailbox.ErrSearchTooLarge`.
 
+- **(implemented, Phase 3 PR 6)** Every IMAP operation is bounded in
+  time as well as in bytes. An absolute end-to-end deadline covers the
+  wait for the account, the connection establishment, the authentication
+  and every command of the operation; each command has its own ceiling,
+  subordinate to it. The caller's cancellation reaches the connection:
+  the socket is closed without writing an IMAP command, so a blocked
+  command is interrupted without racing the command writer, and the
+  connection is discarded rather than reused. A cancelled operation and
+  a timed-out operation are reported distinctly, and neither is reported
+  as a transport failure. The account's operations are serialised by an
+  interruptible gate, so a request waits for the account only for a
+  bounded time and then fails with an actionable error instead of
+  queueing indefinitely. After a successful operation the connection
+  carries no deadline, so an expired command ceiling cannot terminate a
+  connection that is about to be reused.
+
 ### T8. SMTP duplicate sends and ambiguous outcomes
 
 **Threat.** Network failure between submission and acknowledgement causes the client to retry, producing duplicate emails.
@@ -434,17 +451,40 @@ These are recorded, not silently accepted as production-grade behaviour:
   duration limit of its own, so a server that trickles bytes slowly can
   hold an operation open for as long as it chooses.
 
-  **Command and operation deadlines are a separate and currently
-  optional control.** The IMAP backend exposes an optional
-  `CommandTimeout` that bounds how long one command may take; zero
-  means the client's default, which is no timeout at all. The
-  production construction path (`internal/accounts/registry.go`) builds
-  the backend without setting it, so no command deadline is in force
-  today, and the only time bound on the IMAP path is the dial timeout.
-  A command and operation deadline policy is deferred to Phase 3 PR 6,
-  which addresses it separately. Until then, a duration bound must not
-  be assumed: a configured timeout is an available control, not an
-  unconditional guarantee.
+  **Command and operation deadlines are implemented and always finite.**
+  The IMAP backend bounds every operation in time as well as in bytes.
+  An operation has an absolute end-to-end deadline that covers the
+  connection establishment, the authentication and every command of the
+  operation, and each command additionally has its own ceiling: a
+  control command (LOGIN, EXAMINE, CAPABILITY, NOOP) is bounded by
+  `imap.control_command_timeout`, and a command that transfers a bulk
+  response is bounded by the time its own byte allowance needs at the
+  assumed minimum transfer rate. The absolute deadline always wins: a
+  later command can never extend it, and a command ceiling never
+  outlives its command.
+
+  The wait for the account is bounded separately, by
+  `imap.operation_allowance`: an operation that cannot acquire the
+  account in that time fails with a timeout instead of queueing
+  indefinitely, and the operation deadline starts when the account is
+  acquired.
+
+  The deadlines are derived from the account's own limits rather than
+  from fixed numbers. The operation deadline is the fixed allowance
+  (`imap.operation_allowance`) plus the time the operation's aggregate
+  byte allowance needs at `imap.transfer_rate`, capped by
+  `imap.max_operation_timeout`. Every setting is finite, zero means
+  "use the default", and a value outside the accepted range is a
+  configuration error rather than a silent clamp.
+
+  A caller that withdraws its context is not the same as a slow server:
+  the cancellation is reported with its own error code, and a deadline
+  expiry is reported as a timeout, never as a transport failure and
+  never inferred from the proximity of a failure to a deadline. The
+  expired deadline is observed at the socket, before the IMAP client
+  can replace it with a generic connection-closed error, so a
+  per-command timeout and the overall operation deadline stay
+  distinguishable.
 
   **Mailbox enumeration is a resource-policy change.** The enumeration
   now has an aggregate protocol-byte allowance of its own (4 MiB),
@@ -506,6 +546,24 @@ These are recorded, not silently accepted as production-grade behaviour:
   wall-clock duration of the call is not bounded by any of these
   budgets; a command deadline is an optional control that is not
   configured by default.
+- **A deadline does not preempt local CPU work.** The byte budget bounds
+  what the client reads; the deadline bounds how long the client waits.
+  Neither bounds local computation: the MIME parser is a third-party
+  library that is not context-aware, so a single pathological message is
+  bounded by the message-size, nesting and part-count caps rather than
+  by a deadline, and the summary assembly is bounded by the scan budget
+  rather than by the clock. A deadline that expires while local
+  processing runs invalidates the result: no partially assembled
+  message, listing or attachment is returned as a success.
+- **The account's operations are serialised, so a slow operation
+  delays the account's other requests.** A default summary operation
+  may hold the account for as long as its derived deadline (about 659
+  seconds with the default limits), and the queue wait of a following
+  request is independently bounded to the queue allowance (30 seconds by
+  default), after which it fails with a busy error rather than waiting
+  indefinitely. The deadline is a resource bound, not a latency
+  promise: a slow but legitimate provider can still trip it, and the
+  operator can raise the limits.
 - **Credential-command trustworthiness.** Bounding the IMAP and SMTP
   credential-command output bounds TheMailroom's memory use and keeps the
   command's output out of errors and logs. It does not make the command
