@@ -577,22 +577,43 @@ func TestReusedSessionCancellationInterruptsTheCommand(t *testing.T) {
 func TestCancellationDuringDialPublishesNothing(t *testing.T) {
 	// A server that accepts the TCP connection and never completes the
 	// TLS handshake: the dial succeeds and the handshake stalls.
+	//
+	// The listener and its handlers are released deterministically: the
+	// accept loop is joined before the handlers are joined, so a handler
+	// can never be added while the wait is running.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
-	var wg sync.WaitGroup
-	t.Cleanup(wg.Wait)
+	var acceptWG, handlerWG sync.WaitGroup
+	var connsMu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		// Stop the accept loop first, so that no handler can be added
+		// while the handlers are joined.
+		_ = ln.Close()
+		acceptWG.Wait()
+		connsMu.Lock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		connsMu.Unlock()
+		handlerWG.Wait()
+	})
+	acceptWG.Add(1)
 	go func() {
+		defer acceptWG.Done()
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			wg.Add(1)
+			connsMu.Lock()
+			conns = append(conns, c)
+			connsMu.Unlock()
+			handlerWG.Add(1)
 			go func() {
-				defer wg.Done()
+				defer handlerWG.Done()
 				// Never speak TLS: the handshake stalls until the
 				// socket is closed.
 				buf := make([]byte, 1)
@@ -623,9 +644,13 @@ func TestCancellationDuringDialPublishesNothing(t *testing.T) {
 	// The connection was never adopted.
 	be.mu.Lock()
 	client := be.client
+	conn := be.conn
 	be.mu.Unlock()
 	if client != nil {
 		t.Error("a client was retained after a cancelled dial")
+	}
+	if conn != nil {
+		t.Error("a socket was retained after a cancelled dial")
 	}
 }
 
@@ -992,8 +1017,16 @@ func TestTransportFailureIsNotATimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
+	// The accept loop is stopped and joined before the test ends, so it
+	// cannot outlive the test.
+	var acceptWG sync.WaitGroup
+	t.Cleanup(func() {
+		_ = ln.Close()
+		acceptWG.Wait()
+	})
+	acceptWG.Add(1)
 	go func() {
+		defer acceptWG.Done()
 		for {
 			c, err := ln.Accept()
 			if err != nil {
