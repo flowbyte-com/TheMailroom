@@ -399,7 +399,7 @@ argument amplification and response sizes remain separate Phase 3
 hardening concerns.
 
 **IMAP client dependency.** TheMailroom depends on
-`github.com/flowbyte-com/go-imap` `v1.2.1-themailroom.4`, a
+`github.com/flowbyte-com/go-imap` `v1.2.1-themailroom.6`, a
 narrow fork of `github.com/emersion/go-imap` v1.2.1 that adds
 protocol-level IMAP literal-size enforcement (the cap is applied
 before the literal buffer is allocated). The fork is pinned by

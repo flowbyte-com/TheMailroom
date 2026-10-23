@@ -6,7 +6,12 @@
 > (PR #11, `ab928c3a33ac5b760ca714c6f915fcbfe4366212`), PR 3 is
 > **MERGED** (PR #12,
 > `d1ecf774809681b2795a01f91182eec15a4b2f3f`), and PR 4 is **MERGED**
-> (PR #13, `a4851e9159af63026e5593f30988c114d7117261`). Controls marked
+> (PR #13, `a4851e9159af63026e5593f30988c114d7117261`). Phase 3 PRs 1
+> to 5 are **MERGED** (PRs #15 to #19), and the go-imap fork integration
+> PR #20 is **MERGED**
+> (`9c235899f8f7cce2ead175552e9f5a6ab1bb9129`): the pinned fork release
+> is `v1.2.1-themailroom.6`, which resolves the two fork-level client
+> defects recorded in §3.2. Phase 3 PR 6 has not begun. Controls marked
 > **(implemented)** are present in the current code; controls marked
 > **(planned)** are not. The controlled Purelymail smoke-test campaign
 > was executed on 2026-10-21 and passed; the authoritative record is
@@ -121,7 +126,7 @@ operator's responsibility.
   the **IMAP protocol layer**, before the literal buffer is
   allocated. The go-imap fork
   (`github.com/flowbyte-com/go-imap`, module version
-  `v1.2.1-themailroom.4`) adds a
+  `v1.2.1-themailroom.6`) adds a
   `client.DialOptions.MaxLiteralSize` option; TheMailroom
   sets it to `max_message_bytes` at dial time. The fork's
   `ReadLiteral` checks the announced literal size against
@@ -313,7 +318,7 @@ certification; the authoritative record is
 - Host OS compromise: TheMailroom assumes the host is trusted; if it isn't, no application-layer control helps.
 - MCP client compromise: see T1, T3 — the agent is treated as semi-trusted.
 - Network-level MITM with valid CA: TLS verification rejects invalid certificates and we never fall back to plain TCP for credentials (no IMAP `LOGIN` over cleartext, no SMTP AUTH over cleartext).
-- Denial of service from large numbers of accounts or messages: out of scope for v1; documented. This does not waive the specific pre-limit JSON-RPC allocation risk recorded below, nor the unbounded `search_messages` and `list_mailboxes` workloads recorded in §3.1.
+- Denial of service from large numbers of accounts or messages: out of scope for v1; documented. This does not waive the specific pre-limit JSON-RPC allocation risk recorded below, nor the server-side search evaluation and the deferred mailbox-enumeration count policy recorded in §3.1.
 
 ### 3.1 Phase 3 hardening backlog (known residual risks)
 
@@ -332,24 +337,23 @@ These are recorded, not silently accepted as production-grade behaviour:
   hardening concerns. Schema size/count limits are also still Phase 3
   work; the remaining risk is resource exhaustion, not confidentiality
   or integrity.
-- **Unbounded IMAP search and mailbox-enumeration workloads.**
-  `list_messages` and `search_messages` are bounded (see T7), but
-  `list_mailboxes` still returns every mailbox the server reports. That
-  is a separately tracked hardening item; it is not covered by the scan
-  budget, and the budget does not apply to it.
-- **A `* BYE` delivered with a command's tagged completion can make a
-  successful command look failed.** The go-imap executor waits on a
-  `select` between the command's result and the connection's logged-out
-  channel; when the server ends a session in the same instant it
-  completes a command, both cases are ready and Go picks between them
-  pseudo-randomly, so the command can be reported as failed with
-  `errClosed` although the server answered it. The defect is in the
-  library, not in TheMailroom, and is tracked as
-  <https://github.com/flowbyte-com/go-imap/issues/1>. The IMAP test
-  fixture works around it by delaying the `* BYE`; that mitigation is
-  not a synchronisation guarantee, and the replacement design — an
-  explicit, test-driven session termination — is described in the Phase 3
-  PR 4 design review.
+- **Server-side search evaluation and the deferred mailbox-enumeration
+  policy.**
+  `list_messages` and `search_messages` are bounded on the client's
+  share of the work (see T7), but two limits remain separate. The work
+  the *server* does to evaluate the search criteria is server-side
+  computation the client cannot observe or limit: an empty query matches
+  every message in the mailbox. The client's own cost of that operation
+  is nevertheless bounded — by the scan budget, by the decoder's
+  per-response limits and by the aggregate protocol-byte budget — so
+  only the server's side is unbounded. `list_mailboxes` still returns
+  every mailbox the server reports. The enumeration is **not** without a
+  protocol-byte resource limit: it has its own provisional aggregate
+  allowance of 4 MiB (see the enumeration paragraph above), so its
+  inbound bytes are bounded. What it does not yet have is a final
+  mailbox-count policy; the enumeration-specific hardening work remains
+  to be done, and the byte allowance is the interim bound rather than a
+  count policy.
 - **The decoder's per-response limits are a second line of defence, not
   a replacement for the application's own bounds.** The application
   keeps its UID collector and its FETCH delivery count; a decoder
@@ -452,30 +456,23 @@ These are recorded, not silently accepted as production-grade behaviour:
 
   The abort that stops the transfer is a socket close, so it stops the
   *delivery*; it does not bound what the server had already produced
-  or what the decoder had already allocated. Establishing a strict
-  protocol-work bound needs a decoder-level or byte-level budget (for
-  example a cap on the bytes the FETCH response may consume, enforced
-  by the fork's reader), which is separate work and is not part of the
-  current fork. Explicit IMAP command timeouts remain a separate
-  control and are independent of this budget.
-- **The go-imap reader updates the selected mailbox status in place.**
-  This is a pre-existing fork-level defect, not an aggregate-budget
-  regression, and it is recorded here because the aggregate-budget
-  tests can reach it. When the fork's reader handles an unsolicited
-  `EXISTS`, it writes the message count into the selected
-  `*imap.MailboxStatus` — the very struct the application received
-  from `EXAMINE` — under the client's own lock. The application reads
-  that count without that lock, so a server that sends an unsolicited
-  `EXISTS` while the application is reading the status is a data race.
-  The count is only used for the list scan budget's preflight refusal,
-  and the FETCH delivery count still bounds the work, so the exposure
-  is a stale or torn count rather than unbounded work. The application
-  cannot fix it: the fork exposes no accessor that returns a copy
-  under the lock. The fix is a fork change — update a copy of the
-  status, or expose an accessor that snapshots it — and it is tracked
-  separately from this work. Until then, the aggregate-budget fixture
-  floods before a mailbox is selected, where the reader has no selected
-  status to update.
+  or what the decoder had already allocated. When this budget was
+  designed, establishing a strict protocol-work bound needed a
+  decoder-level or byte-level budget — for example a cap on the bytes
+  the FETCH response may consume, enforced by the fork's reader — and
+  no such budget existed. **Those protections were subsequently
+  implemented.** Phase 3 PR 4 added the decoder-level per-response
+  limits, so the reader cannot materialise an unbounded response, and
+  Phase 3 PR 5 added the transport-level aggregate server data budget,
+  which counts every byte the server sends and refuses to read past the
+  allowance, so the raw responses the client never parses — including
+  the ones the fork's response handler discards — are bounded too. The
+  list scan budget is consequently the application-level layer of a
+  three-layer defence rather than the only one. The per-envelope
+  allocation remains bounded by the literal-size cap of T4 rather than
+  by the listing budget, and the wall-clock duration of the call remains
+  the explicit per-command IMAP timeout's separate guarantee,
+  independent of these budgets.
 - **Credential-command trustworthiness.** Bounding the IMAP and SMTP
   credential-command output bounds TheMailroom's memory use and keeps the
   command's output out of errors and logs. It does not make the command
@@ -493,6 +490,103 @@ These are recorded, not silently accepted as production-grade behaviour:
 - **OAuth2-only providers.** App passwords are insufficient where a
   provider requires OAuth2/XOAUTH2. OAuth2 remains deferred; this is a
   compatibility limitation, not a Phase 2.3 regression.
+
+### 3.2 Resolved findings (historical record)
+
+These were live defects, recorded here so that the discovery, the
+evidence and the fix are not lost. Neither is an active risk in the
+current build: the pinned fork release `v1.2.1-themailroom.6` (release
+commit `1b4e21ab774924e9d8dfcf9e05bd7fe44a214b11`) carries both fixes,
+and TheMailroom integrates that release unchanged.
+
+- **A `* BYE` delivered with a command's tagged completion could make a
+  successful command look failed — RESOLVED in go-imap
+  `v1.2.1-themailroom.6`.**
+  *Original defect.* The go-imap executor waited on a `select` between
+  the command's result and the connection's logged-out channel. When the
+  server ended a session in the same instant it completed a command,
+  both cases were ready and Go picked between them pseudo-randomly, so
+  the command could be reported as failed with `errClosed` although the
+  server had answered it. The defect was in the library, not in
+  TheMailroom, and was tracked as
+  <https://github.com/flowbyte-com/go-imap/issues/1>. The IMAP test
+  fixture worked around it by ending the session on an idle connection,
+  so that the `* BYE` could not race the completion of the command that
+  preceded it; that was a test-side mitigation and never a
+  synchronisation guarantee.
+  *Resolution.* The tagged completion takes precedence. A queued command
+  result is taken when the executor observes the logout, so a command
+  the server answered successfully is reported as successful, and the
+  selection snapshot is published as the command's result.
+  *Genuine disconnects are unchanged.* A `* BYE` with no tagged
+  completion, and a connection that fails before the completion, are
+  still reported as connection-closed errors, so a real disconnect is
+  never presented as a success. The client state still reflects the
+  logout, and a session the reader has ended is not resurrected.
+  *Current coverage.* The fork's own executor tests
+  (`TestClient_TaggedCompletionImmediatelyFollowedByBYE`,
+  `TestClient_BYEWithoutTaggedCompletion`,
+  `TestClient_ConnectionFailureBeforeCompletion`) and, in TheMailroom,
+  `TestExamineTaggedCompletionFollowedByBYE` in
+  `internal/imapclient/snapshot_regression_test.go`, which drives a
+  tagged EXAMINE completion followed immediately by `* BYE` through the
+  real backend connection and asserts that the completion snapshot is
+  complete and successful, that the state reports the logout and that no
+  mailbox is published.
+- **The selected mailbox status was updated in place while the
+  application read it — RESOLVED in go-imap `v1.2.1-themailroom.6`.**
+  *Original defect.* When the fork's reader handled an unsolicited
+  `EXISTS`, it wrote the message count into the selected
+  `*imap.MailboxStatus` — the very struct the application received from
+  `EXAMINE` — under the client's own lock (`c.mailbox.Messages =
+  messages` in the fork's `client/client.go`). The application reads
+  that count without that lock, because the lock is unexported and the
+  fork exposed no accessor that returned a copy, so a server that sent
+  an unsolicited `EXISTS` while the application was reading the status
+  was a data race. The count was used only for the list scan budget's
+  preflight refusal, so the exposure was a stale or torn count rather
+  than unbounded work. The defect was in the library and was tracked as
+  <https://github.com/flowbyte-com/go-imap/issues/3>.
+  *How it was found.* TheMailroom's aggregate-budget fixture reached the
+  race, and the race detector reported it in CI: run `39835593490`
+  (`test (macos-latest, go stable)` / `Test (race)`) recorded a write at
+  `client.(*Client).handleUnilateral.func1()`
+  (`client/client.go:533`) against a previous read at
+  `(*Backend).ListMessages.func1()` of `mboxStatus.Messages`. Until the
+  fork was fixed, the budget fixture flooded before a mailbox was
+  selected, where the reader had no selected status to update; that
+  arrangement is retained for the budget tests.
+  *Resolution.* The published status is an immutable snapshot.
+  `Select` returns a snapshot taken when the command completes; an
+  unsolicited `EXISTS` or `RECENT` clones the current status and
+  installs the copy as the new snapshot, so a pointer an application
+  already holds keeps the values it was given. `Client.Mailbox()`
+  returns the latest published snapshot, and returns nil while a
+  selection is unfinished and after a logout, a failed selection or
+  `Close`; an application that needs the current values calls
+  `Mailbox()` again or consumes the `*MailboxUpdate` values the client
+  publishes on its `Updates` channel.
+  *Compatibility change.* This is a deliberate change of contract for
+  callers: a status pointer obtained from `Select` no longer tracks
+  later unsolicited updates, so an application that relied on reading
+  live values through that pointer must now re-read them through the
+  supported accessor. TheMailroom never used `Client.Mailbox` and never
+  retained the returned status: `ListMessages`, `SearchMessages`,
+  `FetchMessage`, `FetchAttachment` and `MailboxUIDValidity` all copy
+  the values they need from the EXAMINE snapshot, so no production
+  change was required and no value TheMailroom reports changed.
+  *Current coverage.* `TestExamineSnapshotImmutableAfterUnsolicitedExists`
+  and `TestListMessagesBoundsAfterUnsolicitedExists` in
+  `internal/imapclient/snapshot_regression_test.go` drive an unsolicited
+  `EXISTS` against an already selected mailbox while the application
+  reads the status, and assert that the original snapshot is unchanged,
+  that a distinct fresh snapshot is available, that UIDVALIDITY and the
+  read-only state are preserved, and that the list scan and FETCH
+  delivery bounds still hold. The regression was mutation-tested
+  against the previous fork release: with `v1.2.1-themailroom.5` pinned
+  it fails with `WARNING: DATA RACE` at `client/client.go:533` and
+  `EXAMINE snapshot mutated in place: Messages = 1, want 3`; with
+  `v1.2.1-themailroom.6` it passes under `-race`.
 
 ## 4. Security checklist for releases
 

@@ -32,7 +32,7 @@
 //
 // This backend uses a narrow fork of go-imap
 // (github.com/flowbyte-com/go-imap, module version
-// v1.2.1-themailroom.5) that adds:
+// v1.2.1-themailroom.6) that adds:
 //
 //   - client.DialOptions.MaxLiteralSize, which the backend sets
 //     to the per-account MaxMessageBytes. The fork's
@@ -1134,7 +1134,7 @@ func (b *Backend) releaseConn() {
 
 // decoderLimits returns the reader's resource limits for this account.
 //
-// The go-imap fork (v1.2.1-themailroom.5) bounds the memory a single
+// The go-imap fork (v1.2.1-themailroom.6) bounds the memory a single
 // response can make its reader allocate: a maximum number of fields, a
 // maximum atom and quoted-string size, a maximum number of bytes per
 // response, and a maximum list nesting depth. They are configured

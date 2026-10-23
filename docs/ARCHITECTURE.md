@@ -127,7 +127,7 @@ the same backend through the MCP tool layer.
 IMAP4rev1 backend. It uses a narrow fork of
 `github.com/emersion/go-imap` v1.2.1 —
 `github.com/flowbyte-com/go-imap` at module version
-`v1.2.1-themailroom.4` — and supports:
+`v1.2.1-themailroom.6` — and supports:
 
 - Implicit TLS on 993 and STARTTLS on 143.
 - `LIST *` for mailboxes, with sorted output.

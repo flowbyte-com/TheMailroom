@@ -15,7 +15,7 @@ import (
 
 // --- decoder integration ---
 //
-// The go-imap fork (v1.2.1-themailroom.5) bounds the memory a single
+// The go-imap fork (v1.2.1-themailroom.6) bounds the memory a single
 // response can make its reader allocate. These tests check that the
 // limits TheMailroom derives from the account's configuration are
 // consistent with the application-level search guarantees, and that a
