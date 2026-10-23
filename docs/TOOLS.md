@@ -496,7 +496,7 @@ automatic attachment fetch.
 **IMAP literal memory: bounded at the protocol layer.**
 
 The `max_message_bytes` cap is enforced by the go-imap fork
-(`github.com/flowbyte-com/go-imap` v1.2.1-themailroom.4) at the
+(`github.com/flowbyte-com/go-imap` v1.2.1-themailroom.6) at the
 protocol reader level. `client.DialOptions.MaxLiteralSize` is set
 to `max_message_bytes` at dial time; `ReadLiteral` checks the
 server-announced literal size **before** allocating the literal
