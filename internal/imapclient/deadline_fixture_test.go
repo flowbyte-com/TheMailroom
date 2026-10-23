@@ -100,8 +100,17 @@ type deadlineFixture struct {
 	// wg tracks the connection goroutines, so the shutdown can join
 	// them and a test can prove that they all terminated.
 	wg sync.WaitGroup
+	// acceptWG tracks the accept loop, so the shutdown can stop it and
+	// join it before it waits for the connection goroutines. Joining the
+	// accept loop first is what keeps WaitGroup.Add from racing with
+	// Wait.
+	acceptWG sync.WaitGroup
 	// alive counts the connection goroutines that have not returned.
 	alive int
+	// shutdownTimedOut records that the bounded join did not complete,
+	// so the shutdown verification can fail the test instead of
+	// silently succeeding.
+	shutdownTimedOut bool
 
 	closeOnce sync.Once
 }
@@ -124,7 +133,16 @@ func newDeadlineFixture(t *testing.T, implicitTLS bool, stage deadlineStage) *de
 		uidValidity: 1,
 		stallAt:     1,
 	}
-	t.Cleanup(f.shutdown)
+	t.Cleanup(func() {
+		f.shutdown()
+		if f.shutdownTimedOut {
+			t.Errorf("the fixture did not shut down within its bound: %d connection goroutines are still running", f.aliveGoroutines())
+		}
+		if n := f.aliveGoroutines(); n != 0 {
+			t.Errorf("the fixture left %d connection goroutines behind", n)
+		}
+	})
+	f.acceptWG.Add(1)
 	go f.serve()
 	return f
 }
@@ -139,10 +157,11 @@ func (f *deadlineFixture) releaseStage() {
 
 // shutdown releases every resource the fixture owns.
 //
-// It releases the blocking stages, closes the accepted sockets, stops
-// the listener and joins the connection goroutines. The join is bounded:
-// a goroutine that does not terminate is reported, not waited for
-// forever.
+// It releases the blocking stages, closes the accepted sockets, stops the
+// accept loop and joins it, and then joins the connection goroutines. The
+// join is bounded: a goroutine that does not terminate is recorded, and
+// the fixture's cleanup turns that into a test failure rather than a
+// silent success.
 func (f *deadlineFixture) shutdown() {
 	f.closeOnce.Do(func() {
 		f.releaseStage()
@@ -152,7 +171,12 @@ func (f *deadlineFixture) shutdown() {
 		for _, c := range conns {
 			_ = c.Close()
 		}
+		// Stop the accept loop and join it, so that no further
+		// connection goroutine can be added while the shutdown waits for
+		// them.
 		_ = f.ln.Close()
+		f.acceptWG.Wait()
+
 		done := make(chan struct{})
 		go func() {
 			f.wg.Wait()
@@ -161,6 +185,9 @@ func (f *deadlineFixture) shutdown() {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
+			f.mu.Lock()
+			f.shutdownTimedOut = true
+			f.mu.Unlock()
 		}
 	})
 }
@@ -238,6 +265,7 @@ func (f *deadlineFixture) blockUntilRelease() {
 }
 
 func (f *deadlineFixture) serve() {
+	defer f.acceptWG.Done()
 	for {
 		c, err := f.ln.Accept()
 		if err != nil {

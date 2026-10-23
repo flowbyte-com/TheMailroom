@@ -166,7 +166,13 @@ func (o *opRun) abort(cause error) {
 	}
 
 	o.mu.Lock()
-	o.state = opAborted
+	// The socket close may have taken long enough for the operation to
+	// reach a terminal decision in the meantime. A late completion of
+	// the abort must not overwrite that decision, so the state is only
+	// advanced when the abort is still the current one.
+	if o.state == opAborting {
+		o.state = opAborted
+	}
 	o.mu.Unlock()
 }
 

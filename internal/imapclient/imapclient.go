@@ -259,6 +259,16 @@ type Backend struct {
 	// closed reports that the backend has been closed permanently.
 	closed atomic.Bool
 
+	// registerHook is a test seam. It is called with the operation
+	// before it is registered, so a test can pause the registration at
+	// the boundary where a concurrent Close could otherwise miss the
+	// operation. It is nil in production.
+	registerHook func(op *opRun)
+
+	// dialContext is a test seam for the TCP dial. It is nil in
+	// production, where the configured dialer is used.
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
 	// mu protects the connection state below. It is held only for short,
 	// non-blocking critical sections: it is never held across a network
 	// operation, so a cancellation never waits for it.
@@ -364,14 +374,22 @@ func New(cfg config.AccountConfig, opts Options) (*Backend, error) {
 // MIME parse, for example - but it can no longer adopt or publish
 // anything.
 func (b *Backend) Close() error {
+	// The closure and the operation registration share the state mutex,
+	// so an operation can neither register nor start its watcher after
+	// this point, and an operation whose watcher has started is always
+	// visible here.
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return nil
+	}
 	b.closed.Store(true)
+	op := b.currentOp
 	b.closeCancel()
+	b.mu.Unlock()
 
 	// Interrupt the operation in progress, if any. The abort closes
 	// the socket; it writes no IMAP command.
-	b.mu.Lock()
-	op := b.currentOp
-	b.mu.Unlock()
 	if op != nil {
 		op.abort(errBackendClosed)
 		// The watcher is joined, so when Close returns no watcher of
@@ -1113,23 +1131,20 @@ func (b *Backend) withClient(ctx context.Context, kind opKind, fn func(*client.C
 	defer cancelOp()
 
 	op := newOpRun()
-	op.start(opCtx)
 	defer op.stop()
-
-	b.mu.Lock()
-	b.currentOp = op
-	b.mu.Unlock()
-	defer func() {
-		b.mu.Lock()
-		if b.currentOp == op {
-			b.currentOp = nil
-		}
-		b.mu.Unlock()
-	}()
+	defer b.clearOperation(op)
+	if err := b.registerOperation(op, opCtx); err != nil {
+		return mapErr(err)
+	}
 
 	c, err := b.ensureConnection(opCtx, op, kind, deadline)
 	if err != nil {
 		return b.completeOperation(op, opCtx, kind, err)
+	}
+	// The backend may have been closed while the operation was being
+	// registered. No command may begin after the closure.
+	if b.isClosed() {
+		return b.completeOperation(op, opCtx, kind, errBackendClosed)
 	}
 	// Arm the server data budget for this operation, so that the
 	// inbound protocol bytes of its commands and of the unsolicited
@@ -1407,6 +1422,46 @@ func (b *Backend) ensureConnection(opCtx context.Context, op *opRun, kind opKind
 	b.selectedValidity = 0
 	b.mu.Unlock()
 	return sess.client, nil
+}
+
+// registerOperation publishes the operation and starts its cancellation
+// watcher as one synchronised step.
+//
+// The registration and the backend closure share the state mutex, so:
+//
+//   - a watcher can never start after Close has completed;
+//   - Close can never miss an operation whose watcher has started;
+//   - an operation whose registration is refused starts no watcher and
+//     leaves no state behind.
+//
+// A refused registration cleans up its own context: the caller cancels
+// the operation context on every path.
+func (b *Backend) registerOperation(op *opRun, opCtx context.Context) error {
+	if b.registerHook != nil {
+		b.registerHook(op)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed.Load() {
+		return errBackendClosed
+	}
+	b.currentOp = op
+	op.start(opCtx)
+	return nil
+}
+
+// clearOperation forgets the operation if it is still the current one.
+func (b *Backend) clearOperation(op *opRun) {
+	b.mu.Lock()
+	if b.currentOp == op {
+		b.currentOp = nil
+	}
+	b.mu.Unlock()
+}
+
+// isClosed reports whether the backend has been closed.
+func (b *Backend) isClosed() bool {
+	return b.closed.Load()
 }
 
 // completeOperation makes the terminal decision for an operation.
@@ -1730,21 +1785,20 @@ func (b *Backend) abortConn() {
 	}
 }
 
-// dialAndLogin establishes one IMAP connection and authenticates it.
+// dial establishes the TCP connection.
 //
-// It returns the client together with the raw TCP socket that backs it.
-// The socket is what the abort path closes to stop an in-flight command
-// without issuing another IMAP command. It is the same socket in both
-// TLS modes: with implicit TLS the client speaks over a tls.Conn that
-// wraps it, and with STARTTLS the connection is upgraded in place.
-//
-// ctx bounds the credential command: it is the caller's operation context
-// and is cancelled with it. The TLS handshake deliberately keeps using
-// context.Background(), as before, so that the existing implicit-TLS and
-// STARTTLS connection behaviour is unchanged.
-//
-// Every failure path releases the socket before returning, so a failed
-// connection setup leaks no file descriptor.
+// The operation's context governs the dial, so a cancellation or a
+// backend closure interrupts it. The test seam replaces the dial so a
+// test can drive the dial deterministically; production uses the
+// configured dialer, whose timeout is an additional bound.
+func (b *Backend) dial(ctx context.Context, addr string) (net.Conn, error) {
+	if b.dialContext != nil {
+		return b.dialContext(ctx, "tcp", addr)
+	}
+	dialer := &net.Dialer{Timeout: b.dialTimeout}
+	return dialer.DialContext(ctx, "tcp", addr)
+}
+
 // newSession is a freshly established connection and the state that
 // belongs to it.
 //
@@ -1785,7 +1839,6 @@ func (s *newSession) discard() {
 // greeting, STARTTLS or LOGIN can reach it.
 func (b *Backend) dialAndLogin(opCtx context.Context, op *opRun, kind opKind, deadline time.Time) (*newSession, error) {
 	addr := net.JoinHostPort(b.cfg.IMAP.Host, strconv.Itoa(b.cfg.IMAP.Port))
-	dialer := &net.Dialer{Timeout: b.dialTimeout}
 	tlsCfg := b.tlsConfig
 	if tlsCfg == nil {
 		tlsCfg = &tls.Config{ServerName: b.cfg.IMAP.Host, MinVersion: tls.VersionTLS12}
@@ -1794,7 +1847,7 @@ func (b *Backend) dialAndLogin(opCtx context.Context, op *opRun, kind opKind, de
 		// caller already provided one.
 		tlsCfg.ServerName = b.cfg.IMAP.Host
 	}
-	raw, err := dialer.DialContext(opCtx, "tcp", addr)
+	raw, err := b.dial(opCtx, addr)
 	if err != nil {
 		return nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
 	}

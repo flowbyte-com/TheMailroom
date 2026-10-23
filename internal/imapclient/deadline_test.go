@@ -29,6 +29,55 @@ import (
 	"github.com/flowbyte-com/themailroom/internal/mailbox"
 )
 
+// cancelWhenReached cancels the context when the fixture reaches its
+// blocking stage, unless the test ends first.
+//
+// The goroutine is joined by the test's cleanup, so it can never touch
+// the context after the test has completed.
+func cancelWhenReached(t *testing.T, cancel context.CancelFunc, reached <-chan struct{}) {
+	t.Helper()
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		<-finished
+	})
+	go func() {
+		defer close(finished)
+		select {
+		case <-reached:
+			cancel()
+		case <-stop:
+		}
+	}()
+}
+
+// cancelAfter cancels the context after the delay, unless the test ends
+// first.
+//
+// The goroutine is joined by the test's cleanup, so it can never touch
+// the context after the test has completed: a late cancel would race
+// with the testing framework's own bookkeeping.
+func cancelAfter(t *testing.T, cancel context.CancelFunc, d time.Duration) {
+	t.Helper()
+	stop := make(chan struct{})
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		<-finished
+	})
+	go func() {
+		defer close(finished)
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancel()
+		case <-stop:
+		}
+	}()
+}
+
 // --- the deadline wrapper ------------------------------------------------
 
 // TestDeadlineConnClearIsNotUndoneByALateSetDeadline covers the first
@@ -422,10 +471,7 @@ func TestCallerCancellationIsReportedAsCancellation(t *testing.T) {
 	be, fx := fixtureBackend(t, true, stageExamine, 30*time.Second, 30*time.Second)
 
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		fx.waitForStage(t)
-		cancel()
-	}()
+	cancelWhenReached(t, cancel, fx.reached)
 	_, err := be.ListMessages(ctx, "test", "INBOX", mailbox.ListOptions{Limit: 1})
 	if err == nil {
 		t.Fatal("expected an error after the caller cancelled")
@@ -566,10 +612,7 @@ func TestCancellationDuringDialPublishesNothing(t *testing.T) {
 	t.Cleanup(func() { _ = be.Close() })
 
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		cancel()
-	}()
+	cancelAfter(t, cancel, 200*time.Millisecond)
 	_, err = be.ListMessages(ctx, "test", "INBOX", mailbox.ListOptions{Limit: 1})
 	if err == nil {
 		t.Fatal("expected an error after the caller cancelled")
@@ -586,14 +629,18 @@ func TestCancellationDuringDialPublishesNothing(t *testing.T) {
 	}
 }
 
-// TestDialCancellation covers a cancellation while the TCP connection is
-// being established.
+// TestDialCancellation is an optional environment smoke test for the dial
+// cancellation.
 //
-// The address is in the documentation test range, which no host routes:
-// the connect either blocks until the cancellation or is refused
-// immediately by the local network stack. The second case is reported
-// rather than treated as a failure, because the environment - not the
-// code - decides it.
+// The address is in the documentation test range, which no host routes. A
+// network stack that routes or refuses it decides the outcome: the
+// connect may block until the cancellation, or it may be refused
+// immediately. The second case is not evidence about the code, so it is
+// reported as a skip rather than a failure.
+//
+// The deterministic proof of the dial cancellation is
+// TestDialCancellationIsDeterministic, which drives the dial through the
+// controlled seam.
 func TestDialCancellation(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(dialCancellationAddress)
 	var port int
@@ -603,10 +650,8 @@ func TestDialCancellation(t *testing.T) {
 	t.Cleanup(func() { _ = be.Close() })
 
 	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		cancel()
-	}()
+	defer cancel()
+	cancelAfter(t, cancel, 300*time.Millisecond)
 	start := time.Now()
 	_, err := be.ListMessages(ctx, "test", "INBOX", mailbox.ListOptions{Limit: 1})
 	elapsed := time.Since(start)
@@ -616,9 +661,8 @@ func TestDialCancellation(t *testing.T) {
 	if elapsed > 20*time.Second {
 		t.Errorf("the cancelled dial took %s, want it to be interrupted", elapsed)
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		t.Skipf("the environment refused the black-hole address instead of blocking: %v", err)
+	if ctx.Err() == nil {
+		t.Skipf("the environment refused the black-hole address before the cancellation: %v", err)
 	}
 	if !errors.Is(err, mailbox.ErrCanceled) && !errors.Is(err, mailbox.ErrTimeout) {
 		t.Errorf("err = %v, want a cancellation or a timeout", err)
@@ -925,14 +969,12 @@ func TestBudgetViolationSurvivesConcurrentCancellation(t *testing.T) {
 	defer be.Close()
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	// The cancellation arrives after the flood has been read, so the
 	// aggregate-byte violation is already recorded when the operation
 	// fails. The violation must be the reported error: a later
 	// cancellation must not replace it.
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		cancel()
-	}()
+	cancelAfter(t, cancel, 300*time.Millisecond)
 	_, err := be.ListMessages(ctx, "test", "INBOX", mailbox.ListOptions{Limit: 1})
 	if err == nil {
 		t.Fatal("expected an error for a flood before the login")
