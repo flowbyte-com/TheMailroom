@@ -206,6 +206,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/flowbyte-com/go-imap"
@@ -225,8 +226,8 @@ type Backend struct {
 	limits config.LimitsConfig
 
 	// dialTimeout caps the TCP dial. The IMAP protocol itself does
-	// not have a meaningful per-command timeout; we rely on context
-	// cancellation through the operation methods.
+	// not have a meaningful per-command timeout; the operation and
+	// command deadlines bound the protocol work instead.
 	dialTimeout time.Duration
 
 	// tlsConfig, if non-nil, replaces the default *tls.Config. This
@@ -235,21 +236,51 @@ type Backend struct {
 	// default with ServerName set and MinVersion TLS 1.2.
 	tlsConfig *tls.Config
 
-	// commandTimeout caps the time an IMAP command may take.
-	// Zero means the go-imap client default (no timeout).
+	// commandTimeout is an additional per-command bound. It is
+	// clamped by the deadline wrapper, so it can only shorten the
+	// effective deadline: it can never extend the operation deadline
+	// and it cannot outlive its command. Zero means the go-imap
+	// client's own default, which is no timeout of its own; the
+	// armed ceilings govern instead.
 	commandTimeout time.Duration
 
-	// selectedValidity is the UIDVALIDITY of the most recent
-	// SELECT/EXAMINE call. It is captured and surfaced on every
-	// read so callers can compare against their own cached value.
-	// A zero value indicates the mailbox is not currently
-	// selected.
+	// gate serialises the account's operations. It is an interruptible
+	// semaphore rather than a mutex, so an operation waiting for the
+	// account can honour its caller's cancellation and the queue
+	// allowance instead of waiting for the operation in progress.
+	gate chan struct{}
+
+	// closeCtx is the backend's lifetime context. Close cancels it, so
+	// every operation in progress - including one that is still
+	// establishing its connection - is interrupted.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+
+	// closed reports that the backend has been closed permanently.
+	closed atomic.Bool
+
+	// mu protects the connection state below. It is held only for short,
+	// non-blocking critical sections: it is never held across a network
+	// operation, so a cancellation never waits for it.
 	mu     sync.Mutex
 	client *client.Client
 	// budget bounds the inbound protocol bytes the current connection
 	// may consume. It is the connection's serverDataBudget; it is nil
 	// when there is no connection.
-	budget           *serverDataBudget
+	budget *serverDataBudget
+	// deadlines is the connection's deadline wrapper. It clamps every
+	// deadline the go-imap client sets to the deadlines armed for the
+	// current operation. It is nil when there is no connection.
+	deadlines *deadlineConn
+	// currentOp is the operation that currently owns the connection.
+	// The command helpers use it to arm the ceiling of the command they
+	// are about to issue.
+	currentOp *opRun
+	// selectedValidity is the UIDVALIDITY of the most recent
+	// SELECT/EXAMINE call. It is captured and surfaced on every
+	// read so callers can compare against their own cached value.
+	// A zero value indicates the mailbox is not currently
+	// selected.
 	selectedMailbox  string
 	selectedValidity uint32
 
@@ -280,10 +311,14 @@ type Options struct {
 	// self-signed certificate.
 	TLSConfig *tls.Config
 
-	// CommandTimeout caps the time an IMAP command may take. Zero
-	// means the client default (no timeout). A bounded timeout
-	// prevents a misbehaving server from blocking the server
-	// process forever.
+	// CommandTimeout is an additional per-command bound. The deadline
+	// wrapper clamps it, so it can only shorten the effective
+	// deadline. Zero means the client's own default, which is no
+	// timeout of its own; the armed command ceilings govern instead.
+	//
+	// The production construction path leaves it unset. The operation
+	// and command deadlines are configured per account and are always
+	// finite.
 	CommandTimeout time.Duration
 }
 
@@ -300,6 +335,7 @@ func New(cfg config.AccountConfig, opts Options) (*Backend, error) {
 	// Apply defaults so callers see the effective limits at
 	// construction time.
 	norm := cfg.WithDefaults()
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &Backend{
 		cfg:            norm,
 		email:          norm.Email,
@@ -307,29 +343,53 @@ func New(cfg config.AccountConfig, opts Options) (*Backend, error) {
 		dialTimeout:    dialTimeout,
 		tlsConfig:      opts.TLSConfig,
 		commandTimeout: opts.CommandTimeout,
+		gate:           make(chan struct{}, 1),
+		closeCtx:       closeCtx,
+		closeCancel:    closeCancel,
 	}, nil
 }
 
-// Close releases the underlying connection. The Backend is unusable
-// after Close; callers that share a long-lived Backend should ensure
-// the connection state is left in a known good state.
+// Close releases the backend and interrupts any operation in progress.
+//
+// The backend is permanently closed: an operation that starts after
+// Close fails immediately, and an operation that is running is
+// interrupted. The interruption closes the raw socket, which writes
+// nothing to the connection, so it can never race the command writer
+// the way an interleaved CLOSE or LOGOUT would.
+//
+// Close does not wait for the interrupted operation to unwind. It
+// returns once the cancellation has been signalled, every socket the
+// backend owns has been closed, and the cancellation watcher has
+// terminated. The operation goroutine may still be unwinding - inside a
+// MIME parse, for example - but it can no longer adopt or publish
+// anything.
 func (b *Backend) Close() error {
+	b.closed.Store(true)
+	b.closeCancel()
+
+	// Interrupt the operation in progress, if any. The abort closes
+	// the socket; it writes no IMAP command.
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.client == nil {
-		b.releaseConn()
-		return nil
+	op := b.currentOp
+	b.mu.Unlock()
+	if op != nil {
+		op.abort(errBackendClosed)
 	}
-	err := b.client.Close()
+
+	// Drop the session. The client, its socket, its budget and the
+	// selection metadata go together, and the socket is closed
+	// directly: the shutdown never waits for a second protocol
+	// command on a connection that is being discarded.
+	b.mu.Lock()
 	b.client = nil
 	b.budget = nil
+	b.deadlines = nil
+	b.currentOp = nil
 	b.selectedMailbox = ""
 	b.selectedValidity = 0
-	// The IMAP session is over, so the socket is released as well. It
-	// is closed without writing anything, and no command is in flight
-	// at this point.
 	b.releaseConn()
-	return err
+	b.mu.Unlock()
+	return nil
 }
 
 // Mailboxes lists every mailbox returned by the server. It uses
@@ -339,11 +399,18 @@ func (b *Backend) Mailboxes(ctx context.Context, accountID string) ([]mailbox.Ma
 	err := b.withClient(ctx, opMailboxList, func(c *client.Client) error {
 		ch := make(chan *imap.MailboxInfo, 64)
 		done := make(chan error, 1)
+		// The mailbox list is a bulk response, so it takes the
+		// transfer ceiling rather than the control ceiling.
+		b.armCommand(opMailboxList, cmdTransfer)
 		go func() { done <- c.List("", "*", ch) }()
 		for m := range ch {
 			out = append(out, mailboxFromInfo(m))
 		}
-		return <-done
+		err := <-done
+		// The command is complete: its ceiling is released and the
+		// absolute operation deadline takes over again.
+		b.commandFinished()
+		return err
 	})
 	if err != nil {
 		return nil, mapErr(err)
@@ -377,7 +444,9 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, opList, func(c *client.Client) error {
+		b.armCommand(opList, cmdControl)
 		mboxStatus, err := c.Select(mbx, true) // true => EXAMINE (read-only)
+		b.commandFinished()
 		if err != nil {
 			return err
 		}
@@ -438,6 +507,9 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		}
 		ch := make(chan *imap.Message, 32)
 		done := make(chan error, 1)
+		// The envelope fetch transfers one summary per scanned
+		// message, so it takes the transfer ceiling.
+		b.armCommand(opList, cmdTransfer)
 		go func() { done <- c.UidFetch(seqset, items, ch) }()
 		selector := &summarySelector{limit: keep}
 		// delivered counts every message the FETCH handler hands to
@@ -502,6 +574,9 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 		// is the expected outcome, and the budget error below is the
 		// one that is reported.
 		fetchErr := <-done
+		// The command is complete: its ceiling is released and the
+		// absolute operation deadline takes over again.
+		b.commandFinished()
 		if overrun {
 			return listScanBudgetExceededError(mbx, budget)
 		}
@@ -635,7 +710,9 @@ func (b *Backend) fetchRawMessage(ctx context.Context, accountID, mbx string, ui
 		return mailbox.ErrUIDMissing
 	}
 	err := b.withClient(ctx, opMessage, func(c *client.Client) error {
+		b.armCommand(opMessage, cmdControl)
 		mboxStatus, err := c.Select(mbx, true)
+		b.commandFinished()
 		if err != nil {
 			return err
 		}
@@ -667,6 +744,9 @@ func (b *Backend) fetchRawMessage(ctx context.Context, accountID, mbx string, ui
 		}
 		ch := make(chan *imap.Message, 1)
 		done := make(chan error, 1)
+		// The body fetch transfers the whole message, so it takes the
+		// transfer ceiling.
+		b.armCommand(opMessage, cmdTransfer)
 		go func() {
 			// Recover from any panic in c.UidFetch and
 			// surface it as a generic internal error. We
@@ -697,6 +777,9 @@ func (b *Backend) fetchRawMessage(ctx context.Context, accountID, mbx string, ui
 			}
 		}
 		fetchErr := <-done
+		// The command is complete: its ceiling is released and the
+		// absolute operation deadline takes over again.
+		b.commandFinished()
 		if fetchErr != nil {
 			return fetchErr
 		}
@@ -776,7 +859,9 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 	budget := b.scanBudget()
 	res := mailbox.ListResult{}
 	err := b.withClient(ctx, opSearch, func(c *client.Client) error {
+		b.armCommand(opSearch, cmdControl)
 		mboxStatus, err := c.Select(mbx, true)
+		b.commandFinished()
 		if err != nil {
 			return err
 		}
@@ -806,7 +891,12 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		// that matches more messages than the budget allows is
 		// refused before any FETCH is sent, so the server is
 		// never asked for the envelopes of every match.
+		// The search response carries one UID per match, so it takes
+		// the transfer ceiling. The charset retry shares it: the whole
+		// search phase is bounded by one ceiling.
+		b.armCommand(opSearch, cmdTransfer)
 		uids, err := searchUIDs(c, q, budget)
+		b.commandFinished()
 		if err != nil {
 			return err
 		}
@@ -834,6 +924,9 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		}
 		ch := make(chan *imap.Message, 32)
 		done := make(chan error, 1)
+		// The envelope fetch transfers one summary per match, so it
+		// takes the transfer ceiling.
+		b.armCommand(opSearch, cmdTransfer)
 		go func() { done <- c.UidFetch(seqset, items, ch) }()
 		// The summaries are collected in the bounded top-K selector,
 		// which keeps the same page a full sort of every summary
@@ -894,6 +987,9 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 		// is the expected outcome, and the budget error below is the
 		// one that is reported.
 		fetchErr := <-done
+		// The command is complete: its ceiling is released and the
+		// absolute operation deadline takes over again.
+		b.commandFinished()
 		if overrun {
 			return searchTooLargeError(budget)
 		}
@@ -943,7 +1039,9 @@ func (b *Backend) MailboxUIDValidity(ctx context.Context, accountID, mbx string)
 	}
 	var uv uint32
 	err := b.withClient(ctx, opPlain, func(c *client.Client) error {
+		b.armCommand(opPlain, cmdControl)
 		mboxStatus, err := c.Select(mbx, true)
+		b.commandFinished()
 		if err != nil {
 			return err
 		}
@@ -991,98 +1089,380 @@ func (b *Backend) MailboxUIDValidity(ctx context.Context, accountID, mbx string)
 // safe for concurrent use. The connection is closed on error.
 func (b *Backend) withClient(ctx context.Context, kind opKind, fn func(*client.Client) error) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return mapErr(err)
 	}
+	// The account's operations are serialised by the gate. The wait is
+	// bounded by the queue allowance and is interruptible by the
+	// caller's context and by Backend.Close.
+	if err := b.acquireGate(ctx); err != nil {
+		return mapErr(err)
+	}
+	defer b.releaseGate()
+
+	// The operation deadline starts when the gate is acquired: the
+	// queue wait has its own, much shorter, allowance.
+	deadline := b.operationDeadline(kind)
+	opCtx, cancelOp := b.operationContext(ctx, deadline)
+	defer cancelOp()
+
+	op := newOpRun()
+	op.start(opCtx)
+	defer op.stop()
+
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.client == nil || isLoggedOut(b.client) {
-		// The previous session is over, so its client, socket, budget
-		// and selection metadata are discarded together, before the
-		// replacement connection is attempted.
-		//
-		// Doing this before the dial matters: if the replacement
-		// connection fails, the backend must not keep an obsolete
-		// client without an owned socket, nor a UIDVALIDITY that
-		// was observed on a session that no longer exists.
-		//
-		// The budget's violation record is captured before the budget
-		// is dropped: it is the cause of the session's end, and an
-		// idle violation must be reported rather than erased silently.
-		cause := b.discardLocked()
-		if cause != nil {
-			// The connection was invalidated by an aggregate-limit
-			// violation while it was idle. The violation is reported
-			// by the operation that recognises it; the following call
-			// reconnects.
-			return idleServerDataBudgetError()
+	b.currentOp = op
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		if b.currentOp == op {
+			b.currentOp = nil
 		}
-		c, conn, budget, err := b.dialAndLogin(ctx)
-		if err != nil {
-			// A server that floods before the client has issued a
-			// command exhausts the allowance while the connection is
-			// being established. That is the same condition as a flood
-			// during an operation, and it is reported the same way.
-			if budget != nil && budget.violationErr() != nil {
-				return serverDataBudgetError(kind)
-			}
-			return err
-		}
-		b.client = c
-		// The socket is adopted together with the client, so the
-		// abort path can never close a replacement connection.
-		b.conn = conn
-		b.budget = budget
-		// Force a re-EXAMINE on the next call by clearing the
-		// selected mailbox: a new connection cannot inherit the
-		// server-side state.
-		b.selectedMailbox = ""
-		b.selectedValidity = 0
+		b.mu.Unlock()
+	}()
+
+	c, err := b.ensureConnection(opCtx, op, kind, deadline)
+	if err != nil {
+		return b.completeOperation(op, opCtx, kind, err)
 	}
 	// Arm the server data budget for this operation, so that the
 	// inbound protocol bytes of its commands and of the unsolicited
 	// responses that arrive while they run are bounded.
-	b.budget.setLimit(b.dataAllowance(kind))
-
-	err := fn(b.client)
-
-	// A budget violation is reported as itself, not as the connection
-	// failure it causes: the connection died because the server sent
-	// too much data, and the caller can act on that.
-	//
-	// The check happens even when the callback appeared to succeed: a
-	// violation that invalidated the data the callback consumed must
-	// not be reported as a complete result.
-	if b.budget != nil && b.budget.violationErr() != nil {
-		err = serverDataBudgetError(kind)
+	b.mu.Lock()
+	budget := b.budget
+	b.mu.Unlock()
+	if budget != nil {
+		budget.setLimit(b.dataAllowance(kind))
 	}
+	err = fn(c)
+	return b.completeOperation(op, opCtx, kind, err)
+}
+
+// acquireGate waits for the account's operation gate.
+//
+// The wait is bounded by the queue allowance, so an operation never
+// waits indefinitely behind the operation in progress, and it is
+// interrupted by the caller's cancellation and by Backend.Close. A
+// queue expiry does not touch the active operation's socket and does
+// not discard the connection.
+func (b *Backend) acquireGate(ctx context.Context) error {
+	timer := time.NewTimer(b.queueAllowance())
+	defer timer.Stop()
+	select {
+	case b.gate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-b.closeCtx.Done():
+		return errBackendClosed
+	case <-timer.C:
+		return errQueueTimeout
+	}
+}
+
+// releaseGate releases the account's operation gate.
+func (b *Backend) releaseGate() {
+	select {
+	case <-b.gate:
+	default:
+	}
+}
+
+// queueAllowance is the fixed part of an operation's time budget and
+// the time an operation may wait for the account.
+func (b *Backend) queueAllowance() time.Duration {
+	allowance := b.cfg.IMAP.OperationAllowance
+	if allowance <= 0 {
+		allowance = config.DefaultIMAPOperationAllowance
+	}
+	return allowance
+}
+
+// controlCeiling is the ceiling of one control command.
+func (b *Backend) controlCeiling() time.Duration {
+	ceiling := b.cfg.IMAP.ControlCommandTimeout
+	if ceiling <= 0 {
+		ceiling = config.DefaultIMAPControlCommandTimeout
+	}
+	return ceiling
+}
+
+// transferRate is the assumed minimum sustainable inbound transfer
+// rate, in bytes per second.
+func (b *Backend) transferRate() int64 {
+	rate := int64(b.cfg.IMAP.TransferRate)
+	if rate <= 0 {
+		rate = config.DefaultIMAPTransferRate
+	}
+	return rate
+}
+
+// maxOperationTimeout caps the derived operation deadline.
+func (b *Backend) maxOperationTimeout() time.Duration {
+	limit := b.cfg.IMAP.MaxOperationTimeout
+	if limit <= 0 {
+		limit = config.DefaultIMAPMaxOperationTimeout
+	}
+	return limit
+}
+
+// transferAllowance is the time budget of a data-transferring command:
+// the time needed to move the operation's own byte allowance at the
+// assumed minimum transfer rate.
+//
+// It is derived from the account's own limits, so the deadline follows
+// the limits the operator already set instead of a fixed number.
+func (b *Backend) transferAllowance(kind opKind) time.Duration {
+	return time.Duration(b.dataAllowance(kind)/b.transferRate()) * time.Second
+}
+
+// operationDeadline is the absolute deadline of one operation.
+//
+// It is the fixed allowance plus the time the operation's byte
+// allowance needs at the assumed minimum transfer rate, capped by the
+// maximum operation timeout.
+func (b *Backend) operationDeadline(kind opKind) time.Time {
+	deadline := b.queueAllowance() + b.transferAllowance(kind)
+	if limit := b.maxOperationTimeout(); deadline > limit {
+		deadline = limit
+	}
+	return time.Now().Add(deadline)
+}
+
+// operationContext derives the context of one operation.
+//
+// It carries the caller's cancellation, the backend's closure and the
+// operation deadline, so one context interrupts every stage: the queue
+// wait, the dial, the handshake, the greeting, STARTTLS, LOGIN, the
+// commands and the streaming reads.
+func (b *Backend) operationContext(ctx context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+	opCtx, cancel := context.WithCancelCause(ctx)
+	timer := time.AfterFunc(time.Until(deadline), func() { cancel(errOperationTimeout) })
+	stopClose := context.AfterFunc(b.closeCtx, func() { cancel(errBackendClosed) })
+	return opCtx, func() {
+		timer.Stop()
+		stopClose()
+		cancel(context.Canceled)
+	}
+}
+
+// cmdClass distinguishes a control command from a command that
+// transfers a bulk response.
+type cmdClass int
+
+const (
+	// cmdControl is a command with a small response: LOGIN, EXAMINE,
+	// CAPABILITY or NOOP.
+	cmdControl cmdClass = iota
+	// cmdTransfer is a command that transfers a bulk response: UID
+	// SEARCH, a UID FETCH of envelopes or of a body, and LIST.
+	cmdTransfer
+)
+
+// armOperation arms the operation deadline on the current connection.
+func (b *Backend) armOperation(deadline time.Time, op *opRun) {
+	b.mu.Lock()
+	w := b.deadlines
+	b.mu.Unlock()
+	if w != nil {
+		w.armOperation(deadline, op)
+	}
+}
+
+// armCommand arms the ceiling of the command that is about to run.
+//
+// The ceiling is an absolute instant, so no later deadline request can
+// renew it, and it is always subordinate to the operation deadline.
+func (b *Backend) armCommand(kind opKind, class cmdClass) {
+	b.mu.Lock()
+	w := b.deadlines
+	b.mu.Unlock()
+	if w == nil {
+		return
+	}
+	ceiling := b.controlCeiling()
+	if class == cmdTransfer {
+		ceiling = b.transferAllowance(kind)
+	}
+	w.armCommand(time.Now().Add(ceiling))
+}
+
+// commandFinished releases the ceiling of the command that finished.
+//
+// The absolute operation deadline remains in force, so the connection
+// between two commands of the same operation is still bounded and a
+// command ceiling cannot outlive its command.
+func (b *Backend) commandFinished() {
+	b.mu.Lock()
+	w := b.deadlines
+	b.mu.Unlock()
+	if w != nil {
+		w.commandFinished()
+	}
+}
+
+// ensureConnection returns the client the operation must use, dialling
+// and authenticating when the account has no usable session.
+//
+// The dial happens outside the state mutex, so a cancellation or a
+// Backend.Close can interrupt it, and the raw socket is published to
+// the operation's cancellation handle as soon as it exists.
+func (b *Backend) ensureConnection(opCtx context.Context, op *opRun, kind opKind, deadline time.Time) (*client.Client, error) {
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return nil, errBackendClosed
+	}
+	c := b.client
+	needDial := c == nil || isLoggedOut(c)
+	var cause error
+	if needDial {
+		// The previous session is over, so its client, socket, budget
+		// and selection metadata are discarded together, before the
+		// replacement connection is attempted.
+		cause = b.discardLocked()
+	}
+	b.mu.Unlock()
+	if cause != nil {
+		// The connection was invalidated by an aggregate-limit
+		// violation while it was idle. The violation is reported by
+		// the operation that recognises it; the following call
+		// reconnects.
+		return nil, idleServerDataBudgetError()
+	}
+	if !needDial {
+		// The session is reused: arm this operation's deadlines on it.
+		b.armOperation(deadline, op)
+		return c, nil
+	}
+
+	sess, err := b.dialAndLogin(opCtx, op, kind, deadline)
 	if err != nil {
-		// On error, close the client so the next call reconnects.
-		// We never silently retry a mutating operation; the
-		// backend is read-only and the only operations are
-		// EXAMINE, FETCH, SEARCH and LIST.
-		//
-		// The client and its socket are dropped together, so no stale
-		// socket reference survives the failure and the next call
-		// dials a fresh connection. c.Close() writes a CLOSE command,
-		// which is safe here because the caller has already awaited
-		// the completion of the command that failed.
-		c := b.client
-		if c != nil {
-			_ = c.Close()
-		}
-		b.discardLocked()
-		return err
+		return nil, err
 	}
-	// Between operations the connection is idle and the server is
-	// expected to send very little, so the allowance drops back to
-	// the small idle one. A server that floods an idle connection
-	// therefore loses it quickly.
-	//
-	// Arming a window does not erase the violation record: the record
-	// belongs to the connection, and it is cleared only when the
-	// connection is discarded.
-	b.budget.setLimit(idleDataAllowance)
+	// Adopt the new session, unless the operation was cancelled or the
+	// backend was closed while it was being established. A socket that
+	// is not adopted is closed and never becomes a session.
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		sess.discard()
+		return nil, errBackendClosed
+	}
+	if !op.isActive() {
+		b.mu.Unlock()
+		sess.discard()
+		return nil, op.cancelCause(context.Cause(opCtx))
+	}
+	b.client = sess.client
+	b.conn = sess.raw
+	b.budget = sess.budget
+	b.deadlines = sess.wrapper
+	// A new connection cannot inherit the server-side state.
+	b.selectedMailbox = ""
+	b.selectedValidity = 0
+	b.mu.Unlock()
+	return sess.client, nil
+}
+
+// completeOperation makes the terminal decision for an operation.
+//
+// The order is fixed:
+//
+//  1. the command-specific goroutine has already been joined by the
+//     callback, which waits for the FETCH completion before it returns;
+//  2. the aggregate-byte violation record is inspected, even when the
+//     callback appeared to succeed, because a violation that invalidated
+//     the data must not be reported as a complete result;
+//  3. a decoder-limit failure keeps its own classification;
+//  4. a recorded command timeout, operation timeout, cancellation or
+//     backend closure outranks a generic transport failure;
+//  5. exactly one terminal outcome is committed, and it is never
+//     rewritten afterwards;
+//  6. the cancellation watcher is disarmed and joined;
+//  7. the deadlines are cleared before a successful idle reuse;
+//  8. the whole connection is discarded on a terminal failure.
+func (b *Backend) completeOperation(op *opRun, opCtx context.Context, kind opKind, callbackErr error) error {
+	budgetViolation := b.budgetViolation(kind)
+	recorded := op.recordedCause()
+
+	final := callbackErr
+	switch {
+	case budgetViolation != nil:
+		final = budgetViolation
+	case isDecoderLimit(callbackErr):
+		// The decoder evidence is more specific than a deadline or a
+		// transport failure, so it is preserved.
+	case recorded != nil:
+		final = recorded
+	case callbackErr != nil:
+		// The operation failed. If the caller's cancellation, the
+		// backend closure or the operation deadline explains the
+		// failure, that explanation is reported instead of the generic
+		// transport error the go-imap client produced. A timeout is
+		// never inferred from the proximity of a failure to a deadline:
+		// only an observed cancellation or an observed expiry explains
+		// it.
+		if cause := context.Cause(opCtx); cause != nil {
+			final = cause
+		}
+	}
+
+	outcome := op.commit(opCtx, final)
+	op.stop()
+
+	if outcome == nil {
+		b.releaseSession()
+		return nil
+	}
+	b.discardSession()
+	return outcome
+}
+
+// budgetViolation reports the aggregate-byte violation recorded on the
+// current connection, if there is one.
+func (b *Backend) budgetViolation(kind opKind) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.budget != nil && b.budget.violationErr() != nil {
+		return serverDataBudgetError(kind)
+	}
 	return nil
+}
+
+// releaseSession returns the connection to the idle state.
+//
+// The deadlines are cleared first, so the connection carries no deadline
+// while it is idle: an expired command ceiling must not terminate a
+// connection that is about to be reused. The idle byte budget remains
+// the idle protection.
+func (b *Backend) releaseSession() {
+	b.mu.Lock()
+	w := b.deadlines
+	budget := b.budget
+	b.mu.Unlock()
+	if w != nil {
+		w.finishOperation()
+	}
+	if budget != nil {
+		budget.setLimit(idleDataAllowance)
+	}
+}
+
+// discardSession drops the connection.
+//
+// The client, its socket, its budget and the selection metadata are
+// dropped together. The socket is closed directly: no IMAP command is
+// written, so the cleanup never waits for a second protocol command on
+// a connection that is already unusable.
+func (b *Backend) discardSession() {
+	b.mu.Lock()
+	b.client = nil
+	b.budget = nil
+	b.deadlines = nil
+	b.selectedMailbox = ""
+	b.selectedValidity = 0
+	b.releaseConn()
+	b.mu.Unlock()
 }
 
 // discardLocked drops the current connection.
@@ -1107,6 +1487,11 @@ func (b *Backend) discardLocked() error {
 	if b.budget != nil {
 		cause = b.budget.violationErr()
 		b.budget.clearViolation()
+	}
+	if b.deadlines != nil {
+		// The connection is being dropped, so it carries no deadline.
+		b.deadlines.finishOperation()
+		b.deadlines = nil
 	}
 	b.releaseConn()
 	b.client = nil
@@ -1315,7 +1700,45 @@ func (b *Backend) abortConn() {
 //
 // Every failure path releases the socket before returning, so a failed
 // connection setup leaks no file descriptor.
-func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, *serverDataBudget, error) {
+// newSession is a freshly established connection and the state that
+// belongs to it.
+//
+// The four references are owned together: the client speaks over the
+// wrapper, the wrapper over the budget, and the budget over the raw
+// socket.
+type newSession struct {
+	client  *client.Client
+	raw     net.Conn
+	budget  *serverDataBudget
+	wrapper *deadlineConn
+}
+
+// discard closes a session that will not be adopted.
+//
+// The socket is closed directly: no IMAP command is written, so a
+// session that is discarded never waits for a second protocol command.
+func (s *newSession) discard() {
+	if s == nil {
+		return
+	}
+	if s.raw != nil {
+		_ = s.raw.Close()
+	}
+}
+
+// dialAndLogin establishes one IMAP connection and authenticates it.
+//
+// The connection is built as raw socket -> serverDataBudget ->
+// deadlineWrapper -> [tls.Conn] -> go-imap client, so the byte budget
+// accounts every byte the client consumes and the deadline wrapper sees
+// every deadline the go-imap client sets. With STARTTLS the fork
+// upgrades the connection in place; the wrapper is below the TLS layer
+// in both modes.
+//
+// The raw socket is published to the operation's cancellation handle as
+// soon as it exists, so a cancellation during the handshake, the
+// greeting, STARTTLS or LOGIN can reach it.
+func (b *Backend) dialAndLogin(opCtx context.Context, op *opRun, kind opKind, deadline time.Time) (*newSession, error) {
 	addr := net.JoinHostPort(b.cfg.IMAP.Host, strconv.Itoa(b.cfg.IMAP.Port))
 	dialer := &net.Dialer{Timeout: b.dialTimeout}
 	tlsCfg := b.tlsConfig
@@ -1326,36 +1749,42 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, *
 		// caller already provided one.
 		tlsCfg.ServerName = b.cfg.IMAP.Host
 	}
-	raw, err := dialer.Dial("tcp", addr)
+	raw, err := dialer.DialContext(opCtx, "tcp", addr)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
+		return nil, fmt.Errorf("imap: dial %s: %w", redactAddr(addr), err)
 	}
-	// The socket is released on every failure path below. It is only
-	// handed back to the caller together with a client, and the caller
-	// then owns it for the lifetime of that client.
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			_ = raw.Close()
-		}
-	}()
+	// The socket becomes visible to the cancellation handle immediately.
+	// A cancellation that arrived while the dial was in flight cannot
+	// publish it afterwards: the socket is closed here instead.
+	if !op.publish(raw) {
+		_ = raw.Close()
+		return nil, op.cancelCause(context.Cause(opCtx))
+	}
 	// The budget wraps the socket below the TLS layer, so it accounts
-	// every byte the server sends, in both TLS modes and after a
-	// STARTTLS upgrade. The greeting and the login are read through
+	// the bytes the client consumes from the socket, TLS record
+	// overhead included. The greeting and the login are read through
 	// it, under the idle allowance.
 	budget := &serverDataBudget{Conn: raw}
 	budget.setLimit(idleDataAllowance)
-	var conn net.Conn = budget
-	// opts carries the protocol-level IMAP literal-size cap. It
-	// is applied at the *imap.Reader level, i.e. before the
-	// reader allocates a buffer for an announced literal. This
-	// is the pre-allocation control required by
-	// docs/PHASE2_DESIGN.md §10.
-	//
-	// The cap is set on the Reader, not on the transport, so it
-	// applies identically to the implicit-TLS and STARTTLS
-	// paths: in both cases the Reader sees the *decrypted*
-	// IMAP byte stream.
+	// A server that floods before the client has issued a command
+	// exhausts the allowance while the connection is being established.
+	// That is the same condition as a flood during an operation, and it
+	// is reported the same way.
+	fail := func(err error) (*newSession, error) {
+		if budget.violationErr() != nil {
+			return nil, serverDataBudgetError(kind)
+		}
+		return nil, err
+	}
+	// The deadline wrapper sits above the budget and below TLS, so it
+	// sees every deadline the go-imap client sets and every socket
+	// error the transport produces.
+	wrapper := &deadlineConn{Conn: budget}
+	// The operation deadline is armed before the first byte is read, so
+	// the greeting, the authentication and the commands are all
+	// bounded by it.
+	wrapper.armOperation(deadline, op)
+	var conn net.Conn = wrapper
 	// opts carries the protocol-level limits: the literal-size cap and
 	// the decoder's per-response limits. They are applied at the
 	// *imap.Reader level, before the reader allocates anything, and
@@ -1364,67 +1793,87 @@ func (b *Backend) dialAndLogin(ctx context.Context) (*client.Client, net.Conn, *
 	// The literal-size cap is the pre-allocation control required by
 	// docs/PHASE2_DESIGN.md §10: the reader checks the announced size
 	// BEFORE the make([]byte, n) call, so an over-cap announcement is
-	// rejected without allocating a buffer proportional to it.
+	// rejected without allocating a buffer proportional to the
+	// announced size.
 	//
 	// The decoder's limits bound the memory one response can make the
 	// reader allocate. They are derived from the account's own
 	// configuration, so that they bound the responses the account
 	// legitimately expects.
 	if b.limits.MaxMessageBytes > math.MaxUint32 {
-		return nil, nil, budget, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
+		_ = raw.Close()
+		return nil, fmt.Errorf("imap: max_message_bytes %d exceeds the protocol literal limit", b.limits.MaxMessageBytes)
 	}
 	opts := b.decoderLimits(b.scanBudget())
 	switch {
 	case b.cfg.IMAP.TLS:
 		tlsConn := tls.Client(conn, tlsCfg)
-		if err := tlsConn.HandshakeContext(context.Background()); err != nil {
-			return nil, nil, budget, fmt.Errorf("imap: tls handshake: %w", err)
+		if err := tlsConn.HandshakeContext(opCtx); err != nil {
+			_ = raw.Close()
+			return fail(fmt.Errorf("imap: tls handshake: %w", err))
 		}
 		conn = tlsConn
 	case b.cfg.IMAP.StartTLS:
 		c, err := client.NewWithOptions(conn, opts)
 		if err != nil {
-			return nil, nil, budget, err
+			_ = raw.Close()
+			return fail(err)
 		}
+		// A caller-supplied command timeout is an additional per-command
+		// bound. The deadline wrapper clamps it, so it can only shorten
+		// the effective deadline: it can never extend the operation
+		// deadline or outlive its command.
 		if b.commandTimeout > 0 {
 			c.Timeout = b.commandTimeout
 		}
+		// The STARTTLS command and the upgrade that follows it are
+		// bounded by the control ceiling and, underneath it, by the
+		// operation deadline.
+		wrapper.armCommand(time.Now().Add(b.controlCeiling()))
 		if err := c.StartTLS(tlsCfg); err != nil {
-			_ = c.Close()
-			return nil, nil, budget, fmt.Errorf("imap: starttls: %w", err)
+			wrapper.commandFinished()
+			_ = raw.Close()
+			return fail(fmt.Errorf("imap: starttls: %w", err))
 		}
-		pw, err := resolvePassword(ctx, b.cfg.IMAP)
+		wrapper.commandFinished()
+		pw, err := resolvePassword(opCtx, b.cfg.IMAP)
 		if err != nil {
-			_ = c.Close()
-			return nil, nil, budget, err
+			_ = raw.Close()
+			return fail(err)
 		}
+		wrapper.armCommand(time.Now().Add(b.controlCeiling()))
 		if err := c.Login(b.cfg.IMAP.Username, pw); err != nil {
-			_ = c.Close()
-			return nil, nil, budget, fmt.Errorf("imap: login: %w", err)
+			wrapper.commandFinished()
+			_ = raw.Close()
+			return fail(fmt.Errorf("imap: login: %w", err))
 		}
-		handedOff = true
-		return c, raw, budget, nil
+		wrapper.commandFinished()
+		return &newSession{client: c, raw: raw, budget: budget, wrapper: wrapper}, nil
 	default:
-		return nil, nil, budget, errors.New("imap: tls or starttls must be enabled")
+		_ = raw.Close()
+		return nil, errors.New("imap: tls or starttls must be enabled")
 	}
 	c, err := client.NewWithOptions(conn, opts)
 	if err != nil {
-		return nil, nil, budget, err
+		_ = raw.Close()
+		return fail(err)
 	}
 	if b.commandTimeout > 0 {
 		c.Timeout = b.commandTimeout
 	}
-	pw, err := resolvePassword(ctx, b.cfg.IMAP)
+	pw, err := resolvePassword(opCtx, b.cfg.IMAP)
 	if err != nil {
-		_ = c.Close()
-		return nil, nil, budget, err
+		_ = raw.Close()
+		return fail(err)
 	}
+	wrapper.armCommand(time.Now().Add(b.controlCeiling()))
 	if err := c.Login(b.cfg.IMAP.Username, pw); err != nil {
-		_ = c.Close()
-		return nil, nil, budget, fmt.Errorf("imap: login: %w", err)
+		wrapper.commandFinished()
+		_ = raw.Close()
+		return fail(fmt.Errorf("imap: login: %w", err))
 	}
-	handedOff = true
-	return c, raw, budget, nil
+	wrapper.commandFinished()
+	return &newSession{client: c, raw: raw, budget: budget, wrapper: wrapper}, nil
 }
 
 // listTooLargeError reports that a mailbox holds more messages than the

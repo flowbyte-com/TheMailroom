@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/flowbyte-com/themailroom/internal/recipients"
 )
@@ -50,6 +51,37 @@ const (
 	MaxListScanMessagesLimit = 1000000
 	DefaultMaxMIMENesting    = 16
 	DefaultMaxMIMEParts      = 500
+
+	// The IMAP deadline defaults and their accepted ranges.
+	//
+	// Every deadline is finite: there is no "unlimited" value. A zero
+	// setting means the default below; a value outside the accepted
+	// range is a configuration error, not a silent clamp.
+	//
+	// DefaultIMAPOperationAllowance is the fixed part of an operation's
+	// time budget and the queue allowance for the account's operation
+	// gate.
+	DefaultIMAPOperationAllowance = 30 * time.Second
+	MinIMAPOperationAllowance     = 1 * time.Second
+	MaxIMAPOperationAllowance     = 300 * time.Second
+
+	// DefaultIMAPControlCommandTimeout bounds one control command.
+	DefaultIMAPControlCommandTimeout = 30 * time.Second
+	MinIMAPControlCommandTimeout     = 1 * time.Second
+	MaxIMAPControlCommandTimeout     = 120 * time.Second
+
+	// DefaultIMAPTransferRate is the assumed minimum sustainable
+	// inbound transfer rate, in bytes per second. It is deliberately
+	// conservative: a slower link must not produce a false timeout.
+	DefaultIMAPTransferRate = 65536 // 64 KiB/s
+	MinIMAPTransferRate     = 4096
+	MaxIMAPTransferRate     = 16 * 1024 * 1024
+
+	// DefaultIMAPMaxOperationTimeout caps the derived end-to-end
+	// operation deadline.
+	DefaultIMAPMaxOperationTimeout = 900 * time.Second // 15 min
+	MinIMAPMaxOperationTimeout     = 60 * time.Second
+	MaxIMAPMaxOperationTimeout     = 3600 * time.Second
 
 	// DefaultMaxRequestBytes bounds one inbound MCP JSON-RPC frame before
 	// JSON decoding. The payload count excludes LF or CRLF framing.
@@ -146,6 +178,41 @@ type IMAPConfig struct {
 	// or test fixture.
 	Password        string   `yaml:"password,omitempty"        json:"-"`
 	PasswordCommand []string `yaml:"password_command,omitempty" json:"-"`
+
+	// OperationAllowance is the fixed part of an IMAP operation's time
+	// budget. It covers the wait for the account's operation gate, the
+	// connection establishment and the control round trips.
+	//
+	// It is also the queue allowance: an operation that cannot acquire
+	// the account within this time fails with a timeout instead of
+	// waiting for the operation in progress.
+	//
+	// Zero means the default. The value is always finite; there is no
+	// "unlimited" setting.
+	OperationAllowance time.Duration `yaml:"operation_allowance,omitempty"`
+
+	// ControlCommandTimeout bounds one control command: LOGIN, EXAMINE,
+	// CAPABILITY or NOOP. It does not bound a command that transfers a
+	// bulk response, which is bounded by the operation deadline instead.
+	//
+	// Zero means the default.
+	ControlCommandTimeout time.Duration `yaml:"control_command_timeout,omitempty"`
+
+	// TransferRate is the assumed minimum sustainable inbound transfer
+	// rate, in bytes per second. The time budget of a data-transferring
+	// command is derived from its byte allowance and this rate, so the
+	// deadline follows the account's own limits instead of a fixed
+	// number.
+	//
+	// Zero means the default.
+	TransferRate int `yaml:"transfer_rate,omitempty"`
+
+	// MaxOperationTimeout caps the derived end-to-end operation deadline.
+	// It exists so a very large scan budget cannot imply an unbounded
+	// wait; a derived deadline longer than this value is shortened to it.
+	//
+	// Zero means the default.
+	MaxOperationTimeout time.Duration `yaml:"max_operation_timeout,omitempty"`
 }
 
 // SMTPConfig configures an SMTP submission connection.
@@ -209,6 +276,20 @@ func (c AccountConfig) WithDefaults() AccountConfig {
 			c.IMAP.TLS = true
 			c.IMAP.Port = DefaultIMAPPort
 		}
+	}
+	// IMAP deadlines. Zero means the default; the values are always
+	// finite, so a deadline can never be disabled.
+	if c.IMAP.OperationAllowance == 0 {
+		c.IMAP.OperationAllowance = DefaultIMAPOperationAllowance
+	}
+	if c.IMAP.ControlCommandTimeout == 0 {
+		c.IMAP.ControlCommandTimeout = DefaultIMAPControlCommandTimeout
+	}
+	if c.IMAP.TransferRate == 0 {
+		c.IMAP.TransferRate = DefaultIMAPTransferRate
+	}
+	if c.IMAP.MaxOperationTimeout == 0 {
+		c.IMAP.MaxOperationTimeout = DefaultIMAPMaxOperationTimeout
 	}
 	// SMTP: default to STARTTLS on the submission port 587.
 	if c.SMTP.Port == 0 {
@@ -330,6 +411,9 @@ func validateAccount(idx int, a AccountConfig) error {
 		if err := validateAuth("imap", a.IMAP.Username, a.IMAP.Password, a.IMAP.PasswordCommand); err != nil {
 			return fmt.Errorf("accounts[%d].%w", idx, err)
 		}
+		if err := validateIMAPDeadlines(a.IMAP); err != nil {
+			return fmt.Errorf("accounts[%d].%w", idx, err)
+		}
 	}
 	if err := validateLimits(a.Limits); err != nil {
 		return fmt.Errorf("accounts[%d].%w", idx, err)
@@ -347,6 +431,36 @@ func validateAccount(idx int, a AccountConfig) error {
 	}
 	if err := validateAttachmentPaths(a.AttachmentSendPaths, hasPermission(a.Permissions, "attachment_send")); err != nil {
 		return fmt.Errorf("accounts[%d].%w", idx, err)
+	}
+	return nil
+}
+
+// validateIMAPDeadlines validates the IMAP deadline settings.
+//
+// A zero value means "use the default" and is always valid. A value
+// outside the accepted range is a configuration error: it is rejected
+// rather than silently clamped, so an operator never believes a bound is
+// in force when it is not.
+func validateIMAPDeadlines(s IMAPConfig) error {
+	if s.OperationAllowance != 0 &&
+		(s.OperationAllowance < MinIMAPOperationAllowance || s.OperationAllowance > MaxIMAPOperationAllowance) {
+		return fmt.Errorf("imap.operation_allowance must be between %s and %s",
+			MinIMAPOperationAllowance, MaxIMAPOperationAllowance)
+	}
+	if s.ControlCommandTimeout != 0 &&
+		(s.ControlCommandTimeout < MinIMAPControlCommandTimeout || s.ControlCommandTimeout > MaxIMAPControlCommandTimeout) {
+		return fmt.Errorf("imap.control_command_timeout must be between %s and %s",
+			MinIMAPControlCommandTimeout, MaxIMAPControlCommandTimeout)
+	}
+	if s.TransferRate != 0 &&
+		(s.TransferRate < MinIMAPTransferRate || s.TransferRate > MaxIMAPTransferRate) {
+		return fmt.Errorf("imap.transfer_rate must be between %d and %d bytes per second",
+			MinIMAPTransferRate, MaxIMAPTransferRate)
+	}
+	if s.MaxOperationTimeout != 0 &&
+		(s.MaxOperationTimeout < MinIMAPMaxOperationTimeout || s.MaxOperationTimeout > MaxIMAPMaxOperationTimeout) {
+		return fmt.Errorf("imap.max_operation_timeout must be between %s and %s",
+			MinIMAPMaxOperationTimeout, MaxIMAPMaxOperationTimeout)
 	}
 	return nil
 }
