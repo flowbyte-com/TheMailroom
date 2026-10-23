@@ -259,6 +259,14 @@ type Backend struct {
 	// closed reports that the backend has been closed permanently.
 	closed atomic.Bool
 
+	// closeOnce guards the shutdown sequence, so the shutdown begins
+	// exactly once no matter how many callers invoke Close.
+	closeOnce sync.Once
+	// closedCh is closed when the shutdown sequence has completed. Every
+	// Close caller waits for it, so a concurrent caller cannot return
+	// before the sockets are closed and the watcher has terminated.
+	closedCh chan struct{}
+
 	// registerHook is a test seam. It is called with the operation
 	// before it is registered, so a test can pause the registration at
 	// the boundary where a concurrent Close could otherwise miss the
@@ -356,6 +364,7 @@ func New(cfg config.AccountConfig, opts Options) (*Backend, error) {
 		gate:           make(chan struct{}, 1),
 		closeCtx:       closeCtx,
 		closeCancel:    closeCancel,
+		closedCh:       make(chan struct{}),
 	}, nil
 }
 
@@ -374,15 +383,31 @@ func New(cfg config.AccountConfig, opts Options) (*Backend, error) {
 // MIME parse, for example - but it can no longer adopt or publish
 // anything.
 func (b *Backend) Close() error {
+	// The shutdown sequence begins exactly once, and every caller waits
+	// for the same completion: a concurrent Close cannot return before
+	// the sockets are closed and the watcher has terminated.
+	b.closeOnce.Do(b.shutdown)
+	<-b.closedCh
+	return nil
+}
+
+// shutdown performs the one-time shutdown sequence.
+//
+// The closure becomes visible immediately, so an operation can neither
+// register nor start its watcher once the shutdown has begun. The
+// sequence interrupts the active operation, joins its watcher and
+// discards the connection state. It does not wait for an operation
+// inside an unpreemptible MIME parse: such an operation can no longer
+// adopt or publish anything.
+//
+// No IMAP CLOSE or LOGOUT is written: the socket is closed directly,
+// so the shutdown never waits for a second protocol command.
+func (b *Backend) shutdown() {
 	// The closure and the operation registration share the state mutex,
 	// so an operation can neither register nor start its watcher after
 	// this point, and an operation whose watcher has started is always
 	// visible here.
 	b.mu.Lock()
-	if b.closed.Load() {
-		b.mu.Unlock()
-		return nil
-	}
 	b.closed.Store(true)
 	op := b.currentOp
 	b.closeCancel()
@@ -392,19 +417,16 @@ func (b *Backend) Close() error {
 	// the socket; it writes no IMAP command.
 	if op != nil {
 		op.abort(errBackendClosed)
-		// The watcher is joined, so when Close returns no watcher of
-		// this backend is still running: a late callback cannot reach
-		// the connection or a replacement of it. The join is bounded:
-		// the watcher only closes a socket, which returns promptly, and
-		// it never waits for the operation itself - an operation inside
-		// an unpreemptible MIME parse is not waited for.
+		// The watcher is joined, so when the shutdown completes no
+		// watcher of this backend is still running: a late callback
+		// cannot reach the connection or a replacement of it. The join
+		// is bounded: the watcher only closes a socket, which returns
+		// promptly, and it never waits for the operation itself.
 		op.stop()
 	}
 
 	// Drop the session. The client, its socket, its budget and the
-	// selection metadata go together, and the socket is closed
-	// directly: the shutdown never waits for a second protocol
-	// command on a connection that is being discarded.
+	// selection metadata go together.
 	b.mu.Lock()
 	b.client = nil
 	b.budget = nil
@@ -414,7 +436,10 @@ func (b *Backend) Close() error {
 	b.selectedValidity = 0
 	b.releaseConn()
 	b.mu.Unlock()
-	return nil
+
+	// Every Close caller is released only now, with the sockets closed,
+	// the watcher terminated and the connection metadata discarded.
+	close(b.closedCh)
 }
 
 // Mailboxes lists every mailbox returned by the server. It uses

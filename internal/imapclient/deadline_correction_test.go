@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,6 +141,186 @@ func TestBackendCloseAndOperationRegistrationAreAtomic(t *testing.T) {
 			t.Fatal("the interrupted operation never returned")
 		}
 	})
+}
+
+// TestConcurrentBackendCloseWaitsForTheShutdown covers the shutdown
+// completion guarantee.
+//
+// A second Close must not return before the shutdown sequence has
+// finished: the sockets must be closed, the active watcher must have
+// terminated and the connection metadata must be discarded before any
+// caller returns.
+func TestConcurrentBackendCloseWaitsForTheShutdown(t *testing.T) {
+	fx := newDeadlineFixture(t, true, stageExamine)
+	// The second EXAMINE stalls, so the second operation blocks on the
+	// reused connection.
+	fx.setStallAt(2)
+	host, port := fx.addr()
+	be := deadlineBackend(t, host, port, 30*time.Second, 30*time.Second, config.MaxIMAPTransferRate, true)
+
+	// A first operation leaves the connection reusable.
+	if _, err := be.ListMessages(t.Context(), "test", "INBOX", mailbox.ListOptions{Limit: 1}); err != nil {
+		t.Fatalf("the first ListMessages: %v", err)
+	}
+
+	// Replace the connection's socket with one whose close blocks, so
+	// the shutdown is observably still in progress. The replacement must
+	// happen before the next operation publishes the socket, because
+	// that reference is immutable.
+	be.mu.Lock()
+	real := be.conn
+	gate := make(chan struct{})
+	be.conn = &slowCloseConn{Conn: real, gate: gate}
+	be.mu.Unlock()
+
+	// A second operation blocks on the reused connection.
+	done := make(chan error, 1)
+	go func() {
+		_, err := be.ListMessages(t.Context(), "test", "INBOX", mailbox.ListOptions{Limit: 1})
+		done <- err
+	}()
+	fx.waitForStage(t)
+	var op *opRun
+	waitFor(t, 5*time.Second, "the operation to be registered", func() bool {
+		be.mu.Lock()
+		op = be.currentOp
+		be.mu.Unlock()
+		return op != nil
+	})
+	if op == nil {
+		t.Fatal("the backend has no current operation")
+	}
+
+	// The first Close starts the shutdown and blocks in the socket close.
+	first := make(chan error, 1)
+	go func() { first <- be.Close() }()
+	waitFor(t, 5*time.Second, "the shutdown to start", func() bool {
+		return be.isClosed()
+	})
+
+	// The second Close must wait for the same shutdown.
+	second := make(chan error, 1)
+	go func() { second <- be.Close() }()
+
+	select {
+	case err := <-first:
+		t.Fatalf("the first Close returned before the shutdown completed: %v", err)
+	case err := <-second:
+		t.Fatalf("the second Close returned before the shutdown completed: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Releasing the socket lets the shutdown complete.
+	close(gate)
+	for i, ch := range []chan error{first, second} {
+		select {
+		case err := <-ch:
+			if err != nil {
+				t.Errorf("Close %d: %v", i+1, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("Close %d did not return", i+1)
+		}
+	}
+
+	// The watcher has terminated, the backend is permanently closed and
+	// no later operation succeeds.
+	if !op.watcherDone.Load() {
+		t.Error("the watcher was still running when Close returned")
+	}
+	if !be.isClosed() {
+		t.Error("the backend is not closed")
+	}
+	be.mu.Lock()
+	client := be.client
+	conn := be.conn
+	be.mu.Unlock()
+	if client != nil {
+		t.Error("a client was retained after the shutdown")
+	}
+	if conn != nil {
+		t.Error("a socket was retained after the shutdown")
+	}
+	if _, err := be.ListMessages(t.Context(), "test", "INBOX", mailbox.ListOptions{Limit: 1}); err == nil {
+		t.Error("an operation after the shutdown succeeded")
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("the interrupted operation reported success")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the interrupted operation never returned")
+	}
+}
+
+// TestFixtureShutdownClosesConnectionsAcceptedDuringTheShutdown covers
+// the accept-versus-shutdown overlap.
+//
+// The accept loop is held after a connection has been accepted but before
+// it is registered, so the shutdown and an in-flight accept overlap. The
+// connection must still be closed and its handler must terminate.
+func TestFixtureShutdownClosesConnectionsAcceptedDuringTheShutdown(t *testing.T) {
+	fx := newDeadlineFixture(t, true, stageNone)
+	host, port := fx.addr()
+	be := deadlineBackend(t, host, port, 30*time.Second, 30*time.Second, config.MaxIMAPTransferRate, true)
+
+	// Hold the accept loop after the connection is accepted.
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fx.setAcceptHook(func() {
+		once.Do(func() {
+			close(held)
+			<-release
+		})
+	})
+
+	// An operation connects; the fixture accepts and then holds.
+	operation := make(chan error, 1)
+	go func() {
+		_, err := be.ListMessages(t.Context(), "test", "INBOX", mailbox.ListOptions{Limit: 1})
+		operation <- err
+	}()
+	<-held
+
+	// The shutdown overlaps with the in-flight accept.
+	shutdownDone := make(chan struct{})
+	go func() {
+		fx.shutdown()
+		close(shutdownDone)
+	}()
+
+	// The shutdown cannot complete while the accept loop is held.
+	select {
+	case <-shutdownDone:
+		t.Fatal("the shutdown completed while the accept loop was held")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Releasing the accept loop lets the connection be registered; the
+	// shutdown must still close it.
+	close(release)
+	select {
+	case <-shutdownDone:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the shutdown did not complete")
+	}
+
+	if fx.shutdownTimedOut {
+		t.Error("the fixture did not shut down within its bound")
+	}
+	if alive := fx.aliveGoroutines(); alive != 0 {
+		t.Errorf("the fixture has %d live goroutines after the shutdown, want 0", alive)
+	}
+
+	_ = be.Close()
+	select {
+	case <-operation:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the operation never returned")
+	}
 }
 
 // TestAbortCompletionDoesNotOverwriteTheCommittedOutcome covers the

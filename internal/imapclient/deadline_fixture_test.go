@@ -77,6 +77,11 @@ type deadlineFixture struct {
 	stallAt int
 	// stageHits counts the occurrences of the stage's command.
 	stageHits int
+	// acceptHook is a test seam. It is called by the accept loop after a
+	// connection has been accepted and before it is registered, so a test
+	// can hold the accept loop and make the shutdown overlap with an
+	// in-flight accept.
+	acceptHook func()
 	// varyUIDValidity makes every connection report a different
 	// UIDVALIDITY, so a test can prove that a reconnection observed a
 	// fresh value.
@@ -157,25 +162,35 @@ func (f *deadlineFixture) releaseStage() {
 
 // shutdown releases every resource the fixture owns.
 //
-// It releases the blocking stages, closes the accepted sockets, stops the
-// accept loop and joins it, and then joins the connection goroutines. The
-// join is bounded: a goroutine that does not terminate is recorded, and
-// the fixture's cleanup turns that into a test failure rather than a
-// silent success.
+// The sequence is fixed:
+//
+//  1. the blocking stages are released;
+//  2. the listener is closed, so no further connection is accepted;
+//  3. the accept loop is joined, so it can no longer register a handler;
+//  4. the accepted connections are snapshotted under the mutex;
+//  5. every accepted socket is closed;
+//  6. the handler goroutines are joined.
+//
+// The handler join is bounded: a goroutine that does not terminate is
+// recorded, and the fixture's cleanup turns that into a test failure
+// rather than a silent success.
 func (f *deadlineFixture) shutdown() {
 	f.closeOnce.Do(func() {
 		f.releaseStage()
+
+		// Stop the accept loop and join it before the sockets are
+		// snapshotted. A connection accepted in the meantime is then
+		// registered before the snapshot, so it cannot escape the
+		// close.
+		_ = f.ln.Close()
+		f.acceptWG.Wait()
+
 		f.mu.Lock()
 		conns := append([]net.Conn(nil), f.conns...)
 		f.mu.Unlock()
 		for _, c := range conns {
 			_ = c.Close()
 		}
-		// Stop the accept loop and join it, so that no further
-		// connection goroutine can be added while the shutdown waits for
-		// them.
-		_ = f.ln.Close()
-		f.acceptWG.Wait()
 
 		done := make(chan struct{})
 		go func() {
@@ -190,6 +205,15 @@ func (f *deadlineFixture) shutdown() {
 			f.mu.Unlock()
 		}
 	})
+}
+
+// setAcceptHook installs the accept seam. It must be called before the
+// first connection is accepted. The hook is read under the fixture mutex,
+// so installing it is race-free.
+func (f *deadlineFixture) setAcceptHook(hook func()) {
+	f.mu.Lock()
+	f.acceptHook = hook
+	f.mu.Unlock()
 }
 
 // setStallAt makes the given occurrence of the stage's command block.
@@ -270,6 +294,15 @@ func (f *deadlineFixture) serve() {
 		c, err := f.ln.Accept()
 		if err != nil {
 			return
+		}
+		// The accept seam lets a test hold the accept loop after a
+		// connection has been accepted but before it is registered, so
+		// the shutdown and an in-flight accept overlap.
+		f.mu.Lock()
+		hook := f.acceptHook
+		f.mu.Unlock()
+		if hook != nil {
+			hook()
 		}
 		f.mu.Lock()
 		f.conns = append(f.conns, c)
