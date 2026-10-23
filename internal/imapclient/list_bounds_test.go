@@ -126,14 +126,22 @@ type listFixtureServer struct {
 	// running when the flood lands fails, so the violation is
 	// deterministically part of that operation.
 	//
-	// The flood lands before any mailbox is selected, so the go-imap
-	// reader has no selected mailbox status to update. That matters:
-	// the fork updates the selected status in place when it handles
-	// an unsolicited EXISTS, and the application reads that status
-	// without the client's lock, so a flood that lands after a
-	// selection would expose that pre-existing race. See
-	// docs/THREAT_MODEL.md.
+	// The flood lands before any mailbox is selected, so it remains
+	// part of the EXAMINE command's response stream rather than a
+	// post-selection update. The focused snapshot regression uses
+	// existsBeforeFetch below.
 	floodBeforeExamine int
+
+	// existsBeforeFetch makes the server send one unsolicited EXISTS
+	// with this message count when it receives a FETCH command, before
+	// it answers that command. The selection has completed by then, so
+	// the update exercises the published-snapshot path.
+	existsBeforeFetch uint32
+
+	// byeAfterExamine makes the server send a BYE immediately after
+	// the tagged completion of an EXAMINE command. It exercises the
+	// fork's tagged-completion-versus-BYE ordering.
+	byeAfterExamine bool
 
 	// listMailboxes makes the server answer a LIST command with that
 	// many mailbox responses. The responses are generated and written
@@ -496,8 +504,14 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 			if exists == 0 {
 				exists = len(msgs)
 			}
-			if err := fc.writeLine("* %d EXISTS\r\n* OK [UIDVALIDITY 1] selected\r\n%s OK selected\r\n",
+			if err := fc.writeLine("* %d EXISTS\r\n* OK [UIDVALIDITY 1] selected\r\n%s OK [READ-ONLY] selected\r\n",
 				exists, firstField(line)); err != nil {
+				return
+			}
+			if s.examineBYEAfter() {
+				if err := fc.writeLine("* BYE the server is closing the connection\r\n"); err != nil {
+					return
+				}
 				return
 			}
 		case strings.Contains(upper, "SEARCH"):
@@ -511,6 +525,11 @@ func (s *listFixtureServer) handleConn(conn net.Conn) {
 				return
 			}
 		case strings.Contains(upper, "FETCH"):
+			if exists := s.fetchExistsBefore(); exists > 0 {
+				if err := fc.writeLine("* %d EXISTS\r\n", exists); err != nil {
+					return
+				}
+			}
 			if s.serveFetch(fc, firstField(line)) {
 				// The server was configured to drop the connection
 				// mid-response.
@@ -711,6 +730,22 @@ func (s *listFixtureServer) setExamineFlood(n int) {
 	s.floodBeforeExamine = n
 }
 
+// fetchExistsBefore returns the unsolicited EXISTS count the server
+// sends when it receives a FETCH command.
+func (s *listFixtureServer) fetchExistsBefore() uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.existsBeforeFetch
+}
+
+// examineBYEAfter reports whether the server sends BYE immediately
+// after the tagged completion of an EXAMINE command.
+func (s *listFixtureServer) examineBYEAfter() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.byeAfterExamine
+}
+
 // setSearchUIDs replaces the UID list the server answers a UID SEARCH
 // with.
 func (s *listFixtureServer) setSearchUIDs(uids []uint32) {
@@ -865,6 +900,28 @@ func (s *listFixtureServer) idleFloodNow(n int) {
 	for _, c := range conns {
 		go c.writeFlood(n)
 	}
+}
+
+// sendUnsolicitedExists writes one EXISTS with the given message count
+// on every live connection and reports any write error. The test calls
+// it only after a selection has completed, so the update exercises the
+// published-snapshot path.
+func (s *listFixtureServer) sendUnsolicitedExists(messages uint32) error {
+	s.mu.Lock()
+	conns := make([]*listFixtureConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	if len(conns) == 0 {
+		return errors.New("no live connection")
+	}
+	for _, c := range conns {
+		if err := c.writeLine("* %d EXISTS\r\n", messages); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeFlood writes n unsolicited EXISTS responses.
