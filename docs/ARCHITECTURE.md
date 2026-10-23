@@ -207,9 +207,12 @@ IMAP4rev1 backend. It uses a narrow fork of
   dropped by the response handler and is never counted), the total
   bytes transferred or buffered, the allocation for a single
   oversized envelope, or the wall-clock duration of the call. Those
-  residuals are tracked in `docs/THREAT_MODEL.md` §3.1. Explicit
-  IMAP command timeouts are a separate control and remain
-  independent of this budget.
+  were the residuals of the scan budget alone: the aggregate and
+  decoder limits described below now bound the inbound bytes and the
+  cost of one response, and the remaining residuals are tracked in
+  `docs/THREAT_MODEL.md` §3.1. The wall-clock duration is not bounded
+  by any of those limits — a command deadline is an optional control
+  that the production construction path does not set.
 
   The in-flight FETCH is always completed before the connection is
   closed, because the go-imap client does not serialise writes to
@@ -277,21 +280,28 @@ IMAP4rev1 backend. It uses a narrow fork of
 
   The decoder's limits are per response. They do not bound the number
   of responses a server sends on one connection, the server-side
-  search computation, or the duration of an operation.
-- **Bounded aggregate IMAP work.** A per-response limit cannot bound
-  the *total* protocol work: a server that sends an unlimited sequence
-  of individually valid responses consumes an unlimited number of input
-  bytes, parsing work, heap allocations and CPU time in the client's
-  reader goroutine. Measured on this fork, the reader parses and
-  dispatches about 67 000 unsolicited responses per second, at roughly
-  200 bytes of allocation each, and it does so for as long as the
-  server keeps sending.
+  search computation, or the duration of an operation; the aggregate
+  budget below bounds the inbound bytes within one operation, and the
+  duration is bounded by no current control.
+- **Bounded aggregate IMAP work.** Historically, a per-response limit
+  could not bound the *total* protocol work: a server that sent an
+  unlimited sequence of individually valid responses consumed an
+  unlimited number of input bytes, parsing work, heap allocations and
+  CPU time in the client's reader goroutine. Measured on that fork, the
+  reader parses and dispatches about 67 000 unsolicited responses per
+  second, at roughly 200 bytes of allocation each, and it did so for as
+  long as the server kept sending. Within one operation that sequence is
+  now bounded by the aggregate budget below.
 
   The **server data budget** closes that gap at the transport layer.
-  It wraps the socket *below* the TLS layer, so it accounts every byte
-  the server sends, in both TLS modes and after a STARTTLS upgrade.
-  The check happens before the bytes reach the reader, so an
-  over-budget response is never parsed and never allocated: this is a
+  It wraps the socket *below* the TLS layer, so it accounts the bytes
+  the client consumes from the socket — TLS record overhead included —
+  in both TLS modes and after a STARTTLS upgrade. It does not control
+  how many bytes a remote server transmits; it bounds what the client
+  reads, and therefore what reaches the reader. Ordinary reads are
+  capped to the remaining allowance of the window in force, and a read
+  that no longer fits returns no payload bytes, so an over-budget
+  response is never parsed and never allocated: this is a
   pre-allocation bound, not a post-parse check.
 
   The budget is armed at the start of each backend operation, with an
@@ -412,8 +422,10 @@ IMAP4rev1 backend. It uses a narrow fork of
   number of legitimate operations, each of which is itself bounded. It
   does not bound the server-side search computation, the number of
   responses a server sends between the operations that are counted, or
-  the duration of an operation — that is the explicit per-command IMAP
-  timeout's job, and the two are complementary.
+  the duration of an operation. The byte budget imposes no absolute
+  duration limit of its own; the per-command IMAP timeout is an
+  optional control that the production construction path does not set,
+  so no command deadline is in force today.
 
   The search is otherwise unchanged: one logical `UID SEARCH` with
   the same AND/OR semantics, the same criteria, the same date

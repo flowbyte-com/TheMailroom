@@ -316,8 +316,9 @@ now has an aggregate protocol-byte limit of
 its own (4 MiB), where it had none; the final mailbox-count policy is
 deferred to the enumeration hardening work. Neither limit bounds the
 work the server does to evaluate a search, nor how long an operation
-may take — the explicit command timeout is the separate control for
-that.
+may take: the byte budget imposes no absolute duration limit, and the
+optional per-command timeout is not set by the production configuration,
+so no command deadline is in force today.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no

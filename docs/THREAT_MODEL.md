@@ -378,18 +378,25 @@ These are recorded, not silently accepted as production-grade behaviour:
   which is deliberately not the application's scan-budget refusal
   `mailbox.ErrSearchTooLarge`.
 
-  The per-response limit does **not** bound the aggregate: a server
-  that sends an unlimited sequence of individually valid responses
-  still consumes an unlimited number of input bytes, parsing work,
-  allocations and CPU time in the reader goroutine. The **server data
-  budget** closes that gap at the transport layer: it wraps the socket
-  below the TLS layer, so it accounts every byte the server sends in
-  both TLS modes and after a STARTTLS upgrade, and it refuses to read
-  past the allowance, so an over-budget response is never parsed and
-  never allocated. The budget is armed per backend operation with an
-  allowance derived from the account's configuration, so it is
-  cumulative across the operation's commands and across the
-  unsolicited responses that arrive while they run.
+  **Historical:** the per-response limit did **not** bound the
+  aggregate. A server that sent an unlimited sequence of individually
+  valid responses consumed an unlimited number of input bytes, parsing
+  work, allocations and CPU time in the reader goroutine. That was the
+  attack the aggregate budget was built against. Within one operation
+  the inbound bytes are now bounded, so such a sequence is no longer
+  unlimited. The **server data budget** closes that gap at the
+  transport layer: it wraps the socket below the TLS layer, so it
+  accounts the bytes the client consumes from the socket — TLS record
+  overhead included — in both TLS modes and after a STARTTLS upgrade.
+  It does not control how many bytes a remote server transmits; it
+  bounds what the client reads, and therefore what it parses and
+  allocates. The budget is armed per backend operation with a
+  cumulative allowance derived from the account's configuration, so it
+  covers the operation's commands and the unsolicited responses that
+  arrive while they run. Ordinary reads are capped to the remaining
+  allowance, and a read that no longer fits it returns no payload
+  bytes, so an over-budget response is never parsed and never
+  allocated.
 
   The accounting is coordinated rather than approximate. One mutex
   governs the byte counter, the window in force and the violation
@@ -406,10 +413,11 @@ These are recorded, not silently accepted as production-grade behaviour:
   The boundary is exact in both directions. A connection that received
   *exactly* the permitted amount and is then silent is not declared to
   have received excess data: the reader waits, with a one-byte probe
-  that distinguishes silence from excess, and the first byte that
-  arrives *is* the violation. A read that no longer fits the allowance
-  returns no payload bytes at all, so a partially parsed response is
-  never delivered.
+  that distinguishes silence from excess. That probe may consume one
+  byte beyond the allowance, and the first byte that arrives *is* the
+  violation. A read that no longer fits the allowance returns no
+  payload bytes at all, so a partially parsed response is never
+  delivered.
 
   The violation record belongs to the connection. It survives every
   window transition and is cleared only when the connection is
@@ -422,8 +430,21 @@ These are recorded, not silently accepted as production-grade behaviour:
   operations, and therefore the total work over a long-lived
   connection, though each operation is itself bounded; the work the
   *server* does to evaluate the search criteria; and the wall-clock
-  duration of an operation, which is the explicit per-command IMAP
-  timeout's separate guarantee.
+  duration of an operation. The byte budget imposes no absolute
+  duration limit of its own, so a server that trickles bytes slowly can
+  hold an operation open for as long as it chooses.
+
+  **Command and operation deadlines are a separate and currently
+  optional control.** The IMAP backend exposes an optional
+  `CommandTimeout` that bounds how long one command may take; zero
+  means the client's default, which is no timeout at all. The
+  production construction path (`internal/accounts/registry.go`) builds
+  the backend without setting it, so no command deadline is in force
+  today, and the only time bound on the IMAP path is the dial timeout.
+  A command and operation deadline policy is deferred to Phase 3 PR 6,
+  which addresses it separately. Until then, a duration bound must not
+  be assumed: a configured timeout is an available control, not an
+  unconditional guarantee.
 
   **Mailbox enumeration is a resource-policy change.** The enumeration
   now has an aggregate protocol-byte allowance of its own (4 MiB),
@@ -445,14 +466,25 @@ These are recorded, not silently accepted as production-grade behaviour:
     never parses;
   - the responses the go-imap fork discards internally — a FETCH
     response without a UID is dropped by the response handler and is
-    never counted, so a server can make the client discard an unbounded
-    number of such responses within the budget;
+    never counted, so the scan budget alone cannot see how many such
+    responses the server sent;
   - the total bytes transferred or buffered, and the buffer growth of
     the connection;
   - the allocation for a single oversized envelope (the literal-size cap
     of T4 bounds that one, but it is a per-envelope bound, not a
     per-listing one);
   - the wall-clock duration of the call.
+
+  **That list describes the scan budget alone, and it records the state
+  before the aggregate protections existed.** Within one operation the
+  inbound bytes are now bounded by the aggregate server data budget, so
+  a flood of individually valid responses, and a flood of UID-less
+  FETCH responses the fork discards, are bounded by the bytes the
+  client consumes instead of remaining unlimited; the decoder's
+  per-response limits bound what a single response may cost. The
+  aggregate budget does not bound the server-side search computation,
+  the number of operations over a connection's lifetime, or the
+  wall-clock duration of an operation.
 
   The abort that stops the transfer is a socket close, so it stops the
   *delivery*; it does not bound what the server had already produced
@@ -464,15 +496,16 @@ These are recorded, not silently accepted as production-grade behaviour:
   implemented.** Phase 3 PR 4 added the decoder-level per-response
   limits, so the reader cannot materialise an unbounded response, and
   Phase 3 PR 5 added the transport-level aggregate server data budget,
-  which counts every byte the server sends and refuses to read past the
-  allowance, so the raw responses the client never parses — including
-  the ones the fork's response handler discards — are bounded too. The
-  list scan budget is consequently the application-level layer of a
-  three-layer defence rather than the only one. The per-envelope
-  allocation remains bounded by the literal-size cap of T4 rather than
-  by the listing budget, and the wall-clock duration of the call remains
-  the explicit per-command IMAP timeout's separate guarantee,
-  independent of these budgets.
+  which caps how many bytes the client may consume from the socket
+  within one operation or idle window, so the raw responses the client
+  never parses — including the ones the fork's response handler
+  discards — are bounded too. The list scan budget is consequently the
+  application-level layer of a three-layer defence rather than the
+  only one. The per-envelope allocation remains bounded by the
+  literal-size cap of T4 rather than by the listing budget, and the
+  wall-clock duration of the call is not bounded by any of these
+  budgets; a command deadline is an optional control that is not
+  configured by default.
 - **Credential-command trustworthiness.** Bounding the IMAP and SMTP
   credential-command output bounds TheMailroom's memory use and keeps the
   command's output out of errors and logs. It does not make the command
