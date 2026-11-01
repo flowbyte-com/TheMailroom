@@ -273,6 +273,11 @@ type Backend struct {
 	// operation. It is nil in production.
 	registerHook func(op *opRun)
 
+	// selectedHook is a test seam. It is called by setSelected before
+	// the state lock is taken, so a test can pause a real operation at
+	// the selection write. It is nil in production.
+	selectedHook func()
+
 	// dialContext is a test seam for the TCP dial. It is nil in
 	// production, where the configured dialer is used.
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -426,16 +431,14 @@ func (b *Backend) shutdown() {
 	}
 
 	// Drop the session. The client, its socket, its budget and the
-	// selection metadata go together.
+	// selection metadata go together. The state mutex is released before
+	// the socket is closed: a close can block, and no caller may be made
+	// to wait for it while holding the state lock.
 	b.mu.Lock()
-	b.client = nil
-	b.budget = nil
-	b.deadlines = nil
 	b.currentOp = nil
-	b.selectedMailbox = ""
-	b.selectedValidity = 0
-	b.releaseConn()
+	conn, wrapper := b.detachSessionLocked()
 	b.mu.Unlock()
+	releaseDetachedSession(conn, wrapper)
 
 	// Every Close caller is released only now, with the sockets closed,
 	// the watcher terminated and the connection metadata discarded.
@@ -1385,13 +1388,16 @@ func (b *Backend) ensureConnection(opCtx context.Context, op *opRun, kind opKind
 	c := b.client
 	needDial := c == nil || isLoggedOut(c)
 	var cause error
+	var staleConn net.Conn
+	var staleWrapper *deadlineConn
 	if needDial {
 		// The previous session is over, so its client, socket, budget
 		// and selection metadata are discarded together, before the
 		// replacement connection is attempted.
-		cause = b.discardLocked()
+		cause, staleConn, staleWrapper = b.discardLocked()
 	}
 	b.mu.Unlock()
+	releaseDetachedSession(staleConn, staleWrapper)
 	if cause != nil {
 		// The connection was invalidated by an aggregate-limit
 		// violation while it was idle. The violation is reported by
@@ -1581,13 +1587,9 @@ func (b *Backend) releaseSession() {
 // a connection that is already unusable.
 func (b *Backend) discardSession() {
 	b.mu.Lock()
-	b.client = nil
-	b.budget = nil
-	b.deadlines = nil
-	b.selectedMailbox = ""
-	b.selectedValidity = 0
-	b.releaseConn()
+	conn, wrapper := b.detachSessionLocked()
 	b.mu.Unlock()
+	releaseDetachedSession(conn, wrapper)
 }
 
 // discardLocked drops the current connection.
@@ -1599,46 +1601,56 @@ func (b *Backend) discardSession() {
 // belongs to a connection that no longer exists.
 //
 // It reports the budget violation that ended the session, if there was
-// one. The caller decides whether to report it: the operation that
-// ended the session has already reported it, and only a violation that
-// nobody has reported yet - an idle one - must still be surfaced.
+// one, together with the detached socket and deadline wrapper. The
+// caller must release the returned session after dropping the state
+// mutex: closing a socket or applying a deadline can block, and the
+// state lock must not be held across either operation.
 //
 // It writes nothing to the connection: closing the socket is enough to
 // end a session whose command has already completed.
 //
 // Called under the per-account mutex.
-func (b *Backend) discardLocked() error {
+func (b *Backend) discardLocked() (error, net.Conn, *deadlineConn) {
 	var cause error
 	if b.budget != nil {
 		cause = b.budget.violationErr()
 		b.budget.clearViolation()
 	}
-	if b.deadlines != nil {
-		// The connection is being dropped, so it carries no deadline.
-		b.deadlines.finishOperation()
-		b.deadlines = nil
-	}
-	b.releaseConn()
-	b.client = nil
-	b.budget = nil
-	b.selectedMailbox = ""
-	b.selectedValidity = 0
-	return cause
+	conn, wrapper := b.detachSessionLocked()
+	return cause, conn, wrapper
 }
 
-// releaseConn closes the socket of the current client and forgets it.
+// detachSessionLocked removes the connection state from the backend and
+// returns the socket and deadline wrapper that belong to it.
 //
-// Closing a socket writes nothing to the connection, so it is safe
-// even when the connection is already broken. It is the same operation
-// the abort path uses, minus the semantics: the abort path keeps the
-// client in place until the operation returns, whereas releaseConn
-// accompanies the client being discarded.
+// Ownership transfers to the caller: once the fields are cleared, no
+// operation, cancellation or shutdown can reach the returned references.
+// That is what makes snapshot-and-close safe: the caller can release the
+// socket after dropping the state mutex, without risking the closing of
+// a replacement connection.
 //
 // Called under the per-account mutex.
-func (b *Backend) releaseConn() {
-	if b.conn != nil {
-		_ = b.conn.Close()
-		b.conn = nil
+func (b *Backend) detachSessionLocked() (net.Conn, *deadlineConn) {
+	conn := b.conn
+	wrapper := b.deadlines
+	b.client = nil
+	b.budget = nil
+	b.deadlines = nil
+	b.conn = nil
+	b.selectedMailbox = ""
+	b.selectedValidity = 0
+	return conn, wrapper
+}
+
+// releaseDetachedSession releases a session detached by
+// detachSessionLocked. It must be called without the state mutex held:
+// both the deadline update and the socket close can block.
+func releaseDetachedSession(conn net.Conn, wrapper *deadlineConn) {
+	if wrapper != nil {
+		wrapper.finishOperation()
+	}
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 
@@ -1803,10 +1815,17 @@ func (b *Backend) scanBudget() int {
 // withClient discards the client and its socket together and the next
 // operation dials a fresh connection.
 //
-// Called under the per-account mutex.
+// The socket reference is taken under the state mutex and closed after it
+// is released. The current operation owns the connection: the per-account
+// gate prevents another operation from replacing it before this callback
+// returns, and shutdown clears the reference under the same mutex. A close
+// may block, so it must not hold the state mutex.
 func (b *Backend) abortConn() {
-	if b.conn != nil {
-		_ = b.conn.Close()
+	b.mu.Lock()
+	conn := b.conn
+	b.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 
@@ -2031,14 +2050,20 @@ func listScanBudgetExceededError(mbx string, budget int) error {
 }
 
 // setSelected records the mailbox we have just EXAMINEd and its
-// UIDVALIDITY for later reporting. Called under the per-account
-// mutex.
+// UIDVALIDITY for later reporting. The fields are protected by the same
+// state mutex that SelectedUIDValidity, shutdown and session discard use;
+// the caller must not already hold it.
 func (b *Backend) setSelected(name string, validity uint32) error {
 	if validity == 0 {
 		return mailbox.ErrUIDMissing
 	}
+	if b.selectedHook != nil {
+		b.selectedHook()
+	}
+	b.mu.Lock()
 	b.selectedMailbox = name
 	b.selectedValidity = validity
+	b.mu.Unlock()
 	return nil
 }
 
