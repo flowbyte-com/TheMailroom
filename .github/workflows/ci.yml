@@ -67,3 +67,22 @@ jobs:
         run: GOOS=darwin GOARCH=arm64 go build -o bin/themailroom-darwin-arm64 ./cmd/themailroom
       - name: Build windows/amd64
         run: GOOS=windows GOARCH=amd64 go build -o bin/themailroom-windows-amd64.exe ./cmd/themailroom
+
+  full-test-suite:
+    # This job is the required status check on main. It must run even when a
+    # dependency fails, is cancelled or is skipped, so that the required check
+    # reports failure rather than disappearing.
+    name: Full test suite
+    needs: [test, cross]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every required job succeeded
+        run: |
+          echo "test result:  ${{ needs.test.result }}"
+          echo "cross result: ${{ needs.cross.result }}"
+          if [ "${{ needs.test.result }}" != "success" ] || \
+             [ "${{ needs.cross.result }}" != "success" ]; then
+            echo "::error::One or more required jobs did not succeed"
+            exit 1
+          fi
