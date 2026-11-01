@@ -103,11 +103,11 @@ Phase 2.3 PR 1 prepared the configuration, recipient-policy, and
 confined attachment-resolution foundations; PR 2 added the bounded MIME
 composer; PR 3 added the authenticated SMTP sender.
 
-**Phase 3 (Hardening)** covers the remaining production gates. This
-change adds bounded inbound MCP request framing, bounds the IMAP
-credential command, and bounds the IMAP list workload; bounded IMAP
-search workloads, explicit IMAP command timeouts, `has_attachments` for
-IMAP summaries, response-size limits, fuzz tests, installation docs, and a
+**Phase 3 (Hardening)** covers the remaining production gates. Phase 3
+PRs 1-5 and this change add bounded inbound MCP request framing, bounded
+IMAP credential commands, bounded list and search workloads, and finite
+IMAP command and operation deadlines. `has_attachments` for IMAP
+summaries, response-size limits, fuzz tests, installation docs, and a
 cross-platform release remain Phase 3 work. The Purelymail smoke test
 completed on 2026-10-21; other hardening items remain Phase 3 work. The
 smoke test is not production certification.
@@ -249,9 +249,39 @@ limits:
   max_attachment_bytes: 6291456  # decoded bytes per local attachment
   max_total_attachment_bytes: 26214400
   max_list_scan_messages: 10000 # messages one list or search operation may fetch
+imap:
+  operation_allowance: 30s       # fixed part of an operation's time budget
+  control_command_timeout: 30s   # ceiling of one control command
+  transfer_rate: 65536           # assumed minimum inbound rate, bytes/second
+  max_operation_timeout: 900s    # cap on the derived operation deadline
 attachment_send_paths:
   - /srv/themailroom/outbound    # absolute, existing directory
 ```
+
+The IMAP deadlines are finite and always active; zero means "use the
+default", and a value outside the accepted range is rejected at start-up
+rather than silently clamped. `imap.operation_allowance` (default 30 s,
+accepted range 1 s to 300 s) is the fixed part of an operation's time
+budget and is also the time an operation may wait for the account.
+`imap.control_command_timeout` (default 30 s, range 1 s to 120 s) bounds
+one control command - LOGIN, EXAMINE, CAPABILITY or NOOP.
+`imap.transfer_rate` (default 65 536 bytes per second, range 4 096 to
+16 777 216) is the assumed minimum sustainable inbound transfer rate; it
+is how the time budget of a data-transferring command is derived from
+that command's byte allowance, so the deadline follows the account's own
+limits instead of a fixed number. `imap.max_operation_timeout` (default
+900 s, range 60 s to 3 600 s) caps the derived end-to-end operation
+deadline.
+
+The wait for the account is bounded separately by
+`imap.operation_allowance`: an operation that cannot acquire the account
+within it fails with the `ImapTimeout` error code instead of queueing
+indefinitely behind the operation in progress. The operation deadline
+starts when the account is acquired and covers the connection
+establishment, the authentication and every command of the operation. A
+cancelled operation is reported with the `Canceled` code. After a
+successful operation the connection carries no deadline, so it can be
+reused; the idle aggregate byte budget remains the idle protection.
 
 `list_messages` is ordered by internal date, newest first. IMAP UIDs
 ascend but are unrelated to internal dates, so an exact page can only be
@@ -314,11 +344,11 @@ between operations is reported as an idle-connection violation; one
 detected during a small active operation is not. Mailbox enumeration
 now has an aggregate protocol-byte limit of
 its own (4 MiB), where it had none; the final mailbox-count policy is
-deferred to the enumeration hardening work. Neither limit bounds the
-work the server does to evaluate a search, nor how long an operation
-may take: the byte budget imposes no absolute duration limit, and the
-optional per-command timeout is not set by the production configuration,
-so no command deadline is in force today.
+deferred to the enumeration hardening work. Neither byte limit bounds the
+work the server does to evaluate a search, nor the duration of the
+client's local CPU work. The IMAP operation and command deadlines are a
+separate, always-active time bound: they bound the network wait, not the
+local MIME parse or summary assembly. See the deadline settings above.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no

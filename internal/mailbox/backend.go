@@ -255,4 +255,22 @@ var (
 	ErrTotalAttachmentTooLarge  = errors.New("mailbox: total attachment size too large")
 	ErrTooManyAttachments       = errors.New("mailbox: too many attachments")
 	ErrMalformed                = errors.New("mailbox: malformed message")
+
+	// ErrTimeout is returned when an operation exceeded its deadline.
+	//
+	// It covers the finite end-to-end operation deadline, the per-command
+	// ceiling and the account's queue allowance. The three are
+	// distinguished by the message that wraps this error, never by the
+	// proximity of a failure to an expected deadline.
+	//
+	// It is distinct from ErrServerDataBudgetExceeded, which is a
+	// volume bound and keeps its own classification.
+	ErrTimeout = errors.New("mailbox: the IMAP operation timed out")
+	// ErrCanceled is returned when the caller's context cancelled the
+	// operation. It is distinct from ErrTimeout: a cancelled operation
+	// was not slow, it was withdrawn.
+	ErrCanceled = errors.New("mailbox: the IMAP operation was canceled")
+	// ErrBackendClosed is returned when the backend was closed while an
+	// operation was in progress or waiting to start.
+	ErrBackendClosed = errors.New("mailbox: the IMAP backend is closed")
 )

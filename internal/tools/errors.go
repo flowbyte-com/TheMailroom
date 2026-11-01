@@ -53,6 +53,16 @@ const (
 	codeSmtpConnectionFailed = "SmtpConnectionFailed"
 	codeSmtpTimeout          = "SmtpTimeout"
 	codeSmtpAmbiguousFailure = "SmtpAmbiguousFailure"
+
+	// codeImapTimeout is returned when an IMAP operation exceeded its
+	// deadline: the end-to-end operation deadline, a per-command ceiling
+	// or the account's queue allowance. It is distinct from
+	// codeLimitExceeded, which is a volume bound.
+	codeImapTimeout = "ImapTimeout"
+	// codeCanceled is returned when the caller's context withdrew the
+	// request. It is distinct from codeImapTimeout: a cancelled
+	// operation was not slow, it was withdrawn.
+	codeCanceled = "Canceled"
 )
 
 // TypedError is returned by tool handlers. The MCP layer treats it as a
@@ -155,6 +165,17 @@ func mapError(err error) *TypedError {
 		return typed(codeAttachmentTooLarge, "total attachment size exceeds limit", nil)
 	case errors.Is(err, mailbox.ErrMalformed):
 		return typed(codeMalformed, "malformed message", nil)
+
+	case errors.Is(err, mailbox.ErrTimeout):
+		// The message carries the phase that expired: the queue
+		// allowance, a control command or the end-to-end operation
+		// deadline. It is fixed text produced by the backend and never
+		// carries content from the server.
+		return typed(codeImapTimeout, err.Error(), nil)
+	case errors.Is(err, mailbox.ErrCanceled):
+		return typed(codeCanceled, "the IMAP operation was canceled", nil)
+	case errors.Is(err, mailbox.ErrBackendClosed):
+		return typed(codeBackendError, "the IMAP backend is closed", nil)
 
 	case errors.Is(err, recipients.ErrRecipientNotAllowed):
 		return typed(codeRecipientNotAllowed, "recipient is not allowed by this account's policy", nil)
