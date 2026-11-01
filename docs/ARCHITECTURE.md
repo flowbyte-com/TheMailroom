@@ -423,9 +423,10 @@ IMAP4rev1 backend. It uses a narrow fork of
   does not bound the server-side search computation, the number of
   responses a server sends between the operations that are counted, or
   the duration of an operation. The byte budget imposes no absolute
-  duration limit of its own; the per-command IMAP timeout is an
-  optional control that the production construction path does not set,
-  so no command deadline is in force today.
+  duration limit of its own. The IMAP operation and command deadlines
+  are a separate, always-active time bound (see "Finite deadlines and
+  interruptible cancellation" below); they bound the network wait, not
+  the local CPU phase.
 
   The search is otherwise unchanged: one logical `UID SEARCH` with
   the same AND/OR semantics, the same criteria, the same date

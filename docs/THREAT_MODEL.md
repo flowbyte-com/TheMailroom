@@ -543,9 +543,10 @@ These are recorded, not silently accepted as production-grade behaviour:
   application-level layer of a three-layer defence rather than the
   only one. The per-envelope allocation remains bounded by the
   literal-size cap of T4 rather than by the listing budget, and the
-  wall-clock duration of the call is not bounded by any of these
-  budgets; a command deadline is an optional control that is not
-  configured by default.
+  wall-clock duration of the local CPU phase is not bounded by any of
+  these byte budgets. The separate IMAP operation and command deadlines
+  bound the network wait, not local MIME parsing or summary assembly;
+  see T7.
 - **A deadline does not preempt local CPU work.** The byte budget bounds
   what the client reads; the deadline bounds how long the client waits.
   Neither bounds local computation: the MIME parser is a third-party

@@ -103,11 +103,11 @@ Phase 2.3 PR 1 prepared the configuration, recipient-policy, and
 confined attachment-resolution foundations; PR 2 added the bounded MIME
 composer; PR 3 added the authenticated SMTP sender.
 
-**Phase 3 (Hardening)** covers the remaining production gates. This
-change adds bounded inbound MCP request framing, bounds the IMAP
-credential command, and bounds the IMAP list workload; bounded IMAP
-search workloads, explicit IMAP command timeouts, `has_attachments` for
-IMAP summaries, response-size limits, fuzz tests, installation docs, and a
+**Phase 3 (Hardening)** covers the remaining production gates. Phase 3
+PRs 1-5 and this change add bounded inbound MCP request framing, bounded
+IMAP credential commands, bounded list and search workloads, and finite
+IMAP command and operation deadlines. `has_attachments` for IMAP
+summaries, response-size limits, fuzz tests, installation docs, and a
 cross-platform release remain Phase 3 work. The Purelymail smoke test
 completed on 2026-10-21; other hardening items remain Phase 3 work. The
 smoke test is not production certification.
@@ -344,11 +344,11 @@ between operations is reported as an idle-connection violation; one
 detected during a small active operation is not. Mailbox enumeration
 now has an aggregate protocol-byte limit of
 its own (4 MiB), where it had none; the final mailbox-count policy is
-deferred to the enumeration hardening work. Neither limit bounds the
-work the server does to evaluate a search, nor how long an operation
-may take: the byte budget imposes no absolute duration limit, and the
-optional per-command timeout is not set by the production configuration,
-so no command deadline is in force today.
+deferred to the enumeration hardening work. Neither byte limit bounds the
+work the server does to evaluate a search, nor the duration of the
+client's local CPU work. The IMAP operation and command deadlines are a
+separate, always-active time bound: they bound the network wait, not the
+local MIME parse or summary assembly. See the deadline settings above.
 
 Recipient matching is exact after RFC 5322 parsing: local-part case is
 preserved and significant, while domain case is not. There are no
