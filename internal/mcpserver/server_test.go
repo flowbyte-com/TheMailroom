@@ -78,6 +78,53 @@ accounts:
 	}
 }
 
+func TestNewMaxResponseBytes(t *testing.T) {
+	messages := filepath.Join(repoRoot(t), "testdata", "messages")
+	yaml := `
+server:
+  log_level: error
+accounts:
+  - id: full
+    backend: memory
+    email: full@example.test
+    mailbox_root: __MBX__
+    permissions: [read]
+`
+	yaml = strings.ReplaceAll(yaml, "__MBX__", messages)
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	reg, err := accounts.New(cfg)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	defer reg.Close()
+
+	srv, err := New(reg, Options{MaxResponseBytes: 1024})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if srv.maxResponseBytes != 1024 {
+		t.Errorf("maxResponseBytes = %d, want 1024", srv.maxResponseBytes)
+	}
+
+	srv, err = New(reg, Options{})
+	if err != nil {
+		t.Fatalf("New default: %v", err)
+	}
+	if srv.maxResponseBytes != config.DefaultMaxResponseBytes {
+		t.Errorf("default maxResponseBytes = %d, want %d", srv.maxResponseBytes, config.DefaultMaxResponseBytes)
+	}
+
+	if _, err := New(reg, Options{MaxResponseBytes: -1}); err == nil {
+		t.Error("New accepted negative MaxResponseBytes")
+	}
+	if _, err := New(reg, Options{MaxResponseBytes: config.MaxResponseBytesLimit + 1}); err == nil {
+		t.Error("New accepted MaxResponseBytes above the limit")
+	}
+}
+
 func TestNewAndServe(t *testing.T) {
 	messages := filepath.Join(repoRoot(t), "testdata", "messages")
 	empty := t.TempDir()

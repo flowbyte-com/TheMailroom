@@ -28,8 +28,16 @@ type testEnv struct {
 
 func setupEnv(t *testing.T, _ string) *testEnv {
 	t.Helper()
-	repoRoot := findRepoRoot(t)
-	messages := filepath.Join(repoRoot, "testdata", "messages")
+	return setupEnvWithOptions(t)
+}
+
+func setupEnvWithOptions(t *testing.T, opts ...RegisterOption) *testEnv {
+	t.Helper()
+	return setupEnvWithMailbox(t, filepath.Join(findRepoRoot(t), "testdata", "messages"), opts...)
+}
+
+func setupEnvWithMailbox(t *testing.T, messages string, opts ...RegisterOption) *testEnv {
+	t.Helper()
 	empty := t.TempDir()
 
 	yaml := `
@@ -60,7 +68,7 @@ accounts:
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
-	Register(server, reg)
+	Register(server, reg, opts...)
 
 	// In-memory transport pair.
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()

@@ -34,14 +34,19 @@ type Options struct {
 	// decoding. The count excludes LF or CRLF framing. Zero selects the
 	// configuration default.
 	MaxRequestBytes int
+
+	// MaxResponseBytes caps one successful tool result before it is
+	// returned to the MCP layer. Zero selects the configuration default.
+	MaxResponseBytes int
 }
 
 // Server is the assembled MCP server.
 type Server struct {
-	mcp             *mcp.Server
-	registry        *accounts.Registry
-	logger          *slog.Logger
-	maxRequestBytes int
+	mcp              *mcp.Server
+	registry         *accounts.Registry
+	logger           *slog.Logger
+	maxRequestBytes  int
+	maxResponseBytes int
 }
 
 // New constructs a Server bound to the given account registry.
@@ -64,6 +69,15 @@ func New(reg *accounts.Registry, opts Options) (*Server, error) {
 			opts.MaxRequestBytes, config.MaxRequestBytesLimit,
 		)
 	}
+	if opts.MaxResponseBytes == 0 {
+		opts.MaxResponseBytes = config.DefaultMaxResponseBytes
+	}
+	if opts.MaxResponseBytes < 0 || opts.MaxResponseBytes > config.MaxResponseBytesLimit {
+		return nil, fmt.Errorf(
+			"mcpserver: max_response_bytes %d invalid; want between 1 and %d bytes",
+			opts.MaxResponseBytes, config.MaxResponseBytesLimit,
+		)
+	}
 
 	mcpImpl := &mcp.Implementation{
 		Name:    opts.Implementation,
@@ -74,13 +88,17 @@ func New(reg *accounts.Registry, opts Options) (*Server, error) {
 	}
 	mcpServer := mcp.NewServer(mcpImpl, serverOpts)
 
-	tools.Register(mcpServer, reg, tools.WithLogger(opts.Logger))
+	tools.Register(mcpServer, reg,
+		tools.WithLogger(opts.Logger),
+		tools.WithMaxResponseBytes(opts.MaxResponseBytes),
+	)
 
 	return &Server{
-		mcp:             mcpServer,
-		registry:        reg,
-		logger:          opts.Logger,
-		maxRequestBytes: opts.MaxRequestBytes,
+		mcp:              mcpServer,
+		registry:         reg,
+		logger:           opts.Logger,
+		maxRequestBytes:  opts.MaxRequestBytes,
+		maxResponseBytes: opts.MaxResponseBytes,
 	}, nil
 }
 
@@ -96,6 +114,7 @@ func (s *Server) run(ctx context.Context, transport mcp.Transport) error {
 		"commit", version.Commit,
 		"accounts", len(s.registry.All()),
 		"max_request_bytes", s.maxRequestBytes,
+		"max_response_bytes", s.maxResponseBytes,
 	)
 	return s.mcp.Run(ctx, transport)
 }
