@@ -135,6 +135,72 @@ func TestFitReadMessageAggregateTruncation(t *testing.T) {
 	}
 }
 
+func TestFitReadMessageZeroBodyExactBoundary(t *testing.T) {
+	output := &ReadMessageResult{AccountID: "a", Mailbox: "INBOX"}
+	size, err := responseSize(output)
+	if err != nil {
+		t.Fatalf("responseSize: %v", err)
+	}
+	if err := fitReadMessage(output, size); err != nil {
+		t.Fatalf("fitReadMessage: %v", err)
+	}
+	if output.Truncated {
+		t.Error("zero-body exact boundary was marked truncated")
+	}
+	final, err := responseSize(output)
+	if err != nil {
+		t.Fatalf("responseSize: %v", err)
+	}
+	if final > size {
+		t.Errorf("final size = %d, want at most %d", final, size)
+	}
+}
+
+func TestFitReadMessageTruncatedCandidateNearLimit(t *testing.T) {
+	output := &ReadMessageResult{
+		AccountID: "a",
+		Text:      strings.Repeat("a", 2000),
+	}
+
+	// The first fit iteration uses a body budget of 1500. Measure that
+	// exact candidate both before and after the flag is set, then choose
+	// a limit where the un-flagged copy fits but the final flagged copy
+	// would not. The final result must still respect the limit.
+	candidate := *output
+	truncateMessageBodies(&candidate, 1500)
+	candidate.Truncated = false
+	withoutFlag, err := responseSize(&candidate)
+	if err != nil {
+		t.Fatalf("responseSize: %v", err)
+	}
+	candidate.Truncated = true
+	withFlag, err := responseSize(&candidate)
+	if err != nil {
+		t.Fatalf("responseSize: %v", err)
+	}
+	if withFlag <= withoutFlag {
+		t.Fatalf("truncation flag did not add bytes: without=%d with=%d", withoutFlag, withFlag)
+	}
+	limit := withFlag - 1
+	if withoutFlag > limit {
+		t.Skipf("candidate boundary is not separated: without=%d limit=%d", withoutFlag, limit)
+	}
+
+	if err := fitReadMessage(output, limit); err != nil {
+		t.Fatalf("fitReadMessage: %v", err)
+	}
+	if !output.Truncated {
+		t.Error("fitReadMessage did not mark the result truncated")
+	}
+	final, err := responseSize(output)
+	if err != nil {
+		t.Fatalf("responseSize: %v", err)
+	}
+	if final > limit {
+		t.Errorf("final size = %d, exceeds limit %d", final, limit)
+	}
+}
+
 func TestFitReadMessageExactBoundaryIsUnchanged(t *testing.T) {
 	output := &ReadMessageResult{
 		AccountID:   "a",

@@ -35,8 +35,10 @@ type Options struct {
 	// configuration default.
 	MaxRequestBytes int
 
-	// MaxResponseBytes caps one successful tool result before it is
-	// returned to the MCP layer. Zero selects the configuration default.
+	// MaxResponseBytes caps one successful tool-result payload before it
+	// is returned to the MCP layer. It does not bound the client-controlled
+	// JSON-RPC request ID or transport framing. Zero selects the
+	// configuration default.
 	MaxResponseBytes int
 }
 

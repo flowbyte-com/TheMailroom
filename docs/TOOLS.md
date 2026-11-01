@@ -272,11 +272,15 @@ hard maximum 128 MiB; LF/CRLF framing excluded). It is a per-frame
 allocation boundary, not an aggregate process-memory limit: the SDK
 handler queue, concurrent in-flight requests, tool-level argument
 amplification and schema size/count limits remain separate concerns.
-`server.max_response_bytes` bounds each successful tool result, including
-the structured result and the SDK text mirror; `read_message` truncates
-text and HTML on UTF-8 rune boundaries, while exact-content tools refuse
-an over-budget result. Account `max_message_bytes` still governs email
-composition and post-decode preprocessing. The IMAP `password_command` path bounds stdout to 8 KiB,
+`server.max_response_bytes` bounds each successful tool-result payload,
+including the structured result, the SDK text mirror and a fixed
+result-envelope allowance. It does not bound the client-controlled
+JSON-RPC request ID or transport framing, so the complete wire frame can
+be larger; the guarantee is on the tool-result payload, not on an
+arbitrary transport frame. `read_message` truncates text and HTML on
+UTF-8 rune boundaries, while exact-content tools refuse an over-budget
+result. Account `max_message_bytes` still governs email composition and
+post-decode preprocessing. The IMAP `password_command` path bounds stdout to 8 KiB,
 discards stderr, and bounds the run by a timeout and by the caller's
 cancellation; neither its stdout nor its stderr reaches an error, a log or
 a tool response. The external command itself remains an operator-supplied
@@ -423,8 +427,8 @@ is authoritative even after reconnects.
 Reads a single message, returning headers, text and HTML bodies, and
 a list of attachments. Bodies are bounded by `max_message_bytes` and by
 the server-level `max_response_bytes` limit. The latter is an aggregate
-bound over the complete result; when it is exceeded, text and HTML are
-shortened on UTF-8 rune boundaries and `truncated` is true.
+bound over the complete tool-result payload; when it is exceeded, text
+and HTML are shortened on UTF-8 rune boundaries and `truncated` is true.
 
 **Input.**
 
@@ -581,7 +585,7 @@ padded RFC 4648 base64. There is no `truncated` field: content that
 exceeds a limit is an error, never a partial success. Base64 expands
 the payload by roughly one third; a default maximum-size attachment
 (6 MiB) can therefore produce an approximately 8 MiB tool response
-before the SDK text mirror is counted. The complete result is also
+before the SDK text mirror is counted. The tool-result payload is also
 bounded by `server.max_response_bytes`; an attachment that cannot fit
 is refused with `RateLimited` and no content.
 

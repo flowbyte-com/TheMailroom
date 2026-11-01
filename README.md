@@ -429,9 +429,12 @@ It is a per-frame allocation boundary, not an aggregate process-memory
 limit. Successful tool results are capped separately by
 `server.max_response_bytes` (default 32 MiB; hard maximum 128 MiB). The
 count includes the structured result, the SDK's JSON text mirror and a
-fixed envelope allowance. `read_message` shortens text and HTML on UTF-8
-rune boundaries and sets `truncated: true`; `read_attachment`, list and
-search results that cannot fit return `RateLimited` without partial
+fixed result-envelope allowance. It does not bound the client-controlled
+JSON-RPC request ID or transport framing, so the complete wire frame may
+be larger; the guarantee is on the successful tool-result payload, not on
+an arbitrary transport frame. `read_message` shortens text and HTML on
+UTF-8 rune boundaries and sets `truncated: true`; `read_attachment`, list
+and search results that cannot fit return `RateLimited` without partial
 content. The SDK handler queue, concurrent in-flight requests, tool-level
 argument amplification and schema size/count limits remain separate Phase
 3 hardening concerns.

@@ -10,18 +10,23 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// responseEnvelopeAllowance covers the JSON-RPC envelope, the tool-call
-// identifier and the small amount of framing around one CallToolResult.
-// responseSize already includes the result object itself.
+// responseEnvelopeAllowance covers the fixed CallToolResult and JSON-RPC
+// framing around the result payload. It is not a bound on the
+// client-controlled JSON-RPC request ID or on transport framing, so
+// server.max_response_bytes is a tool-result payload guarantee, not a hard
+// upper bound on the complete wire frame. responseSize already includes the
+// result object itself.
 const responseEnvelopeAllowance = 1024
 
 // responseTruncationMarker is appended to a body that had to be shortened.
 const responseTruncationMarker = "…[truncated]"
 
 // responseSize returns the approximate serialized size of one successful
-// tool result. The SDK emits the structured result twice: once as
+// tool-result payload. The SDK emits the structured result twice: once as
 // structuredContent and once as its JSON text mirror in content. Both
-// copies are counted, together with a fixed envelope allowance.
+// copies are counted, together with a fixed result-envelope allowance.
+// The client-controlled JSON-RPC request ID and the outer transport frame
+// are outside this measurement and outside the guarantee.
 func responseSize(output any) (int, error) {
 	raw, err := json.Marshal(output)
 	if err != nil {
@@ -64,7 +69,7 @@ func responseTooLargeError(max int) *TypedError {
 // fitReadMessage shortens the text and HTML bodies, in aggregate, until
 // the complete result fits max. It never splits a UTF-8 rune and never
 // returns a partial result that claims to be complete: Truncated is set
-// when either body was shortened.
+// before a candidate is measured, so the final JSON is what was checked.
 func fitReadMessage(output *ReadMessageResult, max int) error {
 	if output == nil {
 		return nil
@@ -77,9 +82,12 @@ func fitReadMessage(output *ReadMessageResult, max int) error {
 		return nil
 	}
 
+	// If even the bodyless result cannot fit once the truncation flag is
+	// present, truncation cannot satisfy the limit.
 	base := *output
 	base.Text = ""
 	base.HTML = ""
+	base.Truncated = true
 	baseSize, err := responseSize(&base)
 	if err != nil {
 		return fmt.Errorf("tools: encode response: %w", err)
@@ -89,26 +97,26 @@ func fitReadMessage(output *ReadMessageResult, max int) error {
 	}
 
 	// Start from the full body budget and reduce it until the serialized
-	// result, including JSON escaping and the SDK text mirror, fits. This
-	// avoids assuming that one source byte equals one response byte.
+	// result, including JSON escaping, the SDK text mirror and the
+	// truncation flag itself, fits. This avoids assuming that one source
+	// byte equals one response byte.
 	bodyBudget := len(output.Text) + len(output.HTML)
 	for bodyBudget > 0 {
 		bodyBudget = bodyBudget * 3 / 4
 		candidate := *output
 		truncateMessageBodies(&candidate, bodyBudget)
+		candidate.Truncated = true
 		size, err := responseSize(&candidate)
 		if err != nil {
 			return fmt.Errorf("tools: encode response: %w", err)
 		}
 		if size <= max {
 			*output = candidate
-			output.Truncated = true
 			return nil
 		}
 	}
 
 	*output = base
-	output.Truncated = true
 	return nil
 }
 
@@ -155,8 +163,8 @@ func truncateUTF8(s string, max int) string {
 
 // encodeAttachmentContent applies the response budget before allocating
 // the base64 copy. base64 has no JSON escapes, so two copies of the
-// encoded content plus the envelope allowance are a lower bound on the
-// final result size. The caller must still run checkResponseBudget on
+// encoded content plus the result-envelope allowance is a lower bound on
+// the final payload size. The caller must still run checkResponseBudget on
 // the complete result, which includes the metadata.
 func encodeAttachmentContent(content []byte, max int) (string, error) {
 	encodedLen := base64.StdEncoding.EncodedLen(len(content))

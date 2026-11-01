@@ -93,12 +93,15 @@ const (
 	// while this bound governs a single pre-decode MCP allocation.
 	MaxRequestBytesLimit = 128 * 1024 * 1024 // 128 MiB
 
-	// DefaultMaxResponseBytes bounds one tool result before it is returned
-	// to the MCP layer. The count includes the serialized structured result
-	// and the JSON text mirror the SDK emits for it, plus a fixed envelope
-	// allowance. It is deliberately independent of any account limit: the
-	// account limits bound email content, while this bound protects the
-	// agent's context and the process from an oversized response.
+	// DefaultMaxResponseBytes bounds one tool-result payload before it is
+	// returned to the MCP layer. The count includes the serialized
+	// structured result and the JSON text mirror the SDK emits for it, plus
+	// a fixed result-envelope allowance. It is deliberately independent of
+	// any account limit: the account limits bound email content, while this
+	// bound protects the agent's context and the process from an oversized
+	// response. It is not a hard cap on the complete wire frame: the
+	// client-controlled JSON-RPC request ID and transport framing are
+	// outside the measurement.
 	DefaultMaxResponseBytes = 32 * 1024 * 1024 // 32 MiB
 
 	// MaxResponseBytesLimit is the largest value an operator may configure
@@ -126,12 +129,14 @@ type ServerConfig struct {
 	// independent of account max_message_bytes.
 	MaxRequestBytes int `yaml:"max_request_bytes,omitempty"`
 
-	// MaxResponseBytes caps one successful tool result before it is
-	// returned to the MCP layer. The count includes the serialized
+	// MaxResponseBytes caps one successful tool-result payload before it
+	// is returned to the MCP layer. The count includes the serialized
 	// structured result, the SDK's JSON text mirror of that result, and a
-	// fixed envelope allowance. Zero selects DefaultMaxResponseBytes. A
-	// result that cannot fit is refused with a typed limit error; a
-	// message body may be truncated explicitly instead.
+	// fixed result-envelope allowance. It does not bound the
+	// client-controlled JSON-RPC request ID or transport framing. Zero
+	// selects DefaultMaxResponseBytes. A result that cannot fit is refused
+	// with a typed limit error; a message body may be truncated explicitly
+	// instead.
 	MaxResponseBytes int `yaml:"max_response_bytes,omitempty"`
 }
 
