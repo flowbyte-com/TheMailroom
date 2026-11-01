@@ -137,14 +137,11 @@ func truncateUTF8(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if len(s) <= max {
-		return s
-	}
 	if !utf8.ValidString(s) {
 		s = strings.ToValidUTF8(s, "\uFFFD")
-		if len(s) <= max {
-			return s
-		}
+	}
+	if len(s) <= max {
+		return s
 	}
 	if max <= len(responseTruncationMarker) {
 		return ""

@@ -95,6 +95,10 @@ func TestTruncateUTF8(t *testing.T) {
 	if !utf8.ValidString(invalid) {
 		t.Errorf("invalid input produced invalid output: %q", invalid)
 	}
+	shortInvalid := truncateUTF8(string([]byte{0xff, 'a'}), 64)
+	if !utf8.ValidString(shortInvalid) {
+		t.Errorf("short invalid input produced invalid output: %q", shortInvalid)
+	}
 }
 
 func TestFitReadMessageAggregateTruncation(t *testing.T) {
