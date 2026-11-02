@@ -36,6 +36,72 @@ func setupEnvWithOptions(t *testing.T, opts ...RegisterOption) *testEnv {
 	return setupEnvWithMailbox(t, filepath.Join(findRepoRoot(t), "testdata", "messages"), opts...)
 }
 
+// setupEnvWithLimits builds the standard test environment with extra
+// account limit settings appended to the "full" account. Each entry is
+// a YAML fragment such as "max_list_scan_messages: 4242".
+func setupEnvWithLimits(t *testing.T, limits ...string) *testEnv {
+	t.Helper()
+	messages := filepath.Join(findRepoRoot(t), "testdata", "messages")
+	empty := t.TempDir()
+
+	limitsBlock := ""
+	for _, l := range limits {
+		limitsBlock += "      " + l + "\n"
+	}
+
+	yaml := `
+server:
+  log_level: error
+accounts:
+  - id: full
+    backend: memory
+    email: full@example.test
+    mailbox_root: __MBX__
+    permissions: [read]
+    limits:
+` + limitsBlock + `  - id: norights
+    backend: memory
+    email: nr@example.test
+    mailbox_root: __EMPTY__
+    permissions: []
+`
+	yaml = strings.ReplaceAll(yaml, "__MBX__", messages)
+	yaml = strings.ReplaceAll(yaml, "__EMPTY__", empty)
+
+	cfg, err := config.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	reg, err := accounts.New(cfg)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	Register(server, reg)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), serverTransport, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "client"}, nil)
+	session, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+
+	return &testEnv{
+		server:   server,
+		registry: reg,
+		client:   session,
+		cleanup: func() {
+			session.Close()
+			_ = reg.Close()
+		},
+	}
+}
+
 func setupEnvWithMailbox(t *testing.T, messages string, opts ...RegisterOption) *testEnv {
 	t.Helper()
 	empty := t.TempDir()

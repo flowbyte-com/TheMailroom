@@ -615,6 +615,10 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 				From:         envelopeFrom(m.Envelope),
 				To:           envelopeAddresses(m.Envelope, "To"),
 				Subject:      envelopeSubject(m.Envelope),
+				// HasAttachment is left nil: this listing fetched
+				// envelopes only, so attachment presence is unknown.
+				// Reporting false would assert that the message has no
+				// attachments, which the client did not determine.
 			})
 		}
 		// The fetch must complete before this function returns. The
@@ -1028,6 +1032,10 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 				From:         envelopeFrom(m.Envelope),
 				To:           envelopeAddresses(m.Envelope, "To"),
 				Subject:      envelopeSubject(m.Envelope),
+				// HasAttachment is left nil: this search fetched
+				// envelopes only, so attachment presence is unknown.
+				// Reporting false would assert that the message has no
+				// attachments, which the client did not determine.
 			})
 		}
 		// The fetch must complete before this function returns. The
@@ -1794,14 +1802,13 @@ const (
 //
 // The same limit bounds both workloads because it bounds the same
 // thing: the number of messages whose envelopes one operation may
-// fetch, parse and process. Zero means the configured limit is unset,
-// in which case the default applies.
+// fetch, parse and process.
+//
+// It is resolved through the shared config helper, so the budget this
+// client enforces and the budget list_accounts reports are the same
+// number by construction.
 func (b *Backend) scanBudget() int {
-	budget := b.limits.MaxListScanMessages
-	if budget <= 0 {
-		budget = config.DefaultMaxListScanMessages
-	}
-	return budget
+	return b.limits.EffectiveMaxListScanMessages()
 }
 
 // abortConn closes the raw socket that backs the current client.

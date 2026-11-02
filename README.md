@@ -22,6 +22,13 @@ and `SMTP`. It is designed to be:
 - Tool surface: read-only `list_accounts`, `list_mailboxes`,
   `list_messages`, `read_message`, `search_messages`, plus
   authenticated `send_message` (Phase 2.3, merged as PR #12).
+- `list_accounts` reports the limits the server actually enforces,
+  including the effective list and search scan budget under
+  `limits.max_list_scan_messages`.
+- A message summary reports `has_attachments` only when the backend
+  determined it. The IMAP list and search paths fetch envelopes only,
+  so they omit the field rather than assert `false`; `read_message`
+  returns the parsed attachment list, which is authoritative.
 - YAML configuration with credential-via-command (`pass`, `secret-tool`).
 - Permission and limit enforcement server-side.
 - An in-memory backend (loads `.eml` files) for tests and local
@@ -106,8 +113,9 @@ composer; PR 3 added the authenticated SMTP sender.
 **Phase 3 (Hardening)** covers the remaining production gates. Phase 3
 PRs 1-5 and this change add bounded inbound MCP request framing, bounded
 IMAP credential commands, bounded list and search workloads, finite IMAP
-command and operation deadlines, and an aggregate MCP response-size
-limit. `has_attachments` for IMAP summaries, fuzz tests, installation
+command and operation deadlines, an aggregate MCP response-size limit,
+and an accurate account-limit and summary-metadata shape.
+`has_attachments` for IMAP summaries, fuzz tests, installation
 docs, and a cross-platform release remain Phase 3 work. The Purelymail smoke test
 completed on 2026-10-21; other hardening items remain Phase 3 work. The
 smoke test is not production certification.
@@ -289,12 +297,14 @@ ascend but are unrelated to internal dates, so an exact page can only be
 produced by examining every message in the mailbox.
 `limits.max_list_scan_messages` (default 10 000, hard maximum 1 000 000)
 bounds that work: it caps the number of messages one operation may
-fetch and process. The bound is enforced twice: the server-reported
-mailbox size is checked in the EXAMINE response before any FETCH is
-sent, and the messages the server actually delivers are counted during
-the FETCH, so a server that under-reports its size is caught while the
-listing runs. A mailbox over the limit is refused with the
-`RateLimited` error code and a message naming the budget and the
+fetch and process. The effective budget is reported by `list_accounts`
+under `limits.max_list_scan_messages`, so the number an operator reads
+is the number the server enforces. The bound is enforced twice: the
+server-reported mailbox size is checked in the EXAMINE response before
+any FETCH is sent, and the messages the server actually delivers are
+counted during the FETCH, so a server that under-reports its size is
+caught while the listing runs. A mailbox over the limit is refused with
+the `RateLimited` error code and a message naming the budget and the
 recourse — raise `limits.max_list_scan_messages`; no partial or
 approximate page is returned. The `since` / `before` filters narrow the
 result but not the work: they run after the preflight and after the

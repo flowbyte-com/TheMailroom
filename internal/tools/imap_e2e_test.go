@@ -280,6 +280,80 @@ func TestIMAPEndToEndMissingMailbox(t *testing.T) {
 	}
 }
 
+// TestIMAPSummaryOmitsUnknownAttachmentPresence is a real-path
+// regression for the wire shape of an IMAP summary.
+//
+// The IMAP list and search paths fetch envelopes only, so they do not
+// determine whether a message has attachments. Reporting
+// has_attachments=false would assert that the message has none, which
+// is not what the client knows. The field must be omitted instead.
+//
+// This runs against the in-process IMAP server, so it exercises the
+// same path production uses rather than a stub.
+func TestIMAPSummaryOmitsUnknownAttachmentPresence(t *testing.T) {
+	env := setupIMAPEnv(t)
+	defer env.cleanup()
+
+	got, err := env.call(t, "list_messages", map[string]any{
+		"account_id": "imap",
+		"mailbox":    "INBOX",
+		"limit":      float64(5),
+	})
+	if err != nil {
+		t.Fatalf("list_messages: %v", err)
+	}
+	msgs := got["messages"].([]any)
+	if len(msgs) == 0 {
+		t.Fatal("no messages returned")
+	}
+	for _, item := range msgs {
+		m := item.(map[string]any)
+		if v, ok := m["has_attachments"]; ok {
+			t.Errorf("has_attachments = %v, want the field omitted for IMAP summaries", v)
+		}
+	}
+
+	// The search path must behave the same way.
+	got, err = env.call(t, "search_messages", map[string]any{
+		"account_id": "imap",
+		"mailbox":    "INBOX",
+		"query":      map[string]any{"subject": "little message"},
+	})
+	if err != nil {
+		t.Fatalf("search_messages: %v", err)
+	}
+	matches := got["matches"].([]any)
+	if len(matches) == 0 {
+		t.Fatal("no matches returned")
+	}
+	for _, item := range matches {
+		m := item.(map[string]any)
+		if v, ok := m["has_attachments"]; ok {
+			t.Errorf("has_attachments = %v, want the field omitted for IMAP summaries", v)
+		}
+	}
+}
+
+// TestIMAPListAccountsExposesScanBudget is a real-path regression that
+// list_accounts reports the scan budget the IMAP client enforces.
+func TestIMAPListAccountsExposesScanBudget(t *testing.T) {
+	env := setupIMAPEnv(t)
+	defer env.cleanup()
+
+	got, err := env.call(t, "list_accounts", map[string]any{})
+	if err != nil {
+		t.Fatalf("list_accounts: %v", err)
+	}
+	limits := accountLimits(t, got, "imap")
+	budget, ok := limits["max_list_scan_messages"]
+	if !ok {
+		t.Fatalf("limits.max_list_scan_messages is absent; got limits %v", limits)
+	}
+	if budget != float64(10000) {
+		t.Errorf("max_list_scan_messages = %v, want 10000", budget)
+	}
+}
+
 // findRepoRootIMAP is unused; tools_test.go in the same package
 // already exposes findRepoRoot. Kept as a no-op for future use.
 var _ = func() {}

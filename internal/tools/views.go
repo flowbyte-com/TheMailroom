@@ -29,6 +29,7 @@ type limitsView struct {
 	MaxRecipients           int `json:"max_recipients"`
 	MaxSearchResults        int `json:"max_search_results"`
 	MaxBatchOperations      int `json:"max_batch_operations"`
+	MaxListScanMessages     int `json:"max_list_scan_messages"`
 	MaxMIMENesting          int `json:"max_mime_nesting"`
 	MaxMIMEParts            int `json:"max_mime_parts"`
 }
@@ -58,6 +59,7 @@ func limitsFrom(l config.LimitsConfig) limitsView {
 		MaxRecipients:           l.MaxRecipients,
 		MaxSearchResults:        l.MaxSearchResults,
 		MaxBatchOperations:      l.MaxBatchOperations,
+		MaxListScanMessages:     l.EffectiveMaxListScanMessages(),
 		MaxMIMENesting:          l.MaxMIMENesting,
 		MaxMIMEParts:            l.MaxMIMEParts,
 	}
@@ -87,15 +89,22 @@ func mailboxViewFrom(m mailbox.Mailbox) mailboxView {
 
 // messageSummaryV is the wire shape of a message summary.
 type messageSummaryV struct {
-	UID           uint32    `json:"uid"`
-	Flags         []string  `json:"flags,omitempty"`
-	InternalDate  time.Time `json:"internal_date"`
-	Size          uint32    `json:"size"`
-	From          string    `json:"from,omitempty"`
-	To            []string  `json:"to,omitempty"`
-	Subject       string    `json:"subject,omitempty"`
-	HasAttachment bool      `json:"has_attachments"`
-	Preview       string    `json:"preview,omitempty"`
+	UID          uint32    `json:"uid"`
+	Flags        []string  `json:"flags,omitempty"`
+	InternalDate time.Time `json:"internal_date"`
+	Size         uint32    `json:"size"`
+	From         string    `json:"from,omitempty"`
+	To           []string  `json:"to,omitempty"`
+	Subject      string    `json:"subject,omitempty"`
+	// HasAttachment reports whether the message has attachments.
+	//
+	// It is omitted when the backend did not determine attachment
+	// presence. The field is never present as false unless the backend
+	// actually inspected the message: the IMAP list and search paths
+	// fetch envelopes only, so they leave it unknown rather than
+	// asserting that a message has no attachments.
+	HasAttachment *bool  `json:"has_attachments,omitempty"`
+	Preview       string `json:"preview,omitempty"`
 }
 
 func messageSummaryFrom(m mailbox.MessageSummary) messageSummaryV {
