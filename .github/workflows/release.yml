@@ -64,7 +64,10 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          version="$(cat VERSION)"
+          # The version is read through the release tooling, so the guard
+          # and the build agree on what the version is and a malformed
+          # VERSION file is refused before anything is built.
+          version="$(go run ./internal/release/cmd/release version --field version)"
           if [ "$tag" != "v${version}" ]; then
             echo "::error::The tag ${tag} does not match the VERSION file (v${version})"
             exit 1
@@ -78,6 +81,12 @@ jobs:
             echo "::error::The tagged commit ${GITHUB_SHA} is not on main"
             exit 1
           fi
+          # The remote tag must already resolve to the commit this
+          # workflow builds from. The publish job checks this again
+          # immediately before the release is created, so a tag that
+          # moves during the build is caught as well.
+          built="$(git rev-parse HEAD)"
+          go run ./internal/release/cmd/release verify-tag --tag "${tag}" --commit "${built}"
           if gh release view "${tag}" >/dev/null 2>&1; then
             echo "::error::A release for ${tag} already exists"
             exit 1
@@ -149,12 +158,33 @@ jobs:
             echo "::error::The tagged commit ${GITHUB_SHA} is not on main"
             exit 1
           fi
+          # The remote tag is resolved again, immediately before the
+          # publication, and must still point at the commit this
+          # workflow built. A tag that has been moved or deleted since
+          # the build is refused, so the binaries are never published
+          # against a tag that resolves to another commit.
+          built="$(git rev-parse HEAD)"
+          go run ./internal/release/cmd/release verify-tag --tag "${tag}" --commit "${built}"
           # The licence travels with the binary, as the AGPL requires, and
           # the changelog says what the release contains. The source code
           # archive GitHub generates for a tag satisfies the AGPL's
           # requirement that the corresponding source be offered.
           cp LICENSE CHANGELOG.md dist/
-          gh release create "${tag}" \
-            --title "${tag}" \
-            --generate-notes \
-            dist/*
+          # A release candidate is published as a GitHub prerelease and
+          # is not marked as the latest release. A stable version is
+          # published normally.
+          if [ "$(go run ./internal/release/cmd/release version --field prerelease)" = "true" ]; then
+            gh release create "${tag}" \
+              --title "${tag}" \
+              --generate-notes \
+              --verify-tag \
+              --prerelease \
+              --latest=false \
+              dist/*
+          else
+            gh release create "${tag}" \
+              --title "${tag}" \
+              --generate-notes \
+              --verify-tag \
+              dist/*
+          fi

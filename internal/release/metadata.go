@@ -51,6 +51,11 @@ func ResolveMetadata(root string) (Metadata, error) {
 }
 
 // ReadVersion reads the release version from the VERSION file at root.
+//
+// The version must be a valid semantic version. A release candidate
+// such as "1.0.0-rc.1" is valid and is published as a prerelease; a
+// malformed version is refused, because a version the release workflow
+// cannot reason about must not reach a release.
 func ReadVersion(root string) (string, error) {
 	path := filepath.Join(root, VersionFile)
 	data, err := os.ReadFile(path)
@@ -61,10 +66,24 @@ func ReadVersion(root string) (string, error) {
 	if version == "" {
 		return "", fmt.Errorf("release: %s is empty", VersionFile)
 	}
-	if strings.HasPrefix(version, "v") {
-		return "", fmt.Errorf("release: %s must not start with %q: %q", VersionFile, "v", version)
+	parsed, err := ParseVersion(version)
+	if err != nil {
+		return "", fmt.Errorf("release: %s: %w", VersionFile, err)
 	}
-	return version, nil
+	return parsed.String(), nil
+}
+
+// ReadVersionInfo reads the release version from the VERSION file at
+// root and returns it parsed.
+//
+// The caller needs the parsed form when it has to know whether the
+// version is a release candidate.
+func ReadVersionInfo(root string) (Version, error) {
+	version, err := ReadVersion(root)
+	if err != nil {
+		return Version{}, err
+	}
+	return ParseVersion(version)
 }
 
 // resolveBuildDate determines the build timestamp.

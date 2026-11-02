@@ -1,7 +1,6 @@
 package release
 
 import (
-	"encoding/binary"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,78 +8,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// TestInspectELFRejectsMalformedHeaders covers a malformed ELF header.
-//
-// The program headers are read from the file, so a truncated, malformed
-// or hostile artifact must be rejected rather than crashing the
-// verification. A parser that panics turns a bad artifact into a crash
-// with a stack trace instead of a report.
-func TestInspectELFRejectsMalformedHeaders(t *testing.T) {
-	cases := map[string]func([]byte){
-		"program header size is zero": func(data []byte) {
-			binary.LittleEndian.PutUint16(data[54:], 0)
-		},
-		"program header offset is past the end": func(data []byte) {
-			binary.LittleEndian.PutUint64(data[32:], 0xFFFFFFFFFFFFFFF0)
-		},
-		"program header offset is the maximum": func(data []byte) {
-			binary.LittleEndian.PutUint64(data[32:], ^uint64(0))
-		},
-		"program header count is the maximum": func(data []byte) {
-			binary.LittleEndian.PutUint16(data[56:], 0xFFFF)
-		},
-	}
-	for _, mutate := range cases {
-		// 64 bytes of ELF header plus one 56-byte program header.
-		data := make([]byte, 64+56)
-		copy(data, "\x7fELF")
-		data[4] = 2
-		data[5] = 1
-		binary.LittleEndian.PutUint16(data[18:], 0x3E)
-		binary.LittleEndian.PutUint64(data[32:], 64)
-		binary.LittleEndian.PutUint16(data[54:], 56)
-		binary.LittleEndian.PutUint16(data[56:], 1)
-		mutate(data)
-
-		// The call must return, not panic.
-		if _, err := InspectArtifactBytes(data); err != nil {
-			continue
-		}
-	}
-}
-
-// TestInspectMachORejectsMalformedLoadCommands covers a Mach-O header
-// whose load commands are inconsistent.
-//
-// The walk must stop rather than wrap its offset back into the buffer
-// and continue over garbage.
-func TestInspectMachORejectsMalformedLoadCommands(t *testing.T) {
-	cases := map[string]func([]byte){
-		"command size is zero": func(data []byte) {
-			binary.LittleEndian.PutUint32(data[36:], 0)
-		},
-		"command size is the maximum": func(data []byte) {
-			binary.LittleEndian.PutUint32(data[36:], 0xFFFFFFF0)
-		},
-		"command count is the maximum": func(data []byte) {
-			binary.LittleEndian.PutUint32(data[16:], 0xFFFFFFFF)
-		},
-	}
-	for _, mutate := range cases {
-		data := make([]byte, 32+24)
-		binary.LittleEndian.PutUint32(data[0:], 0xFEEDFACF)
-		binary.LittleEndian.PutUint32(data[4:], 0x01000007)
-		binary.LittleEndian.PutUint32(data[16:], 1)
-		binary.LittleEndian.PutUint32(data[32:], 0x19) // LC_SEGMENT_64
-		binary.LittleEndian.PutUint32(data[36:], 24)   // cmdsize
-		mutate(data)
-
-		if _, err := InspectArtifactBytes(data); err != nil {
-			continue
-		}
-	}
-}
 
 // TestParseVersionOutput pins the parsing of the version output.
 //

@@ -954,9 +954,19 @@ same tests as the rest of the repository.
   directory, starts it with a configuration the test writes itself,
   completes an MCP handshake and confirms that it exits cleanly.
 - The **release workflow** can only be started by pushing a version tag.
-  It has no pull-request, branch-push or manual trigger. See
+  It has no pull-request, branch-push or manual trigger. The tagged
+  commit must be on `main` and the tag must match the `VERSION` file.
+  Immediately before the release is created, the remote tag is resolved
+  again and must still point at the commit the workflow built, so the
+  binaries of one commit are never published under a tag that resolves
+  to another. A version with a prerelease identifier is published as a
+  GitHub prerelease and is not marked as the latest release. See
   `docs/RELEASE.md` for the guards and `internal/release/workflow_test.go`
   for the tests that pin them.
+- The **version** comes from the `VERSION` file and is a semantic
+  version. A release candidate such as `1.0.0-rc.1` is valid; a
+  malformed version is refused when the file is read, before anything is
+  built.
 
 ## 7. Open architecture decisions (deferred)
 

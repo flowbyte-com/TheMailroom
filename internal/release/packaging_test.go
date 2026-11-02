@@ -24,8 +24,8 @@ func TestVersionFileMatchesTheChangelog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadVersion: %v", err)
 	}
-	if !isSemver(version) {
-		t.Errorf("the version %q is not a semantic version", version)
+	if _, err := ParseVersion(version); err != nil {
+		t.Errorf("the version %q is not a semantic version: %v", version, err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(root, "CHANGELOG.md"))
@@ -144,23 +144,4 @@ func TestInstallationDocumentationExists(t *testing.T) {
 			t.Errorf("docs/INSTALL.md does not mention %q", want)
 		}
 	}
-}
-
-// isSemver reports whether the version is a semantic version.
-func isSemver(v string) bool {
-	parts := strings.Split(strings.TrimPrefix(v, "v"), ".")
-	if len(parts) != 3 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" {
-			return false
-		}
-		for _, r := range part {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-	}
-	return true
 }

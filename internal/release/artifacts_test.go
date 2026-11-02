@@ -1,7 +1,6 @@
 package release
 
 import (
-	"encoding/binary"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,17 +22,7 @@ func TestInspectArtifactBytesRejectsUnknownFormat(t *testing.T) {
 // linked, so it has to read the machine and the program headers
 // correctly.
 func TestInspectELF(t *testing.T) {
-	// 64 bytes of ELF header plus one 56-byte program header.
-	data := make([]byte, 64+56)
-	copy(data, "\x7fELF")
-	data[4] = 2                                    // 64-bit
-	data[5] = 1                                    // little endian
-	binary.LittleEndian.PutUint16(data[18:], 0x3E) // x86-64
-	binary.LittleEndian.PutUint64(data[32:], 64)   // e_phoff
-	binary.LittleEndian.PutUint16(data[54:], 56)   // e_phentsize
-	binary.LittleEndian.PutUint16(data[56:], 1)    // e_phnum
-	ph := data[64:]
-	binary.LittleEndian.PutUint32(ph[0:], 1) // PT_LOAD
+	data := validELF64(0x3E, 1) // x86-64, one PT_LOAD segment
 
 	got, err := InspectArtifactBytes(data)
 	if err != nil {
@@ -56,16 +45,7 @@ func TestInspectELF(t *testing.T) {
 // TestInspectELFDetectsDynamicLinking covers the case the static check
 // exists for: a binary with a PT_INTERP segment is dynamically linked.
 func TestInspectELFDetectsDynamicLinking(t *testing.T) {
-	data := make([]byte, 64+56)
-	copy(data, "\x7fELF")
-	data[4] = 2
-	data[5] = 1
-	binary.LittleEndian.PutUint16(data[18:], 0xB7) // AArch64
-	binary.LittleEndian.PutUint64(data[32:], 64)
-	binary.LittleEndian.PutUint16(data[54:], 56)
-	binary.LittleEndian.PutUint16(data[56:], 1)
-	ph := data[64:]
-	binary.LittleEndian.PutUint32(ph[0:], 3) // PT_INTERP
+	data := validELF64(0xB7, 3) // AArch64, one PT_INTERP segment
 
 	got, err := InspectArtifactBytes(data)
 	if err != nil {
@@ -81,10 +61,7 @@ func TestInspectELFDetectsDynamicLinking(t *testing.T) {
 
 // TestInspectMachO pins the Mach-O reader against a hand-built header.
 func TestInspectMachO(t *testing.T) {
-	data := make([]byte, 32)
-	binary.LittleEndian.PutUint32(data[0:], 0xFEEDFACF) // 64-bit
-	binary.LittleEndian.PutUint32(data[4:], 0x0100000C) // arm64
-	binary.LittleEndian.PutUint32(data[16:], 0)         // ncmds
+	data := validMachO64(0x0100000C, benignMachOCommands) // arm64
 
 	got, err := InspectArtifactBytes(data)
 	if err != nil {
@@ -103,13 +80,8 @@ func TestInspectMachO(t *testing.T) {
 
 // TestInspectMachODetectsDylibDependency covers the dylib load command.
 func TestInspectMachODetectsDylibDependency(t *testing.T) {
-	data := make([]byte, 32+24)
-	binary.LittleEndian.PutUint32(data[0:], 0xFEEDFACF)
-	binary.LittleEndian.PutUint32(data[4:], 0x01000007) // x86-64
-	binary.LittleEndian.PutUint32(data[16:], 1)         // ncmds
-	cmd := data[32:]
-	binary.LittleEndian.PutUint32(cmd[0:], 0x0C) // LC_LOAD_DYLIB
-	binary.LittleEndian.PutUint32(cmd[4:], 24)   // cmdsize
+	commands := []machOCommand{{cmd: 0x0C, size: 24}} // LC_LOAD_DYLIB
+	data := validMachO64(0x01000007, commands)        // x86-64
 
 	got, err := InspectArtifactBytes(data)
 	if err != nil {
@@ -125,14 +97,7 @@ func TestInspectMachODetectsDylibDependency(t *testing.T) {
 
 // TestInspectPE pins the PE reader against a hand-built header.
 func TestInspectPE(t *testing.T) {
-	// 0x40 bytes of DOS header, the PE signature, the file header and the
-	// start of the optional header.
-	data := make([]byte, 0x40+24+2)
-	copy(data, "MZ")
-	binary.LittleEndian.PutUint32(data[0x3C:], 0x40)
-	copy(data[0x40:], "PE\x00\x00")
-	binary.LittleEndian.PutUint16(data[0x44:], 0x8664) // x86-64
-	binary.LittleEndian.PutUint16(data[0x58:], 0x20B)  // PE32+
+	data := validPE(0x8664, 0x20B) // x86-64, PE32+
 
 	got, err := InspectArtifactBytes(data)
 	if err != nil {

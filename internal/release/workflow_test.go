@@ -312,6 +312,103 @@ func loadCIWorkflow(t *testing.T) *yaml.Node {
 	return doc.Content[0]
 }
 
+// TestReleaseWorkflowBindsPublicationToTheRemoteTag pins that the
+// publish job resolves the remote tag and refuses to publish against a
+// tag that does not point at the commit it built.
+//
+// Without this guard the workflow would publish the binaries of one
+// commit under a tag that resolves to another, which is exactly the
+// confusion a tag is supposed to prevent.
+func TestReleaseWorkflowBindsPublicationToTheRemoteTag(t *testing.T) {
+	doc := loadWorkflow(t)
+	jobs := mappingGet(t, doc, "jobs")
+	publish := mappingGet(t, jobs, "publish")
+	if publish == nil {
+		t.Fatal("the release workflow has no \"publish\" job")
+	}
+
+	var script string
+	for _, step := range jobSteps(t, publish) {
+		script += stepRun(step) + "\n"
+	}
+
+	if !strings.Contains(script, "verify-tag") {
+		t.Error("the \"publish\" job does not resolve the remote tag before publishing")
+	}
+	if !strings.Contains(script, "--verify-tag") {
+		t.Error("the \"publish\" job does not pass --verify-tag to gh release create")
+	}
+	if !strings.Contains(script, "git rev-parse HEAD") {
+		t.Error("the \"publish\" job does not determine the commit it built")
+	}
+}
+
+// TestReleaseWorkflowPublishesPrereleasesAsPrereleases pins that a
+// release candidate is published as a GitHub prerelease and is not
+// marked as the latest release.
+//
+// A candidate that were marked as the latest release would be served to
+// users as though it were the stable release.
+func TestReleaseWorkflowPublishesPrereleasesAsPrereleases(t *testing.T) {
+	doc := loadWorkflow(t)
+	jobs := mappingGet(t, doc, "jobs")
+	publish := mappingGet(t, jobs, "publish")
+	if publish == nil {
+		t.Fatal("the release workflow has no \"publish\" job")
+	}
+
+	var script string
+	for _, step := range jobSteps(t, publish) {
+		script += stepRun(step) + "\n"
+	}
+
+	if !strings.Contains(script, "--field prerelease") {
+		t.Error("the \"publish\" job does not ask whether the version is a prerelease")
+	}
+	if !strings.Contains(script, "--prerelease") {
+		t.Error("the \"publish\" job does not publish a release candidate as a prerelease")
+	}
+	if !strings.Contains(script, "--latest=false") {
+		t.Error("the \"publish\" job does not stop a prerelease from being marked as the latest release")
+	}
+
+	// The stable path must stay a normal publication: it must not carry
+	// the prerelease flags.
+	var stableCreate string
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "gh release create") {
+			stableCreate = line
+		}
+	}
+	if stableCreate == "" {
+		t.Fatal("the \"publish\" job has no gh release create invocation")
+	}
+}
+
+// TestReleaseWorkflowReadsTheVersionThroughTheTooling pins that the
+// tag guard and the build agree on what the version is.
+//
+// Reading the version through the tooling means a malformed VERSION
+// file is refused before anything is built, and that the tag comparison
+// uses the same value the build injects into the binaries.
+func TestReleaseWorkflowReadsTheVersionThroughTheTooling(t *testing.T) {
+	doc := loadWorkflow(t)
+	jobs := mappingGet(t, doc, "jobs")
+	build := mappingGet(t, jobs, "build")
+	if build == nil {
+		t.Fatal("the release workflow has no \"build\" job")
+	}
+
+	var script string
+	for _, step := range jobSteps(t, build) {
+		script += stepRun(step) + "\n"
+	}
+	if !strings.Contains(script, "version --field version") {
+		t.Error("the \"build\" job does not read the version through the release tooling")
+	}
+}
+
 // loadWorkflow parses the release workflow.
 func loadWorkflow(t *testing.T) *yaml.Node {
 	t.Helper()

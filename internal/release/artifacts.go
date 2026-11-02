@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // ArtifactFormat is the executable container format of an artifact.
@@ -72,6 +73,12 @@ func InspectArtifactBytes(data []byte) (ArtifactInfo, error) {
 // presence of a PT_INTERP program header. A CGO-disabled Go binary has
 // neither an interpreter nor a dynamic section, so it runs on a system
 // with no matching shared libraries.
+//
+// The header is validated rather than trusted. A truncated, malformed or
+// inconsistent header is an error, not a file whose properties are
+// guessed: the verification must fail closed, because a header that
+// cannot be read cannot be used to conclude that an artifact is
+// statically linked.
 func inspectELF(data []byte) (ArtifactInfo, error) {
 	if len(data) < 64 {
 		return ArtifactInfo{}, fmt.Errorf("release: ELF header is truncated")
@@ -89,15 +96,17 @@ func inspectELF(data []byte) (ArtifactInfo, error) {
 	}
 
 	var bits int
-	var phoff, phentsize, phnum uint64
+	var ehsize, phoff, phentsize, phnum uint64
 	switch class {
 	case 1:
 		bits = 32
+		ehsize = uint64(bo.Uint16(data[40:]))
 		phoff = uint64(bo.Uint32(data[28:]))
 		phentsize = uint64(bo.Uint16(data[42:]))
 		phnum = uint64(bo.Uint16(data[44:]))
 	case 2:
 		bits = 64
+		ehsize = uint64(bo.Uint16(data[52:]))
 		phoff = bo.Uint64(data[32:])
 		phentsize = uint64(bo.Uint16(data[54:]))
 		phnum = uint64(bo.Uint16(data[56:]))
@@ -105,8 +114,56 @@ func inspectELF(data []byte) (ArtifactInfo, error) {
 		return ArtifactInfo{}, fmt.Errorf("release: ELF class %d is not known", class)
 	}
 
+	// The ELF version must be the current one.
+	if version := bo.Uint32(data[20:]); version != 1 {
+		return ArtifactInfo{}, fmt.Errorf("release: ELF version %d is not the current version", version)
+	}
+	// The header size must match the class: 52 bytes for a 32-bit file
+	// and 64 for a 64-bit one.
+	wantEhsize := uint64(52)
+	if bits == 64 {
+		wantEhsize = 64
+	}
+	if ehsize != wantEhsize {
+		return ArtifactInfo{}, fmt.Errorf("release: ELF header size is %d, want %d", ehsize, wantEhsize)
+	}
+	// The type must be an executable or a position-independent
+	// executable.
+	switch eType := bo.Uint16(data[16:]); eType {
+	case 2, 3:
+	default:
+		return ArtifactInfo{}, fmt.Errorf("release: ELF type %d is not an executable", eType)
+	}
+
 	machine := elfMachine(bo.Uint16(data[18:]))
+	if strings.HasPrefix(machine, "unknown") {
+		return ArtifactInfo{}, fmt.Errorf("release: ELF machine %d is not known", bo.Uint16(data[18:]))
+	}
 	info := ArtifactInfo{Format: FormatELF, Machine: machine, Bits: bits, Static: true}
+
+	// The program headers are read defensively: the file may be
+	// truncated, malformed or hostile, and a parser that panics on such
+	// a file turns a bad artifact into a crash. A header that cannot be
+	// read is an error, because the static linkage of the artifact
+	// cannot be concluded without it.
+	if phnum == 0 {
+		return ArtifactInfo{}, fmt.Errorf("release: the ELF file has no program headers")
+	}
+	if phentsize < 4 {
+		return ArtifactInfo{}, fmt.Errorf("release: ELF program header size %d is too small", phentsize)
+	}
+	limit := uint64(len(data))
+	if phoff == 0 || phoff > limit {
+		return ArtifactInfo{}, fmt.Errorf("release: ELF program header offset %d is out of range", phoff)
+	}
+	// The whole program header table must be inside the file.
+	if phnum > limit/phentsize {
+		return ArtifactInfo{}, fmt.Errorf("release: the ELF program header table is out of range")
+	}
+	tableEnd := phoff + phnum*phentsize
+	if tableEnd > limit {
+		return ArtifactInfo{}, fmt.Errorf("release: the ELF program header table is truncated")
+	}
 
 	// A PT_INTERP segment means the kernel loads a dynamic linker, and a
 	// PT_DYNAMIC segment means the binary resolves shared libraries.
@@ -114,24 +171,8 @@ func inspectELF(data []byte) (ArtifactInfo, error) {
 		ptInterp  = 3
 		ptDynamic = 2
 	)
-	// The program headers are read defensively: the file may be
-	// truncated, malformed or hostile, and a parser that panics on such
-	// a file turns a bad artifact into a crash.
-	if phentsize < 4 {
-		return info, nil
-	}
-	limit := uint64(len(data))
-	if phoff > limit {
-		return info, nil
-	}
 	for i := uint64(0); i < phnum; i++ {
-		// The offset cannot overflow: phoff is bounded by the file
-		// length and the product is bounded by the 16-bit sizes of
-		// e_phnum and e_phentsize.
 		off := phoff + i*phentsize
-		if off+4 > limit {
-			break
-		}
 		ptype := bo.Uint32(data[off : off+4])
 		switch ptype {
 		case ptInterp, ptDynamic:
@@ -176,6 +217,10 @@ func isMachOMagic(b []byte) bool {
 // The CPU type is read from cputype. The load commands are walked to
 // find a dylib load command, whose presence means the binary depends on
 // a shared library outside the executable.
+//
+// The header is validated rather than trusted. A truncated, malformed or
+// inconsistent header is an error, not a file whose properties are
+// guessed: the verification must fail closed.
 func inspectMachO(data []byte) (ArtifactInfo, error) {
 	if len(data) < 32 {
 		return ArtifactInfo{}, fmt.Errorf("release: Mach-O header is truncated")
@@ -183,15 +228,32 @@ func inspectMachO(data []byte) (ArtifactInfo, error) {
 	bo := binary.LittleEndian
 	magic := bo.Uint32(data[0:4])
 	bits := 64
-	if magic == 0xFEEDFACE {
+	switch magic {
+	case 0xFEEDFACF:
+		bits = 64
+	case 0xFEEDFACE:
 		bits = 32
+	default:
+		return ArtifactInfo{}, fmt.Errorf("release: Mach-O magic %#x is not known", magic)
 	}
 	cputype := bo.Uint32(data[4:8])
+	filetype := bo.Uint32(data[12:16])
 	ncmds := bo.Uint32(data[16:20])
+	sizeofcmds := bo.Uint32(data[20:24])
 
+	// The file type must be an executable.
+	const mhExecute = 2
+	if filetype != mhExecute {
+		return ArtifactInfo{}, fmt.Errorf("release: Mach-O file type %d is not an executable", filetype)
+	}
+
+	machine := machOMachine(cputype)
+	if strings.HasPrefix(machine, "unknown") {
+		return ArtifactInfo{}, fmt.Errorf("release: Mach-O CPU type %#x is not known", cputype)
+	}
 	info := ArtifactInfo{
 		Format:  FormatMachO,
-		Machine: machOMachine(cputype),
+		Machine: machine,
 		Bits:    bits,
 		Static:  true,
 	}
@@ -204,32 +266,58 @@ func inspectMachO(data []byte) (ArtifactInfo, error) {
 		lcLazyLoadDylib   = 0x20
 		lcLoadUpwardDylib = 0x23
 	)
-	headerSize := uint32(28)
+	headerSize := uint64(28)
 	if bits == 64 {
 		headerSize = 32
 	}
-	// The walk uses 64-bit offsets and is bounded against the file
-	// length, so a malformed load command cannot wrap the offset back
-	// into the buffer and make the walk continue over garbage.
+
+	// The load commands must fit inside the file, and there must be at
+	// least one of them: a Mach-O executable with no load commands
+	// cannot be a valid executable.
 	limit := uint64(len(data))
-	off := uint64(headerSize)
+	if ncmds == 0 {
+		return ArtifactInfo{}, fmt.Errorf("release: the Mach-O file has no load commands")
+	}
+	if sizeofcmds == 0 {
+		return ArtifactInfo{}, fmt.Errorf("release: the Mach-O file has an empty load command region")
+	}
+	if headerSize+uint64(sizeofcmds) > limit {
+		return ArtifactInfo{}, fmt.Errorf("release: the Mach-O load commands are truncated")
+	}
+	regionEnd := headerSize + uint64(sizeofcmds)
+
+	// The walk uses 64-bit offsets and is bounded against the load
+	// command region, so a malformed load command cannot wrap the
+	// offset back into the buffer and make the walk continue over
+	// garbage.
+	off := headerSize
 	for i := uint32(0); i < ncmds; i++ {
-		if off+8 > limit {
-			break
+		if off+8 > regionEnd {
+			return ArtifactInfo{}, fmt.Errorf("release: the Mach-O load command %d is out of range", i)
 		}
 		cmd := bo.Uint32(data[off : off+4])
 		cmdsize := uint64(bo.Uint32(data[off+4 : off+8]))
 		if cmdsize < 8 {
-			break
+			return ArtifactInfo{}, fmt.Errorf("release: the Mach-O load command %d has the invalid size %d", i, cmdsize)
+		}
+		// Load commands are aligned to four bytes.
+		if cmdsize%4 != 0 {
+			return ArtifactInfo{}, fmt.Errorf("release: the Mach-O load command %d has the unaligned size %d", i, cmdsize)
+		}
+		if off+cmdsize > regionEnd {
+			return ArtifactInfo{}, fmt.Errorf("release: the Mach-O load command %d extends past the load command region", i)
 		}
 		switch cmd {
 		case lcLoadDylib, lcIDDylib, lcLoadWeakDylib, lcReexportDylib, lcLazyLoadDylib, lcLoadUpwardDylib:
 			info.Static = false
 		}
-		if cmdsize > limit-off {
-			break
-		}
 		off += cmdsize
+	}
+	// The load commands must fill the region exactly. A walk that ends
+	// early means the header disagrees with the file.
+	if off != regionEnd {
+		return ArtifactInfo{}, fmt.Errorf("release: the Mach-O load commands end at %d, but the header says %d",
+			off, regionEnd)
 	}
 	return info, nil
 }
@@ -256,29 +344,57 @@ func machOMachine(cputype uint32) string {
 // located but not required to be empty: a CGO-disabled Windows binary
 // still imports a handful of system DLLs, so Windows artifacts are
 // verified by format and machine rather than by static linkage.
+//
+// The header is validated rather than trusted. A truncated, malformed or
+// inconsistent header is an error, not a file whose properties are
+// guessed: the verification must fail closed.
 func inspectPE(data []byte) (ArtifactInfo, error) {
 	if len(data) < 0x40 {
 		return ArtifactInfo{}, fmt.Errorf("release: PE header is truncated")
 	}
 	bo := binary.LittleEndian
-	peoff := bo.Uint32(data[0x3C:0x40])
-	if uint64(peoff)+24 > uint64(len(data)) {
+	peoff := uint64(bo.Uint32(data[0x3C:0x40]))
+	if peoff+24 > uint64(len(data)) {
 		return ArtifactInfo{}, fmt.Errorf("release: PE header offset %d is out of range", peoff)
 	}
 	if string(data[peoff:peoff+4]) != "PE\x00\x00" {
 		return ArtifactInfo{}, fmt.Errorf("release: PE signature is missing")
 	}
-	machine := peMachine(bo.Uint16(data[peoff+4 : peoff+6]))
-	bits := 32
-	optional := peoff + 24
-	if uint64(optional)+2 <= uint64(len(data)) {
-		switch bo.Uint16(data[optional : optional+2]) {
-		case 0x20B:
-			bits = 64
-		case 0x10B:
-			bits = 32
-		}
+
+	machineValue := bo.Uint16(data[peoff+4 : peoff+6])
+	machine := peMachine(machineValue)
+	if strings.HasPrefix(machine, "unknown") {
+		return ArtifactInfo{}, fmt.Errorf("release: PE machine %#x is not known", machineValue)
 	}
+
+	// The characteristics must not mark the file as a dynamic library:
+	// a release artifact is an executable.
+	const imageFileDLL = 0x2000
+	if characteristics := bo.Uint16(data[peoff+22 : peoff+24]); characteristics&imageFileDLL != 0 {
+		return ArtifactInfo{}, fmt.Errorf("release: the PE file is a dynamic library, not an executable")
+	}
+
+	// The optional header must be present and complete, and its magic
+	// must name a known format.
+	optional := peoff + 24
+	optionalSize := uint64(bo.Uint16(data[peoff+20 : peoff+22]))
+	if optionalSize == 0 {
+		return ArtifactInfo{}, fmt.Errorf("release: the PE file has no optional header")
+	}
+	if optional+optionalSize > uint64(len(data)) {
+		return ArtifactInfo{}, fmt.Errorf("release: the PE optional header is truncated")
+	}
+	bits := 0
+	switch bo.Uint16(data[optional : optional+2]) {
+	case 0x10B:
+		bits = 32
+	case 0x20B:
+		bits = 64
+	default:
+		return ArtifactInfo{}, fmt.Errorf("release: the PE optional header magic %#x is not known",
+			bo.Uint16(data[optional:optional+2]))
+	}
+
 	return ArtifactInfo{
 		Format:  FormatPE,
 		Machine: machine,

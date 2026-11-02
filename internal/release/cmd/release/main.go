@@ -7,15 +7,25 @@
 //
 // Usage:
 //
-//	release build   [--dist DIR] [--root DIR] [--version V] [--commit SHA] [--build-date T]
-//	release verify  [--dist DIR] [--root DIR] [--version V] [--commit SHA] [--build-date T]
-//	release smoke   [--dist DIR] [--root DIR] [--version V] [--commit SHA] [--build-date T]
-//	release version [--root DIR]
+//	release build      [--dist DIR] [--root DIR] [--version V] [--commit SHA] [--build-date T]
+//	release verify     [--dist DIR] [--root DIR] [--version V] [--commit SHA] [--build-date T]
+//	release smoke      [--dist DIR] [--root DIR] [--version V] [--commit SHA] [--build-date T]
+//	release version    [--root DIR] [--field FIELD]
+//	release verify-tag --tag TAG --commit SHA [--root DIR] [--remote NAME]
 //
 // The metadata flags override the values resolved from the repository. A
 // release workflow resolves the metadata once, from the tag, and passes
 // the same values to every command, so that every artifact in a release
 // carries identical metadata.
+//
+// The "version" command prints the version metadata, one field per
+// line, or only the requested field. The "prerelease" field reports
+// whether the version is a release candidate, which is what the release
+// workflow uses to publish a candidate as a GitHub prerelease.
+//
+// The "verify-tag" command resolves a remote tag and checks that it
+// points at the given commit. It is what binds a publication to the
+// exact tag it was built from.
 package main
 
 import (
@@ -46,6 +56,9 @@ func run(args []string) error {
 	version := fs.String("version", "", "release version override")
 	commit := fs.String("commit", "", "commit SHA override")
 	buildDate := fs.String("build-date", "", "build date override (RFC 3339) override")
+	field := fs.String("field", "", "print only this field of the version metadata")
+	tag := fs.String("tag", "", "tag to resolve")
+	remote := fs.String("remote", "origin", "remote to resolve the tag in")
 	verbose := fs.Bool("v", false, "print each build command")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -104,9 +117,39 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		version, err := release.ReadVersionInfo(*root)
+		if err != nil {
+			return err
+		}
+		if *field != "" {
+			switch *field {
+			case "version":
+				fmt.Println(meta.Version)
+			case "commit":
+				fmt.Println(meta.Commit)
+			case "build-date":
+				fmt.Println(meta.BuildDate)
+			case "toolchain":
+				fmt.Println(release.GoToolchain())
+			case "prerelease":
+				fmt.Println(version.IsPrerelease())
+			default:
+				return fmt.Errorf("unknown field %q; expected version, commit, build-date, toolchain or prerelease", *field)
+			}
+			return nil
+		}
 		fmt.Printf("%s\n%s\n%s\n%s\n",
 			meta.Version, meta.Commit, meta.BuildDate, release.GoToolchain())
 		return nil
+
+	case "verify-tag":
+		if *tag == "" {
+			return fmt.Errorf("verify-tag needs --tag")
+		}
+		if *commit == "" {
+			return fmt.Errorf("verify-tag needs --commit")
+		}
+		return release.VerifyRemoteTag(*root, *remote, *tag, *commit)
 
 	default:
 		return fmt.Errorf("unknown command %q; expected build, verify, smoke or version", command)

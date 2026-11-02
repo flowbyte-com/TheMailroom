@@ -80,12 +80,32 @@ tagged commit is an ancestor of it.
 
 **The tag must match the `VERSION` file.** The version in the source tree
 and the version in the tag must agree, or the release would ship a binary
-that reports a version the repository does not claim.
+that reports a version the repository does not claim. The version is read
+through the release tooling, so a malformed `VERSION` file is refused
+before anything is built.
 
 **The publish job publishes only verified artifacts.** The `publish` job
 depends on the `build` job, which builds and verifies the artifacts. The
 publish job downloads those artifacts and re-verifies them; it does not
 build. A release therefore cannot ship binaries that were not verified.
+
+**The publication is bound to the exact remote tag.** The remote tag is
+resolved at the start of the build and again immediately before the
+release is created; both times it must resolve to the commit the
+workflow built. `gh release create --verify-tag` makes the same check
+from the tool's side. A tag that has been moved, or that has been
+deleted, is refused, so the binaries of one commit are never published
+under a tag that resolves to another.
+
+Both an annotated tag and a lightweight tag are handled: an annotated tag
+points at a tag object, and the commit is the one the tag object peels
+to.
+
+**A release candidate is published as a prerelease.** A version with a
+prerelease identifier, such as `1.0.0-rc.1`, is published with
+`--prerelease --latest=false`, so it is marked as a prerelease and is
+not offered to users as the latest release. A stable version is published
+normally.
 
 **Only the publish job may write.** The workflow's default permission is
 read-only, the build job runs with read-only permission, and only the
@@ -98,10 +118,19 @@ test suite rather than quietly widening the publish path.
 
 ## Procedure
 
-1. **Prepare the release on `main`.** Update `CHANGELOG.md` with the
-   section for the new version and adjust its date if the release will
-   not be published on that date. Confirm that `VERSION` holds the
-   version you intend to release.
+1. **Prepare the release on `main`.** Set the `VERSION` file to the
+   version you intend to release and add the matching section to
+   `CHANGELOG.md`. The two must agree: the regression tests check that
+   the changelog has a section for the version the `VERSION` file names,
+   and the release workflow refuses a tag that does not match.
+
+   For a release candidate, set the version to its candidate form, for
+   example `1.0.0-rc.1`, and give the changelog a section headed
+   `## [1.0.0-rc.1]`. A candidate is published as a GitHub prerelease
+   and is not marked as the latest release.
+
+   Adjust the changelog date if the release will not be published on
+   that date.
 
 2. **Merge the preparation.** The release commit must be on `main`,
    because the workflow requires the tagged commit to be an ancestor of
@@ -118,6 +147,9 @@ test suite rather than quietly widening the publish path.
 
    Push the tag to `main`'s remote. Do not tag a commit that is not on
    `main`; the workflow will refuse it.
+
+   An annotated tag is recommended: it records who published the release
+   and why. A lightweight tag is accepted and is handled the same way.
 
 4. **Wait for the workflow.** The `release` workflow builds the
    artifacts, verifies them, runs the clean-install smoke test and then
@@ -147,6 +179,8 @@ test suite rather than quietly widening the publish path.
   source file.
 - It does not sign the artifacts. The checksum file is the integrity
   check, and the source archive is the provenance check.
+- It does not publish over an existing release. A tag that already has a
+  release is refused, so a published release is never silently replaced.
 
 ### A known property
 
