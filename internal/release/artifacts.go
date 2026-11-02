@@ -121,8 +121,10 @@ func inspectELF(data []byte) (ArtifactInfo, error) {
 	// The header size must match the class: 52 bytes for a 32-bit file
 	// and 64 for a 64-bit one.
 	wantEhsize := uint64(52)
+	wantPhentsize := uint64(32)
 	if bits == 64 {
 		wantEhsize = 64
+		wantPhentsize = 56
 	}
 	if ehsize != wantEhsize {
 		return ArtifactInfo{}, fmt.Errorf("release: ELF header size is %d, want %d", ehsize, wantEhsize)
@@ -149,8 +151,13 @@ func inspectELF(data []byte) (ArtifactInfo, error) {
 	if phnum == 0 {
 		return ArtifactInfo{}, fmt.Errorf("release: the ELF file has no program headers")
 	}
-	if phentsize < 4 {
-		return ArtifactInfo{}, fmt.Errorf("release: ELF program header size %d is too small", phentsize)
+	// The size of a program header is fixed by the class: 56 bytes for
+	// a 64-bit file and 32 for a 32-bit one. An entry size that does
+	// not match the class is inconsistent, and a parser that accepted
+	// it would walk the program header table with the wrong stride.
+	if phentsize != wantPhentsize {
+		return ArtifactInfo{}, fmt.Errorf("release: ELF program header size %d does not match the %d-bit class, want %d",
+			phentsize, bits, wantPhentsize)
 	}
 	limit := uint64(len(data))
 	if phoff == 0 || phoff > limit {
@@ -380,6 +387,15 @@ func inspectPE(data []byte) (ArtifactInfo, error) {
 	optionalSize := uint64(bo.Uint16(data[peoff+20 : peoff+22]))
 	if optionalSize == 0 {
 		return ArtifactInfo{}, fmt.Errorf("release: the PE file has no optional header")
+	}
+	// The magic is two bytes, so an optional header that is shorter
+	// than that cannot carry one. The check comes before the magic is
+	// read, because a file that declares a one-byte optional header and
+	// ends exactly at that boundary satisfies the truncation check
+	// below, and reading the magic from it would read past the end of
+	// the file.
+	if optionalSize < 2 {
+		return ArtifactInfo{}, fmt.Errorf("release: the PE optional header is %d bytes, too small to hold its magic", optionalSize)
 	}
 	if optional+optionalSize > uint64(len(data)) {
 		return ArtifactInfo{}, fmt.Errorf("release: the PE optional header is truncated")

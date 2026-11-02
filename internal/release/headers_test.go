@@ -38,6 +38,34 @@ func validELF64(machine uint16, segmentType uint32) []byte {
 	return data
 }
 
+// validELF32 builds a well-formed 32-bit ELF header with one program
+// header of the given type.
+//
+// The layout follows the ELF32 specification: e_type at 16, e_machine
+// at 18, e_version at 20, e_phoff at 28, e_ehsize at 40, e_phentsize at
+// 42 and e_phnum at 44.
+func validELF32(machine uint16, segmentType uint32) []byte {
+	const (
+		ehsize    = 52
+		phentsize = 32
+	)
+	data := make([]byte, ehsize+phentsize)
+	copy(data, "\x7fELF")
+	data[4] = 1 // EI_CLASS: 32-bit
+	data[5] = 1 // EI_DATA: little endian
+	data[6] = 1 // EI_VERSION
+	bo := binary.LittleEndian
+	bo.PutUint16(data[16:], 2)         // e_type: ET_EXEC
+	bo.PutUint16(data[18:], machine)   // e_machine
+	bo.PutUint32(data[20:], 1)         // e_version: EV_CURRENT
+	bo.PutUint32(data[28:], ehsize)    // e_phoff
+	bo.PutUint16(data[40:], ehsize)    // e_ehsize
+	bo.PutUint16(data[42:], phentsize) // e_phentsize
+	bo.PutUint16(data[44:], 1)         // e_phnum
+	bo.PutUint32(data[ehsize:], segmentType)
+	return data
+}
+
 // machOCommand is one Mach-O load command.
 type machOCommand struct {
 	// cmd is the load command identifier.
@@ -235,4 +263,56 @@ func TestInspectPERejectsMalformedHeaders(t *testing.T) {
 			t.Errorf("InspectArtifactBytes() with %s = nil, want an error", name)
 		}
 	}
+}
+
+// TestInspectPERejectsATinyOptionalHeader covers a PE file whose
+// optional header is too small to hold its own magic.
+//
+// The magic is two bytes. A file that declares a one-byte optional
+// header and ends exactly at that boundary satisfies the truncation
+// check, so the parser has to refuse it on its own terms. Reading the
+// magic without that check would read past the end of the file.
+func TestInspectPERejectsATinyOptionalHeader(t *testing.T) {
+	const peoff = 0x40
+	// The file ends exactly at the declared end of the optional header.
+	data := make([]byte, peoff+24+1)
+	copy(data, "MZ")
+	bo := binary.LittleEndian
+	bo.PutUint32(data[0x3C:], peoff)
+	copy(data[peoff:], "PE\x00\x00")
+	bo.PutUint16(data[peoff+4:], 0x8664) // machine: x86-64
+	bo.PutUint16(data[peoff+20:], 1)     // SizeOfOptionalHeader: one byte
+	bo.PutUint16(data[peoff+22:], 0x0022)
+
+	if _, err := InspectArtifactBytes(data); err == nil {
+		t.Error("InspectArtifactBytes() with a one-byte optional header = nil, want an error")
+	}
+}
+
+// TestInspectELFRejectsAnEntrySizeThatDoesNotMatchTheClass covers an
+// ELF file whose program header entry size is inconsistent with its
+// class.
+//
+// The entry size of a program header is fixed by the class: 56 bytes
+// for a 64-bit file and 32 bytes for a 32-bit one. A 64-bit file that
+// declares four-byte entries is inconsistent, and a parser that accepted
+// it would be walking the program header table with the wrong stride.
+func TestInspectELFRejectsAnEntrySizeThatDoesNotMatchTheClass(t *testing.T) {
+	t.Run("64-bit", func(t *testing.T) {
+		data := validELF64(0x3E, 1)
+		binary.LittleEndian.PutUint16(data[54:], 4) // e_phentsize
+
+		if _, err := InspectArtifactBytes(data); err == nil {
+			t.Error("InspectArtifactBytes() with a four-byte program header entry = nil, want an error")
+		}
+	})
+
+	t.Run("32-bit", func(t *testing.T) {
+		data := validELF32(0x03, 1)                 // 386
+		binary.LittleEndian.PutUint16(data[42:], 4) // e_phentsize
+
+		if _, err := InspectArtifactBytes(data); err == nil {
+			t.Error("InspectArtifactBytes() with a four-byte program header entry = nil, want an error")
+		}
+	})
 }
