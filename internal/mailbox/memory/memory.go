@@ -388,7 +388,7 @@ func (b *Backend) ListMessages(ctx context.Context, accountID, mbx string, opts 
 			From:          m.Headers.From,
 			To:            copyStrings(m.Headers.To),
 			Subject:       m.Headers.Subject,
-			HasAttachment: len(m.Attachments) > 0,
+			HasAttachment: boolPtr(len(m.Attachments) > 0),
 		})
 	}
 	return mailbox.ListResult{UIDValidity: 1, Messages: out}, nil
@@ -492,7 +492,7 @@ func (b *Backend) SearchMessages(ctx context.Context, accountID, mbx string, q m
 			From:          m.Headers.From,
 			To:            copyStrings(m.Headers.To),
 			Subject:       m.Headers.Subject,
-			HasAttachment: len(m.Attachments) > 0,
+			HasAttachment: boolPtr(len(m.Attachments) > 0),
 		})
 		if len(out) >= limit {
 			break
@@ -572,6 +572,13 @@ func copyStrings(in []string) []string {
 	out := make([]string, len(in))
 	copy(out, in)
 	return out
+}
+
+// boolPtr returns a pointer to b. The memory backend parses every
+// message it loads, so its attachment presence is always known; the
+// pointer form distinguishes that from the IMAP backend's "unknown".
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 func copyAttachments(in []mailbox.Attachment) []mailbox.Attachment {

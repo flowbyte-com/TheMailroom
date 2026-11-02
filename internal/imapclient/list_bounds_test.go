@@ -685,6 +685,20 @@ func (s *listFixtureServer) searchCommand(n int) string {
 	return s.searchCommands[n]
 }
 
+// searchKeyPart returns the command line without its leading IMAP tag.
+//
+// The tag is a random four-byte value encoded as six base64url
+// characters, so it is arbitrary text that can contain any two-letter
+// sequence by chance. A test that looks for a search key must inspect
+// only the criteria, because a tag such as "tO_4sw" would otherwise
+// look like a TO key.
+func searchKeyPart(cmd string) string {
+	if i := strings.IndexAny(cmd, " \t"); i >= 0 {
+		return cmd[i+1:]
+	}
+	return cmd
+}
+
 // floodCount returns the number of unsolicited responses the server
 // sends before answering a command.
 func (s *listFixtureServer) floodCount() int {

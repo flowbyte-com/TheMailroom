@@ -66,7 +66,8 @@ The AI agent is treated as semi-trusted input but **not** as a security boundary
 
 - **(implemented)** Password fields in `IMAPConfig` and `SMTPConfig` are tagged `json:"-"` so any accidental JSON serialisation elides them.
 - **(implemented)** `config.Redacted()` produces a printable view with every password replaced by `***`. The startup log uses this.
-- **(implemented)** Tool response structs omit all credential fields by construction. The `TestListAccountsExposesExpectedFields` regression test forbids "password", "imap", "smtp" and other sensitive keys in the `list_accounts` payload.
+- **(implemented)** Tool response structs omit all credential fields by construction. The `TestListAccountsExposesExpectedFields` regression test forbids "password", "imap", "smtp" and other sensitive keys in the `list_accounts` payload. `list_accounts` also reports the limits the server actually enforces, including the effective list and search scan budget under `limits.max_list_scan_messages`; the budget is resolved in one place, so the reported number and the enforced number cannot drift apart.
+- **(implemented)** A message summary does not assert attachment presence it did not determine. The IMAP list and search paths fetch envelopes only, so their summaries omit `has_attachments` rather than reporting `false`; the in-memory backend parses every message and always reports the true answer. The authoritative source for attachment presence remains `read_message`, which returns the parsed attachment list.
 - **(implemented)** `panic` recovery in `cmd/themailroom` logs a redacted diagnostic and exits; it does not print a stack trace with secrets.
 - **(implemented)** `password_command` (pass, secret-tool) is the recommended credential source so secrets never live in the config file.
 - **(implemented)** `validateAuth` rejects configurations with neither `password` nor `password_command`, and rejects configurations that set both.

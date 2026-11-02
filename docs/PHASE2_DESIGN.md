@@ -533,10 +533,14 @@ now states its resolution.
   documented in `docs/TOOLS.md`.
 - **Attachment metadata in list/search summaries is a separate
   outstanding issue.** The IMAP backend's list and search summaries
-  do not populate `has_attachments` (it is always false); the memory
-  backend does. Populating it requires `BODYSTRUCTURE` parsing and is
+  do not populate `has_attachments`; the memory backend does.
+  Populating it requires `BODYSTRUCTURE` parsing and is
   not part of the Phase 2.2 Priority 3 retrieval slice. Priority 3
   leaves this behaviour unchanged and does not claim to fix it.
+  The summary field was later made tri-state: an IMAP summary now
+  omits `has_attachments` rather than reporting `false`, so an
+  undetermined answer is not presented as a fact. Populating it for
+  IMAP remains outstanding.
 
 Cross-backend agreement on the tested criteria is asserted
 directly: `internal/imapclient/search_consistency_test.go` runs

@@ -245,13 +245,16 @@ func TestSearchEmptyCriteriaIsBounded(t *testing.T) {
 		if len(res.Messages) != budget {
 			t.Errorf("got %d messages, want %d", len(res.Messages), budget)
 		}
-		// The command carries no search key at all.
+		// The command carries no search key at all. Only the criteria
+		// are inspected: the leading IMAP tag is arbitrary random text
+		// and can contain a two-letter sequence by chance.
 		cmd := srv.lastSearch()
 		if !strings.Contains(strings.ToUpper(cmd), "SEARCH") {
 			t.Fatalf("search command = %q, want a UID SEARCH", cmd)
 		}
+		criteria := strings.ToUpper(searchKeyPart(cmd))
 		for _, key := range []string{"SUBJECT", "FROM", "TO", "BODY", "FLAGGED", "UNSEEN", "SENTSINCE", "SENTBEFORE"} {
-			if strings.Contains(strings.ToUpper(cmd), key) {
+			if strings.Contains(criteria, key) {
 				t.Errorf("search command = %q, want it to carry no %s key for an empty query", cmd, key)
 			}
 		}
@@ -387,15 +390,19 @@ func TestSearchCommandCarriesEveryCriterion(t *testing.T) {
 	if !strings.Contains(cmd, "UID SEARCH") {
 		t.Fatalf("search command = %q, want a UID SEARCH", cmd)
 	}
+	// Only the criteria are inspected: the leading IMAP tag is
+	// arbitrary random text and can contain a two-letter sequence by
+	// chance, which would otherwise mask a genuinely missing key.
+	criteria := strings.ToUpper(searchKeyPart(srv.lastSearch()))
 	for _, key := range []string{
 		"SUBJECT", "FROM", "BODY", "FLAGGED", "UNSEEN",
 		"SENTSINCE", "SENTBEFORE", "OR", "TO", "CC",
 	} {
-		if !strings.Contains(cmd, key) {
+		if !strings.Contains(criteria, key) {
 			t.Errorf("search command = %q, missing %q", cmd, key)
 		}
 	}
-	if strings.Contains(cmd, "TEXT ") {
+	if strings.Contains(criteria, "TEXT ") {
 		t.Errorf("search command = %q, want it not to use the obsolete TEXT key", cmd)
 	}
 }

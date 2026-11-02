@@ -166,7 +166,10 @@ IMAP4rev1 backend. It uses a narrow fork of
   - *Server and network work.* The per-account
     `max_list_scan_messages` limit (default 10 000, hard maximum
     1 000 000) bounds how many messages one call may fetch and
-    process. The bound is enforced twice:
+    process. The limit is resolved in one place, so the budget the
+    client enforces and the budget `list_accounts` reports under
+    `limits.max_list_scan_messages` are the same number. The bound
+    is enforced twice:
 
     1. *Before the fetch.* The server reports the mailbox size in
        the EXAMINE response, which RFC 3501 requires, so an

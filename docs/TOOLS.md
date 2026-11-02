@@ -337,6 +337,11 @@ absolute host filesystem paths** are returned.
 }
 ```
 
+The `limits` object reports the limits the server actually enforces.
+`max_list_scan_messages` is the effective list and search scan budget:
+it is the configured value, or the default of 10 000 when the
+configuration leaves it unset.
+
 ### `list_mailboxes`
 
 Lists mailboxes/folders for an account.
@@ -394,7 +399,9 @@ is ever returned. The `since` / `before` filters are applied by the client
 after the fetch, so they narrow the result but not the work: a filtered
 query over an oversized mailbox is still refused. They are therefore not
 offered as a recourse — the recourse is to raise
-`max_list_scan_messages`, subject to its hard maximum.
+`max_list_scan_messages`, subject to its hard maximum. The effective
+budget is reported by `list_accounts` under
+`limits.max_list_scan_messages`.
 
 **Output.**
 
@@ -417,6 +424,11 @@ offered as a recourse — the recourse is to raise
   ]
 }
 ```
+
+`has_attachments` is present when the backend determined the answer.
+The IMAP list and search paths fetch envelopes only, so they omit the
+field there; see **Deferred attachment metadata** under
+`search_messages`.
 
 `uid_validity` is the live UIDVALIDITY of the selected mailbox. The
 IMAP backend issues a read-only `EXAMINE` for the call, so the value
@@ -689,7 +701,8 @@ naming the budget and the recourse — narrow the query or raise
 `max_list_scan_messages`; and the messages the server delivers in the
 follow-up fetch are counted as well, so a server that sends more than
 it was asked for is stopped. No partial or approximate result is ever
-returned.
+returned. The effective budget is reported by `list_accounts` under
+`limits.max_list_scan_messages`.
 
 **Response limits.** The scan budget bounds the client's own work. The
 IMAP client additionally caps what a single response may cost it: the
@@ -732,12 +745,18 @@ searches decoded plain text only. These are inherent
 differences in a server-delegated search and are not errors.
 
 **Deferred attachment metadata.** The IMAP backend's
-`list_messages` and `search_messages` summaries do not populate
-`has_attachments`; it is always `false`. The in-memory backend
-does populate it. This is a separate outstanding issue, not fixed
-by `read_attachment`; populating it for IMAP would require
-`BODYSTRUCTURE` parsing and is deliberately not introduced in this
-slice.
+`list_messages` and `search_messages` summaries do not determine
+whether a message has attachments: those paths fetch envelopes only,
+so attachment presence is unknown. The `has_attachments` field is
+therefore **omitted** from an IMAP summary rather than reported as
+`false`. A `false` value would assert that the message has no
+attachments, which the client did not determine; an omitted field
+means the answer is unknown. The in-memory backend parses every
+message, so it always reports `true` or `false`. Populating the field
+for IMAP would require `BODYSTRUCTURE` parsing and is deliberately not
+introduced in this slice; `read_message` returns the parsed attachment
+list instead, which is the authoritative source for attachment
+presence.
 
 **Output.**
 
@@ -751,6 +770,9 @@ slice.
   ]
 }
 ```
+
+A match has the same summary shape as a `list_messages` entry, so
+`has_attachments` is omitted for the same reason.
 
 ## Future tools (not implemented)
 

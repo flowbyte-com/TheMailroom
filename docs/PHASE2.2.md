@@ -325,7 +325,10 @@ text parts.
 **Deferred:** IMAP `has_attachments` summary population remains
 unchanged and is tracked as a separate outstanding issue. It is
 not fixed by Priority 3, and BODYSTRUCTURE parsing is not
-introduced. Outbound SMTP attachments, forwarding, modification
+introduced. The summary field was later made tri-state: an IMAP
+summary omits `has_attachments` rather than reporting `false`, so an
+undetermined answer is not presented as a fact. Outbound SMTP
+attachments, forwarding, modification
 operations, previews and antivirus integration remain out of
 scope.
 

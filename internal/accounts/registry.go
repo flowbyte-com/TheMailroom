@@ -268,7 +268,7 @@ func viewOf(a *Account) View {
 			MaxRecipients:           a.Limits.MaxRecipients,
 			MaxSearchResults:        a.Limits.MaxSearchResults,
 			MaxBatchOperations:      a.Limits.MaxBatchOperations,
-			MaxListScanMessages:     a.Limits.MaxListScanMessages,
+			MaxListScanMessages:     a.Limits.EffectiveMaxListScanMessages(),
 			MaxMIMENesting:          a.Limits.MaxMIMENesting,
 			MaxMIMEParts:            a.Limits.MaxMIMEParts,
 		},

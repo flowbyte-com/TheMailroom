@@ -110,14 +110,26 @@ type SearchQuery struct {
 // MessageSummary is the lightweight envelope used in listings and search
 // results. It avoids decoding the full body.
 type MessageSummary struct {
-	UID           uint32    `json:"uid"`
-	Flags         []string  `json:"flags,omitempty"`
-	InternalDate  time.Time `json:"internal_date"`
-	Size          uint32    `json:"size"`
-	From          string    `json:"from,omitempty"`
-	To            []string  `json:"to,omitempty"`
-	Subject       string    `json:"subject,omitempty"`
-	HasAttachment bool      `json:"has_attachments"`
+	UID          uint32    `json:"uid"`
+	Flags        []string  `json:"flags,omitempty"`
+	InternalDate time.Time `json:"internal_date"`
+	Size         uint32    `json:"size"`
+	From         string    `json:"from,omitempty"`
+	To           []string  `json:"to,omitempty"`
+	Subject      string    `json:"subject,omitempty"`
+	// HasAttachment reports whether the message has attachments.
+	//
+	// It is a pointer so that "unknown" is distinguishable from "no".
+	// A nil value means the backend did not determine attachment
+	// presence; it must never be read as a claim that the message has no
+	// attachments. A backend that inspected the message structure sets
+	// it to true or false accordingly.
+	//
+	// The IMAP list and search paths fetch envelopes only, so they leave
+	// it nil: determining presence there would require BODYSTRUCTURE
+	// parsing. The in-memory backend parses every message, so it always
+	// sets it.
+	HasAttachment *bool `json:"has_attachments,omitempty"`
 }
 
 // Message is the full message body returned by FetchMessage.
