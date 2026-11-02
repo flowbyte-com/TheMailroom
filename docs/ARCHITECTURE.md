@@ -698,6 +698,13 @@ Validation covers:
 - `server.max_request_bytes` defaults to 32 MiB and is capped at 128 MiB.
   It is a per-frame pre-decode transport boundary and is independent of
   account `max_message_bytes`.
+- `server.max_response_bytes` defaults to 32 MiB and is capped at 128 MiB.
+  It bounds one successful tool-result payload, including the structured
+  result, the SDK's JSON text mirror and a fixed result-envelope
+  allowance. The client-controlled JSON-RPC request ID and transport
+  framing are outside the measurement. `read_message` truncates text and
+  HTML on UTF-8 rune boundaries; tools whose content must remain exact
+  refuse an over-budget result instead.
 - Permission names are known capability names.
 - `allowed_recipients` entries parse as addresses; matching is exact,
   preserving local-part case while normalizing domain case.

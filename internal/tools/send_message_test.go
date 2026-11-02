@@ -77,7 +77,7 @@ type sendEnv struct {
 	cleanup func()
 }
 
-func newSendEnv(t *testing.T, yaml string, sender smtpclient.Sender, logger *slog.Logger) *sendEnv {
+func newSendEnv(t *testing.T, yaml string, sender smtpclient.Sender, logger *slog.Logger, opts ...RegisterOption) *sendEnv {
 	t.Helper()
 	cfg, err := config.Parse([]byte(yaml))
 	if err != nil {
@@ -91,7 +91,9 @@ func newSendEnv(t *testing.T, yaml string, sender smtpclient.Sender, logger *slo
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "send-test"}, nil)
-	Register(srv, reg, WithSender(sender), WithLogger(logger))
+	registerOpts := []RegisterOption{WithSender(sender), WithLogger(logger)}
+	registerOpts = append(registerOpts, opts...)
+	Register(srv, reg, registerOpts...)
 	serverT, clientT := mcp.NewInMemoryTransports()
 	if _, err := srv.Connect(context.Background(), serverT, nil); err != nil {
 		t.Fatalf("server connect: %v", err)
@@ -396,7 +398,7 @@ func TestSendMessageRejectsOversizedRecipientInputBeforePreprocessing(t *testing
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := sendMessage(context.Background(), env.reg, sender, nil, tc.args)
+			_, _, err := sendMessage(context.Background(), env.reg, sender, nil, config.DefaultMaxResponseBytes, tc.args)
 			if err == nil {
 				t.Fatal("expected recipient input size error")
 			}
@@ -713,6 +715,72 @@ func TestSendMessageRecipientCaseAndDuplicateSemantics(t *testing.T) {
 	rawLower := strings.ToLower(string(req.Message))
 	if strings.Contains(rawLower, "\r\nbcc:") || strings.HasPrefix(rawLower, "bcc:") {
 		t.Error("Bcc header was serialized")
+	}
+}
+
+func TestSendMessageResponseBudgetRejectsBeforeSMTP(t *testing.T) {
+	sender := &recordingSender{}
+	env := newSendEnv(t, baseSendYAML(t, 2525), sender, nil, WithMaxResponseBytes(64))
+	defer env.cleanup()
+
+	_, err := env.call(t, "send_message", map[string]any{
+		"account_id": "sender",
+		"to":         []any{"alice@example.test"},
+		"subject":    "test",
+		"text":       "body",
+	})
+	if err == nil {
+		t.Fatal("send_message accepted a success response over the cap")
+	}
+	if !strings.Contains(err.Error(), "max_response_bytes") {
+		t.Errorf("err = %v, want the response-budget refusal", err)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("sender called %d times, want 0: the cap must be checked before SMTP", sender.callCount())
+	}
+}
+
+func TestSendMessageResponseBudgetAllowsSuccess(t *testing.T) {
+	sender := &recordingSender{}
+	env := newSendEnv(t, baseSendYAML(t, 2525), sender, nil, WithMaxResponseBytes(config.DefaultMaxResponseBytes))
+	defer env.cleanup()
+
+	got, err := env.call(t, "send_message", map[string]any{
+		"account_id": "sender",
+		"to":         []any{"alice@example.test"},
+		"subject":    "test",
+		"text":       "body",
+	})
+	if err != nil {
+		t.Fatalf("send_message: %v", err)
+	}
+	if got["status"] != "submitted" {
+		t.Errorf("status = %v, want submitted", got["status"])
+	}
+	if id, _ := got["message_id"].(string); id == "" {
+		t.Error("message_id is empty")
+	}
+	if sender.callCount() != 1 {
+		t.Errorf("sender called %d times, want exactly one", sender.callCount())
+	}
+}
+
+func TestSendMessageResponseBudgetPreservesAmbiguousClassification(t *testing.T) {
+	sender := &recordingSender{err: &smtpclient.AmbiguousError{MessageID: "ambiguous@example.test"}}
+	env := newSendEnv(t, baseSendYAML(t, 2525), sender, nil, WithMaxResponseBytes(config.DefaultMaxResponseBytes))
+	defer env.cleanup()
+
+	_, err := env.call(t, "send_message", map[string]any{
+		"account_id": "sender",
+		"to":         []any{"alice@example.test"},
+		"subject":    "test",
+		"text":       "body",
+	})
+	requireToolErrorContains(t, err, "SmtpAmbiguousFailure")
+	requireToolErrorContains(t, err, "ambiguous@example.test")
+	requireToolErrorContains(t, err, "may_have_been_sent=true")
+	if sender.callCount() != 1 {
+		t.Errorf("sender called %d times, want exactly one attempt", sender.callCount())
 	}
 }
 

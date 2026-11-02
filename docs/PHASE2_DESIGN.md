@@ -167,9 +167,9 @@ Security properties of the chosen approach:
   original bytes.
 - Base64 output expands the response by roughly one third. A
   default maximum-size attachment (6 MiB decoded) can produce an
-  approximately 8 MiB tool response. There is no additional
-  response-size limit in this slice; that remains a documented
-  operational consideration.
+  approximately 8 MiB tool response. There was no additional
+  response-size limit in this slice; that was implemented later as
+  `server.max_response_bytes`.
 
 ### 2.4a Outbound MIME composition (Phase 2.3 PR 2)
 

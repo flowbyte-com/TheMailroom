@@ -78,6 +78,9 @@ func TestParseValid(t *testing.T) {
 	if redacted := cfg.Redacted(); !strings.Contains(redacted, "max_request_bytes=33554432") {
 		t.Errorf("Redacted() missing server max_request_bytes; got: %s", redacted)
 	}
+	if redacted := cfg.Redacted(); !strings.Contains(redacted, "max_response_bytes=33554432") {
+		t.Errorf("Redacted() missing server max_response_bytes; got: %s", redacted)
+	}
 }
 
 func TestParseDefaults(t *testing.T) {
@@ -186,6 +189,46 @@ func TestServerMaxRequestBytes(t *testing.T) {
 			}
 			if cfg.Server.MaxRequestBytes != tc.want {
 				t.Errorf("MaxRequestBytes = %d, want %d", cfg.Server.MaxRequestBytes, tc.want)
+			}
+		})
+	}
+}
+
+func TestServerMaxResponseBytes(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		want    int
+		wantErr string
+	}{
+		{name: "default", want: DefaultMaxResponseBytes},
+		{name: "zero selects default", value: "0", want: DefaultMaxResponseBytes},
+		{name: "explicit", value: "1024", want: 1024},
+		{name: "upper bound", value: strconv.Itoa(MaxResponseBytesLimit), want: MaxResponseBytesLimit},
+		{name: "above upper bound", value: strconv.Itoa(MaxResponseBytesLimit + 1), wantErr: "max_response_bytes"},
+		{name: "negative", value: "-1", wantErr: "max_response_bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := validYAML
+			if tc.value != "" {
+				yaml = strings.Replace(yaml, "  log_level: info", "  log_level: info\n  max_response_bytes: "+tc.value, 1)
+			}
+			cfg, err := Parse([]byte(yaml))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("err = %q, want substring %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if cfg.Server.MaxResponseBytes != tc.want {
+				t.Errorf("MaxResponseBytes = %d, want %d", cfg.Server.MaxResponseBytes, tc.want)
 			}
 		})
 	}

@@ -11,6 +11,8 @@ func (c Config) Redacted() string {
 	b.WriteString(c.Server.LogLevel)
 	b.WriteString(", max_request_bytes=")
 	b.WriteString(itoa(c.Server.MaxRequestBytes))
+	b.WriteString(", max_response_bytes=")
+	b.WriteString(itoa(c.Server.MaxResponseBytes))
 	b.WriteString("} accounts=[")
 	for i, a := range c.Accounts {
 		if i > 0 {

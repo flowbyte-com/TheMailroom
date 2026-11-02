@@ -10,6 +10,7 @@ import (
 
 	"github.com/flowbyte-com/themailroom/internal/accounts"
 	"github.com/flowbyte-com/themailroom/internal/attachments"
+	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/mailcompose"
 	"github.com/flowbyte-com/themailroom/internal/permissions"
 	"github.com/flowbyte-com/themailroom/internal/recipients"
@@ -48,8 +49,9 @@ type SendMessageResult struct {
 }
 
 type registerConfig struct {
-	sender smtpclient.Sender
-	logger *slog.Logger
+	sender           smtpclient.Sender
+	logger           *slog.Logger
+	maxResponseBytes int
 }
 
 // RegisterOption customises tool registration. The defaults use the real SMTP
@@ -75,21 +77,35 @@ func WithLogger(logger *slog.Logger) RegisterOption {
 	}
 }
 
+// WithMaxResponseBytes sets the per-result response budget. A non-positive
+// value leaves the default in place.
+func WithMaxResponseBytes(max int) RegisterOption {
+	return func(cfg *registerConfig) {
+		if max > 0 {
+			cfg.maxResponseBytes = max
+		}
+	}
+}
+
 func defaultRegisterConfig() registerConfig {
 	return registerConfig{
-		sender: smtpclient.New(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		sender:           smtpclient.New(),
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		maxResponseBytes: config.DefaultMaxResponseBytes,
 	}
 }
 
 func registerSendMessage(server *mcp.Server, registry *accounts.Registry, cfg registerConfig) {
 	mcp.AddTool(server, sendMessageTool,
 		func(ctx context.Context, _ *mcp.CallToolRequest, args SendMessageArgs) (result *mcp.CallToolResult, output *SendMessageResult, err error) {
-			return sendMessage(ctx, registry, cfg.sender, cfg.logger, args)
+			return sendMessage(ctx, registry, cfg.sender, cfg.logger, cfg.maxResponseBytes, args)
 		})
 }
 
-func sendMessage(ctx context.Context, registry *accounts.Registry, sender smtpclient.Sender, logger *slog.Logger, args SendMessageArgs) (result *mcp.CallToolResult, output *SendMessageResult, err error) {
+func sendMessage(ctx context.Context, registry *accounts.Registry, sender smtpclient.Sender, logger *slog.Logger, maxResponseBytes int, args SendMessageArgs) (result *mcp.CallToolResult, output *SendMessageResult, err error) {
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = config.DefaultMaxResponseBytes
+	}
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -235,6 +251,23 @@ func sendMessage(ctx context.Context, registry *accounts.Registry, sender smtpcl
 	}
 	messageID = composed.MessageID
 
+	// The success payload is fixed at this point: the account, Message-ID,
+	// counts and status are all known before submission. Check it now so a
+	// response-budget failure can never turn a successful SMTP submission
+	// into an apparent failure.
+	planned := &SendMessageResult{
+		AccountID:            acc.ID,
+		MessageID:            messageID,
+		Status:               "submitted",
+		RecipientCount:       recipientCount,
+		AttachmentCount:      attachmentCount,
+		TotalAttachmentBytes: totalAttachmentBytes,
+	}
+	if rerr := checkResponseBudget(planned, maxResponseBytes); rerr != nil {
+		err = rerr
+		return
+	}
+
 	// Everything above is preflight. Only now may a connection be opened.
 	attempted = true
 	smtpResult, serr := sender.Send(ctx, smtpclient.Request{
@@ -255,14 +288,7 @@ func sendMessage(ctx context.Context, registry *accounts.Registry, sender smtpcl
 		return
 	}
 
-	output = &SendMessageResult{
-		AccountID:            acc.ID,
-		MessageID:            messageID,
-		Status:               "submitted",
-		RecipientCount:       recipientCount,
-		AttachmentCount:      attachmentCount,
-		TotalAttachmentBytes: totalAttachmentBytes,
-	}
+	output = planned
 	return
 }
 

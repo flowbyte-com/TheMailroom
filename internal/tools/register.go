@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/base64"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -40,6 +39,10 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 				out[i] = accountViewFrom(a)
 			}
 			output = &ListAccountsResult{Accounts: out}
+			if rerr := checkResponseBudget(output, cfg.maxResponseBytes); rerr != nil {
+				err = rerr
+				output = nil
+			}
 			return
 		})
 
@@ -69,6 +72,10 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 				views[i] = mailboxViewFrom(m)
 			}
 			output = &ListMailboxesResult{AccountID: args.AccountID, Mailboxes: views}
+			if rerr := checkResponseBudget(output, cfg.maxResponseBytes); rerr != nil {
+				err = rerr
+				output = nil
+			}
 			return
 		})
 
@@ -121,6 +128,10 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 				UIDValidity: listResult.UIDValidity,
 				Messages:    summaries,
 			}
+			if rerr := checkResponseBudget(output, cfg.maxResponseBytes); rerr != nil {
+				err = rerr
+				output = nil
+			}
 			return
 		})
 
@@ -157,12 +168,6 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 				err = mapError(berr)
 				return
 			}
-			truncated := msg.Truncated
-			if msg.Size() > acc.Limits.MaxMessageBytes {
-				msg.Text = truncateRunes(msg.Text, acc.Limits.MaxMessageBytes)
-				msg.HTML = truncateRunes(msg.HTML, acc.Limits.MaxMessageBytes)
-				truncated = true
-			}
 			atts := make([]attachmentView, len(msg.Attachments))
 			for i, a := range msg.Attachments {
 				atts[i] = attachmentFrom(a)
@@ -182,7 +187,13 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 				HTML:        msg.HTML,
 				Attachments: atts,
 				Warnings:    msg.Warnings,
-				Truncated:   truncated,
+				Truncated:   msg.Truncated,
+			}
+			// The aggregate body bound is applied to the complete result,
+			// so text and HTML cannot each consume the full budget.
+			if rerr := fitReadMessage(output, cfg.maxResponseBytes); rerr != nil {
+				err = rerr
+				output = nil
 			}
 			return
 		})
@@ -232,6 +243,11 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 			if part == "" {
 				part = args.Part
 			}
+			encoded, eerr := encodeAttachmentContent(data.Content, cfg.maxResponseBytes)
+			if eerr != nil {
+				err = eerr
+				return
+			}
 			output = &ReadAttachmentResult{
 				AccountID:     args.AccountID,
 				Mailbox:       args.Mailbox,
@@ -241,8 +257,12 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 				Filename:      data.Attachment.Filename,
 				MimeType:      data.Attachment.MimeType,
 				Size:          int64(len(data.Content)),
-				ContentBase64: base64.StdEncoding.EncodeToString(data.Content),
+				ContentBase64: encoded,
 				Warnings:      data.Warnings,
+			}
+			if rerr := checkResponseBudget(output, cfg.maxResponseBytes); rerr != nil {
+				err = rerr
+				output = nil
 			}
 			return
 		})
@@ -302,24 +322,13 @@ func Register(server *mcp.Server, registry *accounts.Registry, opts ...RegisterO
 				UIDValidity: listResult.UIDValidity,
 				Matches:     summaries,
 			}
+			if rerr := checkResponseBudget(output, cfg.maxResponseBytes); rerr != nil {
+				err = rerr
+				output = nil
+			}
 			return
 		})
 
 	// send_message
 	registerSendMessage(server, registry, cfg)
-}
-
-// truncateRunes is the only remaining helper; the previous
-// uidValidityOf helper was removed because the Backend's
-// ListMessages / SearchMessages now return a ListResult that
-// binds the UIDs and the UIDVALIDITY together at the source.
-
-func truncateRunes(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…[truncated]"
 }

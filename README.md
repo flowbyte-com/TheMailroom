@@ -105,10 +105,10 @@ composer; PR 3 added the authenticated SMTP sender.
 
 **Phase 3 (Hardening)** covers the remaining production gates. Phase 3
 PRs 1-5 and this change add bounded inbound MCP request framing, bounded
-IMAP credential commands, bounded list and search workloads, and finite
-IMAP command and operation deadlines. `has_attachments` for IMAP
-summaries, response-size limits, fuzz tests, installation docs, and a
-cross-platform release remain Phase 3 work. The Purelymail smoke test
+IMAP credential commands, bounded list and search workloads, finite IMAP
+command and operation deadlines, and an aggregate MCP response-size
+limit. `has_attachments` for IMAP summaries, fuzz tests, installation
+docs, and a cross-platform release remain Phase 3 work. The Purelymail smoke test
 completed on 2026-10-21; other hardening items remain Phase 3 work. The
 smoke test is not production certification.
 
@@ -137,7 +137,8 @@ and validated on startup. The minimal example uses the in-memory backend:
 # themailroom.yaml
 server:
   log_level: info
-  max_request_bytes: 33554432             # optional; 32 MiB default, max 128 MiB
+  max_request_bytes: 33554432             # optional inbound frame cap; 32 MiB default, max 128 MiB
+  max_response_bytes: 33554432            # optional tool-result cap; 32 MiB default, max 128 MiB
 
 accounts:
   - id: personal
@@ -425,9 +426,18 @@ value; multi-line pretty-printed JSON is rejected. The setting is
 independent of an account's `max_message_bytes`: one bounds a single
 pre-decode MCP allocation, the other bounds email content after parsing.
 It is a per-frame allocation boundary, not an aggregate process-memory
-limit. The SDK handler queue, concurrent in-flight requests, tool-level
-argument amplification and response sizes remain separate Phase 3
-hardening concerns.
+limit. Successful tool results are capped separately by
+`server.max_response_bytes` (default 32 MiB; hard maximum 128 MiB). The
+count includes the structured result, the SDK's JSON text mirror and a
+fixed result-envelope allowance. It does not bound the client-controlled
+JSON-RPC request ID or transport framing, so the complete wire frame may
+be larger; the guarantee is on the successful tool-result payload, not on
+an arbitrary transport frame. `read_message` shortens text and HTML on
+UTF-8 rune boundaries and sets `truncated: true`; `read_attachment`, list
+and search results that cannot fit return `RateLimited` without partial
+content. The SDK handler queue, concurrent in-flight requests, tool-level
+argument amplification and schema size/count limits remain separate Phase
+3 hardening concerns.
 
 **IMAP client dependency.** TheMailroom depends on
 `github.com/flowbyte-com/go-imap` `v1.2.1-themailroom.6`, a
