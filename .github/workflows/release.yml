@@ -1,0 +1,160 @@
+name: release
+
+# Publishing a release is possible only from a version tag.
+#
+# There is deliberately no pull_request trigger, no branch-push trigger and
+# no workflow_dispatch trigger, so an ordinary branch or a pull request
+# cannot start this workflow at all. The publish job additionally depends
+# on the build job, which builds and verifies the artifacts the publish
+# job uploads, so a release can never be published from an unverified
+# build.
+#
+# The guards in the build job are pinned by the regression tests in
+# internal/release, so weakening one of them is a test failure rather
+# than a silent loosening of the publish path.
+#
+# See docs/RELEASE.md for the procedure this workflow implements.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# The workflow as a whole may only read the repository. Only the publish
+# job is granted write access, and only after the build job has verified
+# the artifacts.
+permissions:
+  contents: read
+
+# One release at a time. A re-run of the same tag waits for the previous
+# run rather than racing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The release toolchain is pinned to the Go version the module
+  # requires, so that the module file stays the single source of truth
+  # for the toolchain a release is built with. The regression tests in
+  # internal/release check that this pin matches go.mod.
+  GO_VERSION: "1.27.1"
+
+jobs:
+  build:
+    name: build and verify the release artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tag is checked out, not a branch, and the full history is
+          # fetched so that the ancestry check below can run.
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify the tag is a release of a commit on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="$(cat VERSION)"
+          if [ "$tag" != "v${version}" ]; then
+            echo "::error::The tag ${tag} does not match the VERSION file (v${version})"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::The working tree is not clean"
+            exit 1
+          fi
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::The tagged commit ${GITHUB_SHA} is not on main"
+            exit 1
+          fi
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "::error::A release for ${tag} already exists"
+            exit 1
+          fi
+
+      - name: Build the release artifacts
+        run: make release
+
+      - name: Verify the release artifacts
+        run: make verify
+
+      - name: Clean-install smoke test
+        run: make smoke
+
+      - name: Upload the release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish the release
+    # The publish job runs only after the build job has built and
+    # verified the artifacts.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Only this job may write, and only to create the release.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The same commit the build job built from, so the metadata
+          # resolved here is the metadata the artifacts carry.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download the verified artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+      # The artifact service is a zip round trip, so the executable bit
+      # is restored before the artifacts are verified or published. The
+      # verification runs the host artifact, so a missing executable bit
+      # would fail the release after the artifacts had been built.
+      - name: Restore the executable bit
+        run: chmod +x dist/themailroom-*
+
+      - name: Verify the downloaded artifacts
+        run: make verify
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::The tagged commit ${GITHUB_SHA} is not on main"
+            exit 1
+          fi
+          # The licence travels with the binary, as the AGPL requires, and
+          # the changelog says what the release contains. The source code
+          # archive GitHub generates for a tag satisfies the AGPL's
+          # requirement that the corresponding source be offered.
+          cp LICENSE CHANGELOG.md dist/
+          gh release create "${tag}" \
+            --title "${tag}" \
+            --generate-notes \
+            dist/*

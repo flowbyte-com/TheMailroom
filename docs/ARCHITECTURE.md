@@ -901,18 +901,62 @@ list.
 
 ## 5. Build, test, lint
 
-- `go build ./...` — produces `bin/themailroom` via `cmd/themailroom`.
+- `make build` — produces `dist/themailroom` via `cmd/themailroom`.
+- `go build ./...` — compiles every package.
 - `go test ./...` — unit tests across all packages.
 - `go vet ./...` — required clean.
 - `go test -race ./...` — required by CI.
-- GitHub Actions CI runs the above on push and PR.
+- `make check` — the Go gates above, in one command.
+- GitHub Actions CI runs the above on push and PR, and additionally
+  builds, verifies and smoke-tests the release artifacts (§6).
 - `golangci-lint` (Phase 3 hardening) with a focused lint set.
 
 ## 6. Versioning and releases
 
-- Semantic versioning (`vMAJOR.MINOR.PATCH`).
-- Tags cut on a clean `main` only.
-- AGPL-3.0 licence preserved on every change.
+- Semantic versioning (`vMAJOR.MINOR.PATCH`). The version of the next
+  release is the `VERSION` file at the repository root, so the version a
+  release carries is a reviewable fact in the source tree.
+- Tags cut on a clean `main` only. The release workflow refuses to
+  publish a tag whose commit is not on `main`, or whose version does not
+  match the `VERSION` file.
+- AGPL-3.0 licence preserved on every change. The licence and the
+  changelog travel with the release, and the source archive GitHub
+  generates for the tag satisfies the AGPL's requirement that the
+  corresponding source be offered.
+- The release build is reproducible: the same commit, built with the
+  same Go toolchain, produces byte-for-byte identical artifacts. The
+  definitions live in `internal/release`, the entry points are the
+  `make release`, `make verify` and `make smoke` targets, and the
+  procedure is in `docs/RELEASE.md`.
+
+### 6.1 Release packaging (`internal/release`)
+
+The release tooling is an ordinary Go package, so it is covered by the
+same tests as the rest of the repository.
+
+- The **target matrix** and the **artifact names** are defined once, in
+  `internal/release`. The matrix is the same set the CI cross-platform
+  build compiles, so a target that CI does not build cannot be released.
+- The **build metadata** — version, commit and build date — is injected
+  into the binary with linker flags, and is read back out of the built
+  artifact to confirm the injection worked. The linker silently ignores
+  a flag that names a symbol which does not exist, so this check is what
+  catches a renamed variable.
+- The **checksum file** is `SHA256SUMS`, in the format `sha256sum(1)`
+  and `shasum(1)` produce, sorted by file name so that it is itself
+  reproducible.
+- The **verification** reads each artifact's own headers to confirm its
+  format, its machine and, for Linux, its static linkage; checks the
+  checksums; confirms every artifact carries the commit it was built
+  from and the same Go toolchain; and runs the artifact for the host
+  platform to confirm the version it reports.
+- The **smoke test** installs the artifact into a clean temporary
+  directory, starts it with a configuration the test writes itself,
+  completes an MCP handshake and confirms that it exits cleanly.
+- The **release workflow** can only be started by pushing a version tag.
+  It has no pull-request, branch-push or manual trigger. See
+  `docs/RELEASE.md` for the guards and `internal/release/workflow_test.go`
+  for the tests that pin them.
 
 ## 7. Open architecture decisions (deferred)
 
