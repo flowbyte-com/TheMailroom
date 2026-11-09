@@ -8,7 +8,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 The project is licensed under the GNU Affero General Public License,
 version 3. See [`LICENSE`](LICENSE).
 
-## [1.0.0] - 2026-11-02
+## [1.0.0-rc.1] - 2026-11-09
+
+The first release candidate of TheMailroom V1. It carries the
+functionality described under 1.0.0 below, and it is published as a
+prerelease: it is not marked as the latest release, and it is meant for
+testing against a real IMAP and SMTP account rather than for production
+use.
+
+The binaries report the version `1.0.0-rc.1` in their metadata, and are
+published under the `v1.0.0-rc.1` tag.
+
+## [1.0.0] - Unreleased
 
 The first V1 release. TheMailroom is an MCP server that exposes a mail
 account to an agent over the Model Context Protocol, with bounded
@@ -71,4 +82,4 @@ workloads and an explicit security posture.
 - The Purelymail live smoke test completed on 2026-10-21. It is not
   production certification.
 
-[1.0.0]: https://github.com/flowbyte-com/TheMailroom/releases/tag/v1.0.0
+[1.0.0-rc.1]: https://github.com/flowbyte-com/TheMailroom/releases/tag/v1.0.0-rc.1
