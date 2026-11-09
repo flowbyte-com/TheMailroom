@@ -3,6 +3,9 @@
 /themailroom-*
 /cmd/themailroom/themailroom
 
+# Release artefacts
+/dist/
+
 # Test artefacts
 *.test
 *.out

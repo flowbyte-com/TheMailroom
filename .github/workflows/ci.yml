@@ -68,21 +68,48 @@ jobs:
       - name: Build windows/amd64
         run: GOOS=windows GOARCH=amd64 go build -o bin/themailroom-windows-amd64.exe ./cmd/themailroom
 
+  release:
+    # The release definitions are exercised on every change, so a release
+    # build cannot rot between one tag and the next. The job builds the
+    # release artifacts, verifies them and runs the clean-install smoke
+    # test against the artifact for the host platform.
+    name: release artifacts
+    runs-on: ubuntu-latest
+    env:
+      # The release toolchain is pinned to the Go version the module
+      # requires, so that the artifacts are reproducible and match what
+      # the release workflow builds.
+      GO_VERSION: "1.27.1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build the release artifacts
+        run: make release
+      - name: Verify the release artifacts
+        run: make verify
+      - name: Clean-install smoke test
+        run: make smoke
+
   full-test-suite:
     # This job is the required status check on main. It must run even when a
     # dependency fails, is cancelled or is skipped, so that the required check
     # reports failure rather than disappearing.
     name: Full test suite
-    needs: [test, cross]
+    needs: [test, cross, release]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Verify every required job succeeded
         run: |
-          echo "test result:  ${{ needs.test.result }}"
-          echo "cross result: ${{ needs.cross.result }}"
+          echo "test result:    ${{ needs.test.result }}"
+          echo "cross result:   ${{ needs.cross.result }}"
+          echo "release result: ${{ needs.release.result }}"
           if [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.cross.result }}" != "success" ]; then
+             [ "${{ needs.cross.result }}" != "success" ] || \
+             [ "${{ needs.release.result }}" != "success" ]; then
             echo "::error::One or more required jobs did not succeed"
             exit 1
           fi

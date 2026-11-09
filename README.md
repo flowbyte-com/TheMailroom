@@ -126,14 +126,22 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
 
 ## Install
 
-TheMailroom is a single static binary. Build it from source:
+TheMailroom is a single static binary, licensed under the AGPL-3.0. See
+[`docs/INSTALL.md`](docs/INSTALL.md) for installing a released binary,
+verifying its checksum and building from source.
+
+Build it from source:
 
 ```sh
-go build -o bin/themailroom ./cmd/themailroom
-./bin/themailroom -version
+make build
+./dist/themailroom -version
 ```
 
 Cross-platform builds use the standard Go toolchain. No CGo is required.
+`make release` builds the release artifacts for every supported platform,
+`make verify` checks them and `make smoke` runs a clean-install smoke
+test. See [`docs/RELEASE.md`](docs/RELEASE.md) for the release
+procedure.
 
 ## Configure
 
@@ -471,10 +479,15 @@ maintainer before public disclosure.
 go test ./...           # all unit tests
 go vet ./...            # static analysis
 go test -race ./...     # with race detector
+make check              # the same gates as CI
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the layered
 design.
+
+## Changelog
+
+[`CHANGELOG.md`](CHANGELOG.md) records what changed in each release.
 
 ## License
 
