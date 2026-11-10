@@ -24,6 +24,11 @@ var ErrSymlink = errors.New("setup: destination is a symbolic link")
 // path uses it to skip checks that only mean something on POSIX.
 func isWindows() bool { return runtime.GOOS == "windows" }
 
+// writePolicy is the platform confidentiality gate. It is a variable so the
+// filesystem tests can exercise the POSIX write path on any host, and so the
+// refusal path can be tested without a Windows machine.
+var writePolicy = platformWritePolicy
+
 // writeConfig writes data to path and returns the absolute path written.
 //
 // The strategy avoids every failure mode that would matter here:
@@ -47,7 +52,7 @@ func writeConfig(path string, data []byte, force bool) (string, error) {
 	}
 	// A platform that cannot guarantee the file's confidentiality is
 	// refused before anything is inspected or created.
-	if err := platformWritePolicy(runtime.GOOS); err != nil {
+	if err := writePolicy(runtime.GOOS); err != nil {
 		return "", err
 	}
 	abs, err := filepath.Abs(path)

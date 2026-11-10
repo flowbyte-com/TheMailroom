@@ -9,6 +9,16 @@ import (
 	"testing"
 )
 
+// TestMain lets the filesystem tests exercise the write path on any host.
+//
+// The real platform policy is tested directly, and the refusal path is
+// tested by injecting it, so overriding it here does not hide the Windows
+// behaviour.
+func TestMain(m *testing.M) {
+	writePolicy = func(string) error { return nil }
+	os.Exit(m.Run())
+}
+
 // TestWriteRefusesAnExistingFile covers the no-overwrite default.
 func TestWriteRefusesAnExistingFile(t *testing.T) {
 	dir := t.TempDir()
@@ -258,5 +268,26 @@ func TestForceRefusedInAGroupWritableDirectory(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if string(data) != "original" {
 		t.Error("the existing file was modified")
+	}
+}
+
+// TestWriteRefusesWhenThePlatformCannotGuaranteeConfidentiality covers the
+// policy gate inside the write path: nothing is inspected or created when
+// the platform cannot assure the file's confidentiality.
+func TestWriteRefusesWhenThePlatformCannotGuaranteeConfidentiality(t *testing.T) {
+	original := writePolicy
+	writePolicy = func(string) error { return errWindowsACL }
+	t.Cleanup(func() { writePolicy = original })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if _, err := writeConfig(path, []byte("x"), false); !errors.Is(err, errWindowsACL) {
+		t.Fatalf("err = %v, want errWindowsACL", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("a file was created despite the platform refusal")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("the refusal left files behind: %v", entries)
 	}
 }
