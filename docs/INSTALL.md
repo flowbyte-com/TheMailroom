@@ -92,11 +92,16 @@ The output names the version, the commit the binary was built from and
 the build date:
 
 ```
-themailroom 1.0.0 (commit 904384a32183ffaad34a1d95432344eeaa920234, built 2026-11-02T12:22:50Z)
+themailroom 1.0.0-rc.1 (commit cee0994a42191430f2ced7b16278f3e4aab4bf49, built 2026-11-10T08:21:11Z)
 ```
 
 That output is the authoritative statement of which binary you are
 running. Quote it in a bug report.
+
+**Version note.** The published `v1.0.0-rc.1` binary predates the `setup`,
+`doctor` and `-preset` work described below. Those commands require a build
+from a later commit or a later release. Check with `themailroom setup -h`
+before relying on them.
 
 ### 4. Create a configuration
 
