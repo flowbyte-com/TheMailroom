@@ -143,9 +143,55 @@ Cross-platform builds use the standard Go toolchain. No CGo is required.
 test. See [`docs/RELEASE.md`](docs/RELEASE.md) for the release
 procedure.
 
+## First run
+
+`themailroom setup` writes a configuration through a short interview. It
+never asks for or stores a plaintext password: it records a credential
+command, which is run only when the server or a network diagnostic needs the
+secret.
+
+```sh
+themailroom setup -config /etc/themailroom/themailroom.yaml
+```
+
+It asks for the account id and address, the IMAP host, TLS mode, port,
+username and credential command, and then whether to enable sending. The
+defaults are the safe ones: read-only, verified TLS, and no attachment
+sending. The `send` capability is granted only if you answer yes, and
+`attachment_send` is never granted by setup.
+
+The generated file is validated with the same loader the server uses before
+it is written, so a configuration that setup accepts is one the server will
+load. An existing file is never replaced unless you pass `-force`; a
+symbolic link is always refused, because writing through it would modify a
+file you did not name. Because forced replacement renames over the
+destination, `-force` is only permitted in a directory that group and other
+users cannot write to; otherwise another user could change the entry between
+the check and the rename.
+
+On POSIX systems the file is created with mode `0600`, regardless of the
+process umask. On Windows the standard library cannot set an access control
+list, and a new file inherits its directory's ACL, so setup cannot guarantee
+that the file is readable only by its owner. It refuses to write there and
+tells you how to create the file and restrict it with `icacls` instead of
+claiming a protection that does not exist.
+
+Setup never opens a network connection, never runs a credential command and
+never starts the server. Afterwards, validate the file and then test
+connectivity as a separate, explicit step:
+
+```sh
+themailroom doctor -config /etc/themailroom/themailroom.yaml
+themailroom doctor -config /etc/themailroom/themailroom.yaml -network
+```
+
+The `-network` run does execute the credential command, because
+authentication needs it.
+
 ## Configure
 
-Create a configuration file (default: `./themailroom.yaml`). The schema is
+Create a configuration file by hand if you prefer (default:
+`./themailroom.yaml`), or let `themailroom setup` write one. The schema is
 documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#29-configuration-internalconfig)
 and validated on startup. The minimal example uses the in-memory backend:
 

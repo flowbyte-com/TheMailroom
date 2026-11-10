@@ -98,7 +98,43 @@ themailroom 1.0.0 (commit 904384a32183ffaad34a1d95432344eeaa920234, built 2026-1
 That output is the authoritative statement of which binary you are
 running. Quote it in a bug report.
 
-### 4. Run the server
+### 4. Create a configuration
+
+`themailroom setup` writes a configuration through a short interview. It
+never asks for a plaintext password; it records a credential command
+instead.
+
+```sh
+themailroom setup -config /etc/themailroom/themailroom.yaml
+```
+
+The account is created read-only with verified TLS. Sending is opt-in, and
+attachment sending is never granted. An existing file is not replaced unless
+you pass `-force`, a symbolic link is always refused, and the file is
+validated with the server's own configuration loader before it is written.
+
+On POSIX systems the file is created with mode `0600`. `-force` is only
+allowed in a directory that group and other users cannot write to, because
+a forced replacement renames over the destination entry.
+
+On Windows the standard library cannot set an access control list, and a new
+file inherits its directory's ACL, so `setup` cannot guarantee that the file
+is readable only by its owner. It refuses to write and tells you how to
+create the file by hand and restrict it with `icacls`.
+
+Validate the result, then test connectivity as a separate step:
+
+```sh
+themailroom doctor -config /etc/themailroom/themailroom.yaml
+themailroom doctor -config /etc/themailroom/themailroom.yaml -network
+```
+
+A configuration can also be written by hand; see
+[`ARCHITECTURE.md`](ARCHITECTURE.md#29-configuration-internalconfig) for the
+schema and [`examples/themailroom.yaml`](../examples/themailroom.yaml) for a
+complete example.
+
+### 5. Run the server
 
 TheMailroom is an MCP server, not an interactive program. It reads its
 configuration, registers its tools and then serves requests on stdin and

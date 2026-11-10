@@ -3,11 +3,16 @@
 // Usage:
 //
 //	themailroom -config /etc/themailroom.yaml
+//	themailroom setup [-config PATH] [-force]
 //	themailroom doctor [-config PATH] [-network] [-timeout DURATION]
 //
 // The server reads configuration, builds the account registry, registers
 // every MCP tool, and blocks serving requests over stdio. The process
 // exits cleanly when the parent closes stdin or sends SIGTERM.
+//
+// The setup command writes a new configuration file. It never asks for a
+// plaintext password, never opens a network connection and never starts the
+// server.
 //
 // The doctor command diagnoses the configuration without serving. It runs
 // local checks by default and network checks only when -network is given.
@@ -29,19 +34,27 @@ import (
 	"github.com/flowbyte-com/themailroom/internal/config"
 	"github.com/flowbyte-com/themailroom/internal/doctor"
 	"github.com/flowbyte-com/themailroom/internal/mcpserver"
+	"github.com/flowbyte-com/themailroom/internal/setup"
 	"github.com/flowbyte-com/themailroom/internal/version"
 )
 
-// Exit codes for the doctor command.
+// Exit codes for the doctor and setup commands.
 const (
 	doctorExitOK     = 0
 	doctorExitFailed = 1
 	doctorExitUsage  = 2
+
+	setupExitOK     = 0
+	setupExitFailed = 1
+	setupExitUsage  = 2
 )
 
 func main() {
-	// The doctor is a diagnostic subcommand, not a serving mode, so it is
+	// setup and doctor are subcommands, not serving modes, so they are
 	// dispatched before the server's flags are parsed.
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		os.Exit(runSetup(os.Args[2:], os.Stdin, os.Stdout))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		os.Exit(runDoctor(os.Args[2:], os.Stdout))
 	}
@@ -58,6 +71,65 @@ func main() {
 		fmt.Fprintf(os.Stderr, "themailroom: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runSetup runs the first-run configuration command and returns its exit
+// code.
+//
+// The connectivity check is offered only after the configuration is
+// written, and only as an explicit yes. Declining leaves the process having
+// opened no socket and run no credential command.
+func runSetup(args []string, stdin io.Reader, stdout io.Writer) int {
+	fs := flag.NewFlagSet("themailroom setup", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	cfgPath := fs.String("config", defaultConfigPath(), "where to write the configuration")
+	force := fs.Bool("force", false, "replace an existing regular file")
+	if err := fs.Parse(args); err != nil {
+		return setupExitUsage
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	err := setup.Run(ctx, setup.Options{
+		Path:  *cfgPath,
+		Force: *force,
+		In:    stdin,
+		Out:   stdout,
+		Check: setupCheck,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "themailroom: %v\n", err)
+		return setupExitFailed
+	}
+	return setupExitOK
+}
+
+// errCheckFailed is returned when the operator asked for a connectivity
+// check and the diagnostic reported problems. The configuration has already
+// been written and is deliberately left in place for troubleshooting.
+var errCheckFailed = errors.New(
+	"the connectivity check reported problems; the configuration was written and can be inspected with the doctor command")
+
+// renderCheck prints a diagnostic report and reports whether it passed.
+//
+// Printing and judging are separate on purpose: a report that prints
+// successfully can still describe failures, and those failures must reach
+// the exit status.
+func renderCheck(report doctor.Report, out io.Writer) error {
+	if err := report.WriteText(out); err != nil {
+		return err
+	}
+	if report.Failed() {
+		return errCheckFailed
+	}
+	return nil
+}
+
+// setupCheck is the connectivity check the setup command offers. It is a
+// variable so a test can substitute a deterministic diagnostic.
+var setupCheck = func(ctx context.Context, path string, out io.Writer) error {
+	return renderCheck(doctor.Run(ctx, doctor.Options{ConfigPath: path, Network: true}), out)
 }
 
 // runDoctor runs the diagnostic command and returns its exit code.
