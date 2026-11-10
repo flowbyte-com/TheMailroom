@@ -8,7 +8,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 The project is licensed under the GNU Affero General Public License,
 version 3. See [`LICENSE`](LICENSE).
 
-## [1.0.0-rc.1] - 2026-11-09
+## [1.0.0-rc.1] - 2026-11-10
 
 The first release candidate of TheMailroom V1. It carries the
 functionality described under 1.0.0 below, and it is published as a
