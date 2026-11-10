@@ -145,6 +145,10 @@ procedure.
 
 ## First run
 
+> **Version note.** The published `v1.0.0-rc.1` predates `setup`, `doctor`
+> and `-preset`. Use a build from a later commit or release for the workflow
+> below; check with `themailroom setup -h`.
+
 `themailroom setup` writes a configuration through a short interview. It
 never asks for or stores a plaintext password: it records a credential
 command, which is run only when the server or a network diagnostic needs the
@@ -198,6 +202,11 @@ themailroom doctor -config /etc/themailroom/themailroom.yaml -network
 
 The `-network` run does execute the credential command, because
 authentication needs it.
+
+For an agent, [`skills/themailroom/SKILL.md`](skills/themailroom/SKILL.md) is
+a portable Agent Skill covering the same workflow and the operating rules.
+[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) defines the reproducible onboarding
+acceptance and the separate, authorised live-provider check.
 
 ## Configure
 
