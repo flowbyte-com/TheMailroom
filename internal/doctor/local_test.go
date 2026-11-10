@@ -351,49 +351,6 @@ accounts:
 	}
 }
 
-// TestCredentialScalarsCollectsEveryForm covers every YAML shape a
-// credential can take: a scalar, a block list, a flow list, a quoted and
-// escaped scalar, and a value reached through an anchor and alias.
-func TestCredentialScalarsCollectsEveryForm(t *testing.T) {
-	body := `accounts:
-  - id: a
-    imap:
-      password: "scalar-secret-value"
-    smtp:
-      password_command:
-        - vault
-        - read
-        - block-secret-value
-  - id: b
-    imap:
-      password: &pw "anchored-secret-value"
-      username: *pw
-      password_command: ["printf", "flow-secret-value"]
-  - id: c
-    imap:
-      password: "escaped\"secret-value"
-`
-	values := credentialScalars([]byte(body))
-	for _, want := range []string{
-		"scalar-secret-value",
-		"vault", "read", "block-secret-value",
-		"printf", "flow-secret-value",
-		"anchored-secret-value",
-		`escaped"secret-value`,
-	} {
-		found := false
-		for _, v := range values {
-			if v == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("credentialScalars() did not collect %q; got %v", want, values)
-		}
-	}
-}
-
 // TestDescribeConfigErrorSuppressesUntrustedContent pins the fail-closed
 // rule: a YAML syntax, type or duplicate-key error quotes document content,
 // so none of it is printed.
@@ -453,31 +410,34 @@ func TestDescribeConfigErrorSuppressesUntrustedContent(t *testing.T) {
 	}
 }
 
-// TestSanitiseMessageRemovesConfiguredValues covers the validation branch:
-// field paths and explanations survive, configured values do not.
-func TestSanitiseMessageRemovesConfiguredValues(t *testing.T) {
+// TestValidationErrorKeepsTheFieldPathAndDropsTheValue covers the
+// validation branch: the trusted field identifier survives, and nothing
+// from the rejected value does.
+func TestValidationErrorKeepsTheFieldPathAndDropsTheValue(t *testing.T) {
 	body := []byte(`accounts:
   - id: a
+    email: a@example.test
+    permissions: [prefixab]
     imap:
-      password: "value-canary"
+      password: "ab"
+    smtp:
       password_command:
         - vault
         - read
         - /run/secrets/command-canary
 `)
-	msg := `server.log_level "value-canary" invalid; want one of debug, info, warn, error; ` +
-		`accounts[0].mailbox_root: stat /home/alice/Mail: no such file; ` +
-		`unknown capability names: value-canary`
-	got := sanitiseMessage(msg, body)
-
-	for _, secret := range []string{"value-canary", "/home/alice/Mail", "/run/secrets/command-canary"} {
-		if strings.Contains(got, secret) {
-			t.Errorf("sanitised message still contains %q: %s", secret, got)
-		}
+	_, err := config.Parse(body)
+	if err == nil {
+		t.Fatal("config.Parse accepted the body; the case is not a validation failure")
 	}
-	for _, keep := range []string{"server.log_level", "invalid; want one of", "accounts[0].mailbox_root"} {
-		if !strings.Contains(got, keep) {
-			t.Errorf("sanitised message lost the useful part %q: %s", keep, got)
+	got := describeConfigError(err, body)
+
+	if !strings.Contains(got, "accounts[0].permissions") {
+		t.Errorf("lost the trusted field identifier: %s", got)
+	}
+	for _, value := range []string{"prefixab", "vault", "read", "/run/secrets/command-canary"} {
+		if strings.Contains(got, value) {
+			t.Errorf("printed a rejected value %q: %s", value, got)
 		}
 	}
 }

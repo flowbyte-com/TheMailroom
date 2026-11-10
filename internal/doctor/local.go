@@ -82,7 +82,7 @@ func RunLocal(path string) LocalResult {
 		out.Checks = append(out.Checks, Check{
 			Name:   "config.parse",
 			Status: StatusFail,
-			Detail: "configuration is invalid: " + describeConfigError(err, data),
+			Detail: describeConfigError(err, data),
 			Remedy: "correct the reported setting and run doctor again",
 		})
 		return out
@@ -111,8 +111,8 @@ func RunLocal(path string) LocalResult {
 		out.Checks = append(out.Checks, Check{
 			Name:   "registry",
 			Status: StatusFail,
-			Detail: "accounts could not be constructed: " + describeConfigError(err, data),
-			Remedy: "correct the reported account setting and run doctor again",
+			Detail: "accounts could not be constructed; the rejected value is not printed",
+			Remedy: "correct the account settings and run doctor again",
 		})
 	} else {
 		out.Checks = append(out.Checks, Check{
