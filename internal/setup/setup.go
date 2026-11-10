@@ -58,6 +58,10 @@ type Answers struct {
 	SMTPUsername string
 	// SMTPCommand is the credential command, as an argument vector.
 	SMTPCommand []string
+
+	// Provider is an informational label recorded in the configuration. It
+	// has no runtime effect; the account behaves identically without it.
+	Provider string
 }
 
 // header is the fixed comment block written above the configuration.
@@ -94,6 +98,7 @@ type serverDocument struct {
 type accountDocument struct {
 	ID          string        `yaml:"id"`
 	Backend     string        `yaml:"backend"`
+	Provider    string        `yaml:"provider,omitempty"`
 	Email       string        `yaml:"email"`
 	Permissions []string      `yaml:"permissions"`
 	IMAP        imapDocument  `yaml:"imap"`
@@ -146,6 +151,7 @@ func Generate(a Answers) ([]byte, config.Config, error) {
 	account := accountDocument{
 		ID:          a.AccountID,
 		Backend:     "imap",
+		Provider:    a.Provider,
 		Email:       a.Email,
 		Permissions: permissions,
 		IMAP:        imap,
@@ -200,6 +206,9 @@ type Options struct {
 	Path string
 	// Force allows an existing regular file to be replaced.
 	Force bool
+	// Preset supplies the interview's default values. The zero value
+	// selects the generic, provider-neutral interview.
+	Preset Preset
 	// In and Out are the prompt streams. Nil selects the process streams.
 	In  io.Reader
 	Out io.Writer
@@ -225,14 +234,18 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	p := newPrompter(in, out)
 
+	preset := opts.Preset
+	if preset == (Preset{}) {
+		preset = Generic
+	}
+	a := Answers{Provider: preset.Name}
+
 	fmt.Fprintln(out, "TheMailroom setup")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "This writes a new configuration file. It does not ask for or store a")
 	fmt.Fprintln(out, "plaintext password: it records a credential command instead, which is")
 	fmt.Fprintln(out, "run only when the server or a network diagnostic needs the secret.")
 	fmt.Fprintln(out)
-
-	var a Answers
 
 	var err error
 	if a.AccountID, err = p.ask(ctx, "Account id", "personal", true); err != nil {
@@ -244,17 +257,21 @@ func Run(ctx context.Context, opts Options) error {
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Incoming mail (IMAP), always over verified TLS")
-	if a.IMAPHost, err = p.ask(ctx, "  IMAP host", "", true); err != nil {
+	if a.IMAPHost, err = p.ask(ctx, "  IMAP host", preset.IMAPHost, true); err != nil {
 		return err
 	}
-	mode, err := p.askChoice(ctx, "  IMAP TLS mode", []string{"implicit TLS", "STARTTLS"}, 1)
+	imapDefault := 1 // implicit TLS is the first option
+	if !preset.IMAPImplicitTLS {
+		imapDefault = 2
+	}
+	mode, err := p.askChoice(ctx, "  IMAP TLS mode", []string{"implicit TLS", "STARTTLS"}, imapDefault)
 	if err != nil {
 		return err
 	}
 	a.IMAPImplicitTLS = mode == 0
-	defaultPort := config.DefaultIMAPPort
-	if !a.IMAPImplicitTLS {
-		defaultPort = config.DefaultIMAPPortStartTLS
+	defaultPort := preset.IMAPStartTLSPort
+	if a.IMAPImplicitTLS {
+		defaultPort = preset.IMAPImplicitPort
 	}
 	if a.IMAPPort, err = p.askPort(ctx, "  IMAP port", defaultPort); err != nil {
 		return err
@@ -275,17 +292,21 @@ func Run(ctx context.Context, opts Options) error {
 	if a.EnableSend {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Outgoing mail (SMTP), always over verified TLS")
-		if a.SMTPHost, err = p.ask(ctx, "  SMTP host", "", true); err != nil {
+		if a.SMTPHost, err = p.ask(ctx, "  SMTP host", preset.SMTPHost, true); err != nil {
 			return err
 		}
-		smtpMode, modeErr := p.askChoice(ctx, "  SMTP TLS mode", []string{"STARTTLS", "implicit TLS"}, 1)
+		smtpDefault := 1 // STARTTLS is the first option
+		if preset.SMTPImplicitTLS {
+			smtpDefault = 2
+		}
+		smtpMode, modeErr := p.askChoice(ctx, "  SMTP TLS mode", []string{"STARTTLS", "implicit TLS"}, smtpDefault)
 		if modeErr != nil {
 			return modeErr
 		}
 		a.SMTPImplicitTLS = smtpMode == 1
-		defaultSMTPPort := config.DefaultSMTPPort
+		defaultSMTPPort := preset.SMTPStartTLSPort
 		if a.SMTPImplicitTLS {
-			defaultSMTPPort = config.DefaultSMTPPortImplicit
+			defaultSMTPPort = preset.SMTPImplicitPort
 		}
 		if a.SMTPPort, err = p.askPort(ctx, "  SMTP port", defaultSMTPPort); err != nil {
 			return err

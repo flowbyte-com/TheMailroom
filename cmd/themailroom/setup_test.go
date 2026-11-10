@@ -194,3 +194,114 @@ func TestRunSetupFailsWhenTheCheckFailsAndKeepsTheFile(t *testing.T) {
 		t.Errorf("the configuration was not preserved after a failed check: %v", err)
 	}
 }
+
+// purelymailAnswers accepts every Purelymail preset default for a read-only
+// account.
+func purelymailAnswers(path string) string {
+	return strings.Join([]string{
+		"work", "work@purelymail.com",
+		"", "", "", "",
+		"pass show mail/work",
+		"n", path, "n",
+	}, "\n") + "\n"
+}
+
+// TestRunSetupRejectsAnUnknownPreset covers the usage error.
+func TestRunSetupRejectsAnUnknownPreset(t *testing.T) {
+	var out bytes.Buffer
+	code := runSetup([]string{"-preset", "nope"}, strings.NewReader(""), &out)
+	if code != setupExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, setupExitUsage)
+	}
+}
+
+// TestRunSetupPresetPopulatesDefaults covers the CLI wiring: the preset's
+// servers appear in the generated file.
+func TestRunSetupPresetPopulatesDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	var out bytes.Buffer
+
+	code := runSetup([]string{"-preset", "purelymail", "-config", path},
+		strings.NewReader(purelymailAnswers(path)), &out)
+	if code != setupExitOK {
+		t.Fatalf("exit code = %d\n%s", code, out.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"host: imap.purelymail.com",
+		"port: 993",
+		"tls: true",
+		"username: work@purelymail.com",
+		"provider: purelymail",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("the generated file does not contain %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(string(data), "smtp:") {
+		t.Errorf("sending was not enabled but an SMTP block was written:\n%s", data)
+	}
+}
+
+// TestRunSetupPresetConfigPassesDoctor covers the integration: a preset
+// configuration passes the local diagnostics with no failures.
+func TestRunSetupPresetConfigPassesDoctor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	var out bytes.Buffer
+	if code := runSetup([]string{"-preset", "purelymail", "-config", path},
+		strings.NewReader(purelymailAnswers(path)), &out); code != setupExitOK {
+		t.Fatalf("setup exit code = %d\n%s", code, out.String())
+	}
+
+	report := doctor.Run(context.Background(), doctor.Options{ConfigPath: path})
+	if report.Failed() {
+		var text bytes.Buffer
+		_ = report.WriteText(&text)
+		t.Fatalf("doctor rejected the preset configuration:\n%s", text.String())
+	}
+}
+
+// TestRunSetupPresetDoesNotCheckByDefault covers the no-network boundary
+// with the preset selected.
+func TestRunSetupPresetDoesNotCheckByDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	original := setupCheck
+	called := false
+	setupCheck = func(context.Context, string, io.Writer) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { setupCheck = original })
+
+	var out bytes.Buffer
+	if code := runSetup([]string{"-preset", "purelymail", "-config", path},
+		strings.NewReader(purelymailAnswers(path)), &out); code != setupExitOK {
+		t.Fatalf("exit code = %d\n%s", code, out.String())
+	}
+	if called {
+		t.Error("the connectivity check ran without being asked")
+	}
+}
+
+// TestRunSetupGenericWritesNoProviderLabel covers the unchanged generic
+// interview at the CLI boundary.
+func TestRunSetupGenericWritesNoProviderLabel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	var out bytes.Buffer
+	if code := runSetup([]string{"-config", path}, strings.NewReader(setupAnswers(path)), &out); code != setupExitOK {
+		t.Fatalf("exit code = %d\n%s", code, out.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "provider:") {
+		t.Errorf("the generic interview wrote a provider label:\n%s", data)
+	}
+	if !strings.Contains(string(data), "host: mail.example.test") {
+		t.Errorf("the typed host is missing:\n%s", data)
+	}
+}
