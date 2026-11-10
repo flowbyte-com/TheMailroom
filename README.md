@@ -394,6 +394,42 @@ replay API or retry, and SMTPUTF8 envelope submission is unsupported. A
 failure after DATA begins is reported as an ambiguous submission with the
 original Message-ID and must not be retried automatically.
 
+## Diagnose
+
+`themailroom doctor` checks a configuration without starting the server.
+Local checks are the default and never touch the network. They report
+configuration discovery, parsing and validation, account completeness,
+catch inconsistent settings the loader accepts, report credential sources
+by kind without revealing them, and warn when the configuration file is
+readable by group or other.
+
+```sh
+themailroom doctor -config /etc/themailroom/themailroom.yaml
+```
+
+Network diagnostics are explicitly opt-in. `-network` resolves the
+configured hosts, opens TCP connections, verifies TLS certificates and
+host names, and authenticates over IMAP and SMTP. It never sends a
+message, never fetches a message body and never mutates a mailbox: the
+IMAP check reuses the read-only mailbox listing, and the SMTP check stops
+after authentication. The whole network phase is bounded by `-timeout`
+(30 seconds by default).
+
+```sh
+themailroom doctor -config /etc/themailroom/themailroom.yaml -network
+```
+
+Every check is reported as `ok`, `warn`, `fail` or `skip`, with a
+remediation line for warnings and failures. The command exits `0` when no
+check failed, `1` when a check failed and `2` on a usage error, so it can
+gate a deployment script.
+
+A credential is never printed. A `password_command` is reported by its
+executable name only, because its arguments can name where the secret
+lives. The local checks do not execute the command; `-network` does,
+because authentication needs the credential. TLS verification is never
+disabled, and no flag can turn it off.
+
 ## Run
 
 ```sh

@@ -3,10 +3,14 @@
 // Usage:
 //
 //	themailroom -config /etc/themailroom.yaml
+//	themailroom doctor [-config PATH] [-network] [-timeout DURATION]
 //
 // The server reads configuration, builds the account registry, registers
 // every MCP tool, and blocks serving requests over stdio. The process
 // exits cleanly when the parent closes stdin or sends SIGTERM.
+//
+// The doctor command diagnoses the configuration without serving. It runs
+// local checks by default and network checks only when -network is given.
 package main
 
 import (
@@ -23,11 +27,24 @@ import (
 
 	"github.com/flowbyte-com/themailroom/internal/accounts"
 	"github.com/flowbyte-com/themailroom/internal/config"
+	"github.com/flowbyte-com/themailroom/internal/doctor"
 	"github.com/flowbyte-com/themailroom/internal/mcpserver"
 	"github.com/flowbyte-com/themailroom/internal/version"
 )
 
+// Exit codes for the doctor command.
+const (
+	doctorExitOK     = 0
+	doctorExitFailed = 1
+	doctorExitUsage  = 2
+)
+
 func main() {
+	// The doctor is a diagnostic subcommand, not a serving mode, so it is
+	// dispatched before the server's flags are parsed.
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		os.Exit(runDoctor(os.Args[2:], os.Stdout))
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			// Recover from a panic deep in the SDK or transport. We
@@ -41,6 +58,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, "themailroom: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runDoctor runs the diagnostic command and returns its exit code.
+//
+// The report goes to stdout so it can be captured; usage errors go to
+// stderr. A warning does not fail the command: only a failed check does.
+func runDoctor(args []string, stdout io.Writer) int {
+	fs := flag.NewFlagSet("themailroom doctor", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	cfgPath := fs.String("config", defaultConfigPath(), "path to configuration file")
+	network := fs.Bool("network", false, "also test network connectivity and authentication (opt-in)")
+	timeout := fs.Duration("timeout", doctor.DefaultNetworkTimeout, "overall bound for the network checks")
+	if err := fs.Parse(args); err != nil {
+		return doctorExitUsage
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	report := doctor.Run(ctx, doctor.Options{
+		ConfigPath: *cfgPath,
+		Network:    *network,
+		Timeout:    *timeout,
+	})
+	if err := report.WriteText(stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "themailroom: %v\n", err)
+		return doctorExitFailed
+	}
+	if report.Failed() {
+		return doctorExitFailed
+	}
+	return doctorExitOK
 }
 
 func run() error {

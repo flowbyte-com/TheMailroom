@@ -248,23 +248,34 @@ func (c *Client) Send(ctx context.Context, req Request) (Result, error) {
 	return Result{MessageID: normalized.MessageID}, nil
 }
 
-func validateRequest(req Request) (Request, error) {
-	cfg := req.Config
+// validateConfig checks the endpoint and credential-source fields that a
+// submission needs before any network connection. It is shared by Send and
+// Probe so the diagnostic path accepts exactly the configuration the real
+// submission path accepts.
+func validateConfig(cfg config.SMTPConfig) error {
 	if cfg.TLS == cfg.StartTLS {
-		return Request{}, invalidRequest("exactly one of TLS or STARTTLS must be enabled")
+		return invalidRequest("exactly one of TLS or STARTTLS must be enabled")
 	}
 	if strings.TrimSpace(cfg.Host) == "" || recipients.HasControl(cfg.Host) ||
 		strings.ContainsAny(cfg.Host, " /") {
-		return Request{}, invalidRequest("invalid SMTP host")
+		return invalidRequest("invalid SMTP host")
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {
-		return Request{}, invalidRequest("invalid SMTP port")
+		return invalidRequest("invalid SMTP port")
 	}
 	if strings.TrimSpace(cfg.Username) == "" || recipients.HasControl(cfg.Username) {
-		return Request{}, invalidRequest("invalid SMTP username")
+		return invalidRequest("invalid SMTP username")
 	}
 	if (cfg.Password == "") == (len(cfg.PasswordCommand) == 0) {
-		return Request{}, invalidRequest("exactly one credential source is required")
+		return invalidRequest("exactly one credential source is required")
+	}
+	return nil
+}
+
+func validateRequest(req Request) (Request, error) {
+	cfg := req.Config
+	if err := validateConfig(cfg); err != nil {
+		return Request{}, err
 	}
 
 	from, err := recipients.Canonical(req.From)
