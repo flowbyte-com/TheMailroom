@@ -145,6 +145,51 @@ func TestSkillStatesTheSafetyRules(t *testing.T) {
 	}
 }
 
+// TestSkillDescribesTheToolErrorContract pins the tool-error contract that
+// docs/TOOLS.md establishes: a tool execution failure sets isError and
+// carries human-readable prose in content, the typed business-error codes
+// stay in the server-side audit log, a tool error has no structuredContent,
+// and a malformed protocol request is a JSON-RPC error rather than a
+// result.
+//
+// An earlier revision of the skill claimed the client-visible content
+// carries a typed code. That is false, and an agent acting on it would parse
+// prose for a field that is not there, so the wording is pinned here.
+func TestSkillDescribesTheToolErrorContract(t *testing.T) {
+	_, _, body := readSkill(t)
+	lower := strings.ToLower(body)
+
+	// The facts the skill must state.
+	for _, want := range []string{
+		"iserror",           // the portable error flag
+		"structuredcontent", // structured output exists, and only on success
+		"json-rpc error",    // protocol failures are not tool results
+		"audit log",         // where the typed codes actually live
+		"client payload",    // the codes are absent from it
+		"prose",             // the client-visible text is human-readable
+	} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("the skill does not state %q", want)
+		}
+	}
+
+	// The claims that are false and must not come back.
+	for _, forbidden := range []string{
+		"content carries a `code`",
+		"carries a `code` such as",
+		"content carries a code",
+	} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("the skill claims the client-visible content carries a typed code (%q)", forbidden)
+		}
+	}
+
+	// It must point at the authoritative contract.
+	if !strings.Contains(body, "../../docs/TOOLS.md") {
+		t.Error("the skill does not link to docs/TOOLS.md")
+	}
+}
+
 // TestSkillDoesNotClaimUnsafeAutomation covers claims that would mislead an
 // agent into believing it can act on its own.
 func TestSkillDoesNotClaimUnsafeAutomation(t *testing.T) {

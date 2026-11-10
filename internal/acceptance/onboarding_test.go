@@ -307,6 +307,14 @@ func TestOnboardingAcceptance(t *testing.T) {
 			if !strings.Contains(text, "lacks capability") {
 				t.Errorf("denial text = %q, want it to name the missing capability", text)
 			}
+			// The tool-error contract from docs/TOOLS.md: a tool
+			// execution failure carries isError and human-readable
+			// text, and no structuredContent. There is no
+			// machine-readable error code in the client payload, so an
+			// agent cannot read a typed code from this result.
+			if res.StructuredContent != nil {
+				t.Errorf("tool error carries structuredContent: %v", res.StructuredContent)
+			}
 		})
 
 		t.Run("interrupted setup", func(t *testing.T) {
