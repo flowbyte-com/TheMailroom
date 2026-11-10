@@ -83,7 +83,13 @@ func TestWriteCreatesAnOwnerOnlyFile(t *testing.T) {
 	old := syscall.Umask(0)
 	defer syscall.Umask(old)
 
-	dir := t.TempDir()
+	// The test directory itself is created under the current umask, so it
+	// is world-writable while the umask is zero. Use a private subdirectory
+	// so the destination directory is the safe one the check requires.
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "config.yaml")
 	if _, err := writeConfig(path, []byte("content"), false); err != nil {
 		t.Fatalf("writeConfig: %v", err)
@@ -228,4 +234,27 @@ func mustGetwd(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return wd
+}
+
+// TestWriteRefusesAWorldWritableDirectory covers a destination directory
+// any local user can write to and replace files in.
+func TestWriteRefusesAWorldWritableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions do not apply on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Skipf("cannot make the directory world-writable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	path := filepath.Join(dir, "config.yaml")
+	if _, err := writeConfig(path, []byte("x"), false); err == nil {
+		t.Fatal("writeConfig accepted a world-writable destination directory")
+	} else if !strings.Contains(err.Error(), "writable by any user") {
+		t.Errorf("err = %v, want a clear explanation", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("a file was created in an unsafe directory")
+	}
 }

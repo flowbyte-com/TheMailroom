@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -18,6 +19,10 @@ var ErrExists = errors.New("setup: destination already exists")
 // Writing through it would modify a file the operator did not name, so it
 // is refused even when the caller asked to replace an existing file.
 var ErrSymlink = errors.New("setup: destination is a symbolic link")
+
+// isWindows reports whether the process is running on Windows. The write
+// path uses it to skip checks that only mean something on POSIX.
+func isWindows() bool { return runtime.GOOS == "windows" }
 
 // writeConfig writes data to path and returns the absolute path written.
 //
@@ -68,6 +73,14 @@ func writeConfig(path string, data []byte, force bool) (string, error) {
 	}
 	if !dirInfo.IsDir() {
 		return "", fmt.Errorf("setup: %s is not a directory", dir)
+	}
+	// A world-writable directory without the sticky bit lets any local user
+	// replace the file after it is created. A sticky directory such as /tmp
+	// does not, so it is allowed.
+	if !isWindows() && dirInfo.Mode().Perm()&0o002 != 0 && dirInfo.Mode()&os.ModeSticky == 0 {
+		return "", fmt.Errorf(
+			"setup: the directory %s is writable by any user and is not sticky; "+
+				"choose a directory only you can write to", dir)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".themailroom-setup-*")
