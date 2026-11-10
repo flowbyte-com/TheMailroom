@@ -14,8 +14,9 @@ the operator has already configured, using that account's own credentials.
 operator configure one, then use the tools it exposes.
 
 This file is self-contained and may be copied on its own. Its documentation
-references are version-pinned to `v1.0.0-rc.2` and resolve once that tag is
-published; before publication they point at a tag that does not exist yet.
+references are pinned to `v1.0.0-rc.2` and become available once that tag
+exists. For an untagged development build, use the documentation from the
+matching source checkout.
 
 ## 1. Get a binary that has `setup` and `doctor`
 

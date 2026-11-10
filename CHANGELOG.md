@@ -15,12 +15,20 @@ that carries the whole onboarding path: the diagnostics command, the setup
 command, an optional provider preset, a portable agent skill and an
 automated acceptance procedure.
 
-The version is prepared as `1.0.0-rc.2`, and the binaries built from this
-tree report it in their metadata. **No RC2 release exists yet.** A future
-release will be published under the `v1.0.0-rc.2` tag, and only once that
-tag has been pushed with the authorisation to publish it. The release
-workflow then publishes it as a prerelease and does not mark it as the
-latest release.
+The binaries of this release report the version `1.0.0-rc.2` in their
+metadata, and the release is identified by the `v1.0.0-rc.2` tag. Two
+things follow from that tag, and they are not the same thing:
+
+- **The tag.** Creating and pushing the `v1.0.0-rc.2` tag makes the
+  tagged source available. The source archives GitHub generates for a tag,
+  and any file fetched through a version-pinned raw URL such as
+  `.../v1.0.0-rc.2/docs/TOOLS.md`, resolve from that point on.
+- **The GitHub Release.** The release page, the published binaries and the
+  checksum file appear when the release workflow publishes the release for
+  the tag.
+
+The release workflow publishes a release candidate as a prerelease and does
+not mark it as the latest release.
 
 ### Added
 
@@ -119,9 +127,9 @@ latest release.
   the repository's fixtures, so it proves the onboarding path and the tool
   surface rather than any real provider. A local acceptance is not
   evidence that a provider is compatible.
-- **This is a release candidate, not production certification.** No RC2
-  release exists yet. When it is published, the release workflow publishes
-  it as a prerelease and does not mark it as the latest release.
+- **This is a release candidate, not production certification.** The
+  release workflow publishes a release candidate as a prerelease and does
+  not mark it as the latest release.
 
 ## [1.0.0-rc.1] - 2026-11-10
 
@@ -206,6 +214,8 @@ workloads and an explicit security posture.
 [1.0.0-rc.2]: https://github.com/flowbyte-com/TheMailroom/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/flowbyte-com/TheMailroom/releases/tag/v1.0.0-rc.1
 
-The `1.0.0-rc.2` link will not resolve until that release is published. It
-is recorded here so that the changelog and the tag agree, not to announce a
-release that exists.
+The `1.0.0-rc.2` link points at the GitHub Release page for that tag. It
+resolves once the release has been published; before that, the tag and the
+source archives it produces are the reference and the page does not exist.
+The link is recorded here so that the changelog and the tag agree, not to
+announce a release that has been published.
