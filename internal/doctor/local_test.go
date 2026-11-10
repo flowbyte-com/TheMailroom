@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/flowbyte-com/themailroom/internal/config"
 )
 
 // writeConfig writes a configuration file with owner-only permissions and
@@ -349,10 +351,11 @@ accounts:
 	}
 }
 
-// TestCredentialValuesCollectsEveryForm covers the scalar, block-list and
-// flow-list credential forms.
-func TestCredentialValuesCollectsEveryForm(t *testing.T) {
-	path := writeConfig(t, `accounts:
+// TestCredentialScalarsCollectsEveryForm covers every YAML shape a
+// credential can take: a scalar, a block list, a flow list, a quoted and
+// escaped scalar, and a value reached through an anchor and alias.
+func TestCredentialScalarsCollectsEveryForm(t *testing.T) {
+	body := `accounts:
   - id: a
     imap:
       password: "scalar-secret-value"
@@ -363,51 +366,118 @@ func TestCredentialValuesCollectsEveryForm(t *testing.T) {
         - block-secret-value
   - id: b
     imap:
+      password: &pw "anchored-secret-value"
+      username: *pw
       password_command: ["printf", "flow-secret-value"]
-`)
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	values := credentialValues(got)
-	want := []string{"scalar-secret-value", "vault", "read", "block-secret-value", "printf", "flow-secret-value"}
-	for _, w := range want {
+  - id: c
+    imap:
+      password: "escaped\"secret-value"
+`
+	values := credentialScalars([]byte(body))
+	for _, want := range []string{
+		"scalar-secret-value",
+		"vault", "read", "block-secret-value",
+		"printf", "flow-secret-value",
+		"anchored-secret-value",
+		`escaped"secret-value`,
+	} {
 		found := false
 		for _, v := range values {
-			if v == w {
+			if v == want {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("credentialValues() did not collect %q; got %v", w, values)
+			t.Errorf("credentialScalars() did not collect %q; got %v", want, values)
 		}
 	}
 }
 
-// TestRedactConfigErrorRemovesCredentialValues covers the parse-error
-// redaction, including the case the redactor exists for: a credential
-// placed in a field of the wrong type, whose value the YAML parser quotes
-// back.
-func TestRedactConfigErrorRemovesCredentialValues(t *testing.T) {
-	path := writeConfig(t, `accounts:
+// TestDescribeConfigErrorSuppressesUntrustedContent pins the fail-closed
+// rule: a YAML syntax, type or duplicate-key error quotes document content,
+// so none of it is printed.
+func TestDescribeConfigErrorSuppressesUntrustedContent(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		// buildErr produces the error the loader would return for this
+		// body, so the test exercises the real classification.
+	}{
+		{
+			name: "syntax error",
+			body: "accounts: [\n  - id: syntax-canary\n",
+		},
+		{
+			name: "type error",
+			body: `accounts:
+  - id: a
+    limits:
+      max_message_bytes: "type-canary"
+`,
+		},
+		{
+			name: "unknown field",
+			body: `accounts:
+  - id: a
+    unknown_field_canary: true
+`,
+		},
+		{
+			name: "duplicate key",
+			body: `accounts:
+  - id: a
+    id: duplicate-canary
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := config.Parse([]byte(tc.body))
+			if err == nil {
+				t.Fatalf("config.Parse accepted the body; the case is not a parse failure")
+			}
+			got := describeConfigError(err, []byte(tc.body))
+			if got == "" {
+				t.Fatal("describeConfigError returned an empty description")
+			}
+			for _, canary := range []string{"syntax-canary", "type-canary", "unknown_field_canary", "duplicate-canary"} {
+				if strings.Contains(got, canary) {
+					t.Errorf("description contains untrusted document content %q: %s", canary, got)
+				}
+			}
+			if strings.Contains(got, "cannot unmarshal") {
+				t.Errorf("description contains raw parser output: %s", got)
+			}
+		})
+	}
+}
+
+// TestSanitiseMessageRemovesConfiguredValues covers the validation branch:
+// field paths and explanations survive, configured values do not.
+func TestSanitiseMessageRemovesConfiguredValues(t *testing.T) {
+	body := []byte(`accounts:
   - id: a
     imap:
-      password: "scalar-secret-value"
+      password: "value-canary"
       password_command:
         - vault
         - read
-        - block-secret-value
+        - /run/secrets/command-canary
 `)
-	msg := "yaml: cannot unmarshal !!str `scalar-secret-value` into int; " +
-		"also block-secret-value and vault"
-	got := redactConfigError(msg, path)
-	for _, secret := range []string{"scalar-secret-value", "block-secret-value"} {
+	msg := `server.log_level "value-canary" invalid; want one of debug, info, warn, error; ` +
+		`accounts[0].mailbox_root: stat /home/alice/Mail: no such file; ` +
+		`unknown capability names: value-canary`
+	got := sanitiseMessage(msg, body)
+
+	for _, secret := range []string{"value-canary", "/home/alice/Mail", "/run/secrets/command-canary"} {
 		if strings.Contains(got, secret) {
-			t.Errorf("redacted message still contains %q: %s", secret, got)
+			t.Errorf("sanitised message still contains %q: %s", secret, got)
 		}
 	}
-	if !strings.Contains(got, "***") {
-		t.Errorf("redacted message has no replacement marker: %s", got)
+	for _, keep := range []string{"server.log_level", "invalid; want one of", "accounts[0].mailbox_root"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("sanitised message lost the useful part %q: %s", keep, got)
+		}
 	}
 }

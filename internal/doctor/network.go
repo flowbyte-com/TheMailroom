@@ -105,6 +105,9 @@ type transportResult struct {
 	// tlsHandled reports that TLS was verified here, or that it will be
 	// verified inside the protocol check (STARTTLS).
 	tlsHandled bool
+	// incomplete reports that the transport checks did not run because
+	// the phase was cancelled or timed out.
+	incomplete bool
 }
 
 // RunNetwork performs the opt-in network checks for every account that has
@@ -150,8 +153,9 @@ func endpointChecks(ctx context.Context, probe netProbe, prefix, host string, po
 	dnsName := prefix + "/dns"
 	if c, done := precheck(ctx, dnsName); done {
 		res.checks = append(res.checks, c,
-			skipped(prefix+"/tcp", "not run: the network phase was cancelled or timed out"),
-			skipped(prefix+"/tls", "not run: the network phase was cancelled or timed out"))
+			incomplete(prefix+"/tcp"),
+			incomplete(prefix+"/tls"))
+		res.incomplete = true
 		return res
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, perCheckTimeout)
@@ -177,7 +181,8 @@ func endpointChecks(ctx context.Context, probe netProbe, prefix, host string, po
 
 	tcpName := prefix + "/tcp"
 	if c, done := precheck(ctx, tcpName); done {
-		res.checks = append(res.checks, c, skipped(prefix+"/tls", "not run: the network phase was cancelled or timed out"))
+		res.checks = append(res.checks, c, incomplete(prefix+"/tls"))
+		res.incomplete = true
 		return res
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, perCheckTimeout)
@@ -216,6 +221,7 @@ func endpointChecks(ctx context.Context, probe netProbe, prefix, host string, po
 	}
 	if c, done := precheck(ctx, tlsName); done {
 		res.checks = append(res.checks, c)
+		res.incomplete = true
 		return res
 	}
 	tlsCtx, cancel := context.WithTimeout(ctx, perCheckTimeout)
@@ -240,6 +246,8 @@ func endpointChecks(ctx context.Context, probe netProbe, prefix, host string, po
 func imapAuthCheck(ctx context.Context, probe netProbe, acc config.AccountConfig, tr transportResult) Check {
 	name := "account/" + acc.ID + "/imap/auth"
 	switch {
+	case tr.incomplete:
+		return incomplete(name)
 	case !tr.usable:
 		return skipped(name, "not attempted because name resolution or the TCP connection failed")
 	case !tr.tlsHandled:
@@ -267,6 +275,8 @@ func imapAuthCheck(ctx context.Context, probe netProbe, acc config.AccountConfig
 func smtpAuthCheck(ctx context.Context, probe netProbe, acc config.AccountConfig, tr transportResult) Check {
 	name := "account/" + acc.ID + "/smtp/auth"
 	switch {
+	case tr.incomplete:
+		return incomplete(name)
 	case !tr.usable:
 		return skipped(name, "not attempted because name resolution or the TCP connection failed")
 	case !tr.tlsHandled:
@@ -332,10 +342,21 @@ func skipped(name, detail string) Check {
 	return Check{Name: name, Status: StatusSkip, Detail: detail}
 }
 
+// incomplete builds a skipped check that records a requested diagnostic
+// which did not run because the phase was cancelled or timed out.
+func incomplete(name string) Check {
+	return Check{
+		Name:       name,
+		Status:     StatusSkip,
+		Detail:     "not run: the network phase was cancelled or timed out",
+		Incomplete: true,
+	}
+}
+
 // precheck short-circuits a check when the network phase has been cancelled.
 func precheck(ctx context.Context, name string) (Check, bool) {
 	if err := ctx.Err(); err != nil {
-		return skipped(name, "not run: the network phase was cancelled or timed out"), true
+		return incomplete(name), true
 	}
 	return Check{}, false
 }

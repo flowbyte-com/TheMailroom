@@ -335,12 +335,14 @@ func TestRunNetworkSkipsEverythingWhenCancelled(t *testing.T) {
 	cancel()
 
 	checks := RunNetwork(ctx, oneAccountConfig(true, false), &fakeProbe{})
-	if got := failures(checks); len(got) != 0 {
-		t.Errorf("a cancelled run must not report failures: %+v", got)
-	}
 	for _, c := range checks {
 		if c.Status != StatusSkip {
 			t.Errorf("%s = %s, want skip", c.Name, c.Status)
+		}
+		// A cancelled phase is incomplete, not merely skipped: the run
+		// must not report success.
+		if !c.Incomplete {
+			t.Errorf("%s is skipped but not marked incomplete; a cancelled requested diagnostic must fail the run", c.Name)
 		}
 	}
 }

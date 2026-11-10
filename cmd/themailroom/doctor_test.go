@@ -92,3 +92,39 @@ func TestRunDoctorDoesNotReachTheNetworkByDefault(t *testing.T) {
 		t.Errorf("output does not state that the run is local only:\n%s", out.String())
 	}
 }
+
+// networkBody is a configuration with a networked account.
+const networkBody = `server:
+  log_level: info
+
+accounts:
+  - id: remote
+    backend: imap
+    email: remote@example.test
+    permissions: [read]
+    imap:
+      host: mail.example.test
+      port: 993
+      tls: true
+      username: remote
+      password: "s3cret"
+`
+
+// TestRunDoctorFailsWhenTheNetworkPhaseDoesNotComplete pins the exit-code
+// consequence of an incomplete requested diagnostic: a network phase that
+// cannot run must not exit 0.
+func TestRunDoctorFailsWhenTheNetworkPhaseDoesNotComplete(t *testing.T) {
+	path := testConfig(t, networkBody)
+	var out bytes.Buffer
+
+	// An effectively expired network budget makes every check incomplete
+	// before it begins.
+	code := runDoctor([]string{"-config", path, "-network", "-timeout", "1ns"}, &out)
+	if code != doctorExitFailed {
+		t.Fatalf("exit code = %d, want %d for an incomplete network diagnostic\n%s",
+			code, doctorExitFailed, out.String())
+	}
+	if !strings.Contains(out.String(), "incomplete") {
+		t.Errorf("output does not report incompleteness:\n%s", out.String())
+	}
+}

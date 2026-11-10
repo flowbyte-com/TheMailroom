@@ -62,12 +62,27 @@ func RunLocal(path string) LocalResult {
 	out.Checks = append(out.Checks, checkFilePermissions(abs, info))
 
 	// 2. Parsing and validation, through the loader the server uses.
-	cfg, err := config.Load(abs)
+	data, readErr := os.ReadFile(abs)
+	if readErr != nil {
+		out.Checks = append(out.Checks, Check{
+			Name:   "config.file",
+			Status: StatusFail,
+			Detail: fmt.Sprintf("%s could not be read: %s", abs, classifyErr(readErr)),
+			Remedy: "check the file permissions and pass -config with a readable path",
+		})
+		out.Checks = append(out.Checks, Check{
+			Name:   "config.parse",
+			Status: StatusSkip,
+			Detail: "not attempted because the file could not be read",
+		})
+		return out
+	}
+	cfg, err := config.Parse(data)
 	if err != nil {
 		out.Checks = append(out.Checks, Check{
 			Name:   "config.parse",
 			Status: StatusFail,
-			Detail: "configuration is invalid: " + redactConfigError(err.Error(), abs),
+			Detail: "configuration is invalid: " + describeConfigError(err, data),
 			Remedy: "correct the reported setting and run doctor again",
 		})
 		return out
@@ -96,7 +111,7 @@ func RunLocal(path string) LocalResult {
 		out.Checks = append(out.Checks, Check{
 			Name:   "registry",
 			Status: StatusFail,
-			Detail: "accounts could not be constructed: " + redactConfigError(err.Error(), abs),
+			Detail: "accounts could not be constructed: " + describeConfigError(err, data),
 			Remedy: "correct the reported account setting and run doctor again",
 		})
 	} else {
@@ -297,102 +312,4 @@ func hasPermission(names []string, want string) bool {
 		}
 	}
 	return false
-}
-
-// credentialValues collects the values of the credential fields in a raw
-// configuration file.
-//
-// The values are read only so they can be removed from an error message;
-// they are never printed and never returned to a caller.
-func credentialValues(data []byte) []string {
-	var vals []string
-	inCommandList := false
-	commandIndent := 0
-
-	for _, raw := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
-
-		// A block-style item belonging to password_command.
-		if inCommandList && strings.HasPrefix(trimmed, "- ") {
-			if indent > commandIndent {
-				vals = append(vals, unquote(strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))))
-				continue
-			}
-			inCommandList = false
-		}
-		inCommandList = false
-
-		key, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		switch strings.TrimSpace(key) {
-		case "password":
-			if value != "" {
-				vals = append(vals, unquote(value))
-			}
-		case "password_command":
-			switch {
-			case strings.HasPrefix(value, "["):
-				vals = append(vals, flowListItems(value)...)
-			case value != "":
-				vals = append(vals, unquote(value))
-			default:
-				inCommandList = true
-				commandIndent = indent
-			}
-		}
-	}
-	return vals
-}
-
-// flowListItems splits a YAML flow-style list into its scalar items.
-func flowListItems(value string) []string {
-	value = strings.TrimSuffix(strings.TrimPrefix(value, "["), "]")
-	var out []string
-	for _, item := range strings.Split(value, ",") {
-		item = unquote(strings.TrimSpace(item))
-		if item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
-}
-
-// unquote strips a single pair of matching YAML quotes.
-func unquote(s string) string {
-	if len(s) >= 2 {
-		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
-			return s[1 : len(s)-1]
-		}
-	}
-	return s
-}
-
-// redactConfigError removes every credential value found in the raw
-// configuration file from an error message.
-//
-// A YAML parse error can quote the offending scalar, so a password placed
-// in the wrong field would otherwise be echoed back to the terminal. The
-// values are read from the file only to be removed from the message; they
-// are never printed and never returned.
-func redactConfigError(msg, path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return msg
-	}
-	for _, value := range credentialValues(data) {
-		// A short value would corrupt unrelated text by replacing a
-		// common fragment, so only distinct values are redacted.
-		if len(value) < 3 {
-			continue
-		}
-		msg = strings.ReplaceAll(msg, value, "***")
-	}
-	return msg
 }

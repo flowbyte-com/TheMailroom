@@ -104,6 +104,18 @@ func TestReportFailedOnlyOnFailures(t *testing.T) {
 	if !report.Failed() {
 		t.Error("Failed() = false with a failure present")
 	}
+
+	// An incomplete skip fails the run even though its status is skip.
+	report = Report{Checks: []Check{
+		{Name: "a", Status: StatusOK},
+		{Name: "b", Status: StatusSkip, Incomplete: true},
+	}}
+	if !report.Failed() {
+		t.Error("Failed() = false with an incomplete check present")
+	}
+	if report.IncompleteCount() != 1 {
+		t.Errorf("IncompleteCount() = %d, want 1", report.IncompleteCount())
+	}
 }
 
 // TestReportWriteTextIsStable covers the operator-facing rendering.

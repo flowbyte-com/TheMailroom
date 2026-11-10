@@ -29,16 +29,18 @@ const (
 	StatusWarn Status = "warn"
 	// StatusFail means the check failed. Any failure fails the run.
 	StatusFail Status = "fail"
-	// StatusSkip means the check did not run, usually because it needs
-	// --network or does not apply to the account.
+	// StatusSkip means the check did not run. A skip that merely records
+	// "not applicable" does not fail the run; a skip that records a
+	// requested diagnostic which could not complete does, and is marked
+	// Incomplete.
 	StatusSkip Status = "skip"
 )
 
 // Check is one diagnostic result.
 //
 // Detail and Remedy are operator-facing text. They must never contain a
-// credential, the arguments of a credential command, or raw protocol
-// server output.
+// credential, the arguments of a credential command, or raw untrusted
+// document or protocol content.
 type Check struct {
 	// Name is a stable identifier such as "account/work/imap".
 	Name string
@@ -49,6 +51,13 @@ type Check struct {
 	// Remedy is a one-line, sanitised suggestion. It is set for warnings
 	// and failures.
 	Remedy string
+	// Incomplete marks a check that did not run because a requested
+	// diagnostic was cancelled or timed out. It is displayed as skipped,
+	// but it fails the run: a requested diagnostic that did not complete
+	// is not a success. A check that is skipped because it does not apply
+	// — no networked account, a STARTTLS endpoint with no plaintext TLS
+	// probe — leaves this false.
+	Incomplete bool
 }
 
 // Report is the complete result of a diagnostic run.
@@ -75,8 +84,31 @@ func (r Report) Count(s Status) int {
 	return n
 }
 
-// Failed reports whether any check failed.
-func (r Report) Failed() bool { return r.Count(StatusFail) > 0 }
+// IncompleteCount returns the number of checks that did not run because the
+// requested diagnostic was cancelled or timed out.
+func (r Report) IncompleteCount() int {
+	n := 0
+	for _, c := range r.Checks {
+		if c.Incomplete {
+			n++
+		}
+	}
+	return n
+}
+
+// Failed reports whether the run failed.
+//
+// A failed check fails the run, and so does an incomplete one: a requested
+// diagnostic that was cancelled or timed out has not established that the
+// configuration is healthy.
+func (r Report) Failed() bool {
+	for _, c := range r.Checks {
+		if c.Status == StatusFail || c.Incomplete {
+			return true
+		}
+	}
+	return false
+}
 
 // WriteText renders the report as operator-facing text.
 //
@@ -106,8 +138,11 @@ func (r Report) WriteText(w io.Writer) error {
 	}
 
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "Summary: %d checks, %d ok, %d warning(s), %d failure(s), %d skipped\n",
-		len(r.Checks), r.Count(StatusOK), r.Count(StatusWarn), r.Count(StatusFail), r.Count(StatusSkip))
+	if n := r.IncompleteCount(); n > 0 {
+		fmt.Fprintf(&b, "Note: %d requested check(s) did not complete; the network phase was cancelled or timed out.\n", n)
+	}
+	fmt.Fprintf(&b, "Summary: %d checks, %d ok, %d warning(s), %d failure(s), %d skipped (%d incomplete)\n",
+		len(r.Checks), r.Count(StatusOK), r.Count(StatusWarn), r.Count(StatusFail), r.Count(StatusSkip), r.IncompleteCount())
 
 	_, err := io.WriteString(w, b.String())
 	return err
