@@ -32,26 +32,49 @@ func newPrompter(in io.Reader, out io.Writer) *prompter {
 	return &prompter{in: bufio.NewReader(in), out: out}
 }
 
-// readLine reads one line.
+// readLine reads one line, bounded by the context.
 //
 // A final line without a trailing newline is accepted. An end of input
 // with no text left is reported as errInputClosed.
-func (p *prompter) readLine() (string, error) {
+//
+// The read itself is a blocking call on the underlying reader, so it runs
+// in one goroutine and the caller waits on either the result or the
+// context. When the context ends first the prompter is marked exhausted,
+// so no second read is ever started on the same reader; the abandoned
+// goroutine is bounded by the process that owns the reader, which for the
+// setup command exits immediately afterwards.
+func (p *prompter) readLine(ctx context.Context) (string, error) {
 	if p.exhausted {
 		return "", errInputClosed
 	}
-	text, err := p.in.ReadString('\n')
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			p.exhausted = true
-			if text == "" {
-				return "", errInputClosed
-			}
-			return text, nil
-		}
-		return "", fmt.Errorf("setup: read input: %w", err)
+
+	type result struct {
+		text string
+		err  error
 	}
-	return text, nil
+	done := make(chan result, 1)
+	go func() {
+		text, err := p.in.ReadString('\n')
+		done <- result{text: text, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		p.exhausted = true
+		return "", ctx.Err()
+	case r := <-done:
+		if r.err != nil {
+			if errors.Is(r.err, io.EOF) {
+				p.exhausted = true
+				if r.text == "" {
+					return "", errInputClosed
+				}
+				return r.text, nil
+			}
+			return "", fmt.Errorf("setup: read input: %w", r.err)
+		}
+		return r.text, nil
+	}
 }
 
 // ask prompts for a value, applying a default when the answer is blank.
@@ -68,7 +91,7 @@ func (p *prompter) ask(ctx context.Context, label, def string, required bool) (s
 		} else {
 			fmt.Fprintf(p.out, "%s: ", label)
 		}
-		text, err := p.readLine()
+		text, err := p.readLine(ctx)
 		if err != nil {
 			return "", err
 		}

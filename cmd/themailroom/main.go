@@ -96,16 +96,40 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) int {
 		Force: *force,
 		In:    stdin,
 		Out:   stdout,
-		Check: func(ctx context.Context, path string, out io.Writer) error {
-			report := doctor.Run(ctx, doctor.Options{ConfigPath: path, Network: true})
-			return report.WriteText(out)
-		},
+		Check: setupCheck,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "themailroom: %v\n", err)
 		return setupExitFailed
 	}
 	return setupExitOK
+}
+
+// errCheckFailed is returned when the operator asked for a connectivity
+// check and the diagnostic reported problems. The configuration has already
+// been written and is deliberately left in place for troubleshooting.
+var errCheckFailed = errors.New(
+	"the connectivity check reported problems; the configuration was written and can be inspected with the doctor command")
+
+// renderCheck prints a diagnostic report and reports whether it passed.
+//
+// Printing and judging are separate on purpose: a report that prints
+// successfully can still describe failures, and those failures must reach
+// the exit status.
+func renderCheck(report doctor.Report, out io.Writer) error {
+	if err := report.WriteText(out); err != nil {
+		return err
+	}
+	if report.Failed() {
+		return errCheckFailed
+	}
+	return nil
+}
+
+// setupCheck is the connectivity check the setup command offers. It is a
+// variable so a test can substitute a deterministic diagnostic.
+var setupCheck = func(ctx context.Context, path string, out io.Writer) error {
+	return renderCheck(doctor.Run(ctx, doctor.Options{ConfigPath: path, Network: true}), out)
 }
 
 // runDoctor runs the diagnostic command and returns its exit code.

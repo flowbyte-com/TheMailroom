@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,5 +128,69 @@ func TestSetupGenerateIsDeterministic(t *testing.T) {
 	}
 	if !bytes.Equal(first, second) {
 		t.Error("Generate is not deterministic")
+	}
+}
+
+// TestRenderCheckFailsOnAFailedReport covers the defect where a failing
+// connectivity report was printed but the command still succeeded: printing
+// and judging are separate.
+func TestRenderCheckFailsOnAFailedReport(t *testing.T) {
+	report := doctor.Report{Checks: []doctor.Check{
+		{Name: "config.parse", Status: doctor.StatusOK, Detail: "ok"},
+		{Name: "account/work/imap/dns", Status: doctor.StatusFail, Detail: "host not found"},
+	}}
+	var out bytes.Buffer
+
+	err := renderCheck(report, &out)
+	if !errors.Is(err, errCheckFailed) {
+		t.Fatalf("err = %v, want errCheckFailed", err)
+	}
+	if !strings.Contains(out.String(), "fail") {
+		t.Errorf("the report was not printed:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "configuration was written") {
+		t.Errorf("the error does not reassure the operator: %v", err)
+	}
+}
+
+// TestRenderCheckPassesOnASuccessfulReport covers the success path.
+func TestRenderCheckPassesOnASuccessfulReport(t *testing.T) {
+	report := doctor.Report{Checks: []doctor.Check{
+		{Name: "config.parse", Status: doctor.StatusOK, Detail: "ok"},
+		{Name: "account/work/imap/dns", Status: doctor.StatusOK, Detail: "resolved"},
+	}}
+	var out bytes.Buffer
+	if err := renderCheck(report, &out); err != nil {
+		t.Fatalf("renderCheck = %v, want nil", err)
+	}
+}
+
+// TestRunSetupFailsWhenTheCheckFailsAndKeepsTheFile covers the CLI exit
+// status, and pins that the configuration survives the failure for
+// troubleshooting.
+func TestRunSetupFailsWhenTheCheckFailsAndKeepsTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+
+	original := setupCheck
+	setupCheck = func(_ context.Context, _ string, out io.Writer) error {
+		return renderCheck(doctor.Report{Checks: []doctor.Check{
+			{Name: "account/work/imap/dns", Status: doctor.StatusFail, Detail: "host not found"},
+		}}, out)
+	}
+	t.Cleanup(func() { setupCheck = original })
+
+	answers := strings.Join([]string{
+		"work", "work@example.test",
+		"mail.example.test", "1", "993", "work", "pass show mail/work",
+		"n", path, "y",
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	code := runSetup([]string{"-config", path}, strings.NewReader(answers), &out)
+	if code != setupExitFailed {
+		t.Fatalf("exit code = %d, want %d for a failed connectivity check\n%s", code, setupExitFailed, out.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the configuration was not preserved after a failed check: %v", err)
 	}
 }

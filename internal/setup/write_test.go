@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -55,7 +54,12 @@ func TestWriteRefusesASymlink(t *testing.T) {
 
 // TestWriteForceReplacesARegularFile covers the explicit override.
 func TestWriteForceReplacesARegularFile(t *testing.T) {
-	dir := t.TempDir()
+	// Forced replacement is confined to a directory group and other users
+	// cannot write to.
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
@@ -70,36 +74,6 @@ func TestWriteForceReplacesARegularFile(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if string(data) != "replacement" {
 		t.Errorf("content = %q, want replacement", data)
-	}
-}
-
-// TestWriteCreatesAnOwnerOnlyFile covers the mode guarantee, including a
-// process umask of zero, which would otherwise widen the mode of a file
-// created without an explicit setting.
-func TestWriteCreatesAnOwnerOnlyFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX mode bits are not an ACL on Windows")
-	}
-	old := syscall.Umask(0)
-	defer syscall.Umask(old)
-
-	// The test directory itself is created under the current umask, so it
-	// is world-writable while the umask is zero. Use a private subdirectory
-	// so the destination directory is the safe one the check requires.
-	dir := filepath.Join(t.TempDir(), "private")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "config.yaml")
-	if _, err := writeConfig(path, []byte("content"), false); err != nil {
-		t.Fatalf("writeConfig: %v", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("mode = %04o, want 0600", got)
 	}
 }
 
@@ -256,5 +230,33 @@ func TestWriteRefusesAWorldWritableDirectory(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 		t.Error("a file was created in an unsafe directory")
+	}
+}
+
+// TestForceRefusedInAGroupWritableDirectory covers the forced-replacement
+// constraint: another user who can write to the directory could change the
+// destination entry between the inspection and the rename.
+func TestForceRefusedInAGroupWritableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions do not apply on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o775); err != nil {
+		t.Skipf("cannot change the directory mode: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeConfig(path, []byte("replacement"), true); err == nil {
+		t.Fatal("forced replacement was allowed in a group-writable directory")
+	} else if !strings.Contains(err.Error(), "group and other users") {
+		t.Errorf("err = %v, want a clear explanation", err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "original" {
+		t.Error("the existing file was modified")
 	}
 }

@@ -113,9 +113,14 @@ attachment sending is never granted. An existing file is not replaced unless
 you pass `-force`, a symbolic link is always refused, and the file is
 validated with the server's own configuration loader before it is written.
 
-On POSIX systems the file is created with mode `0600`. On Windows it
-inherits the directory's access control list; POSIX mode bits are not an
-ACL, so restrict it with `icacls` if the directory is shared.
+On POSIX systems the file is created with mode `0600`. `-force` is only
+allowed in a directory that group and other users cannot write to, because
+a forced replacement renames over the destination entry.
+
+On Windows the standard library cannot set an access control list, and a new
+file inherits its directory's ACL, so `setup` cannot guarantee that the file
+is readable only by its owner. It refuses to write and tells you how to
+create the file by hand and restrict it with `icacls`.
 
 Validate the result, then test connectivity as a separate step:
 

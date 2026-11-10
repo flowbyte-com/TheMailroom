@@ -19,7 +19,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"gopkg.in/yaml.v3"
 
@@ -378,21 +377,11 @@ func commandLabel(command []string) string {
 	return filepath.Base(command[0]) + " (arguments not shown)"
 }
 
-// permissionNote describes what the platform actually guarantees about the
-// written file.
+// permissionNote describes what was guaranteed about the written file.
 //
-// POSIX mode bits are an access control mechanism; on Windows they are not
-// an ACL, and Go cannot set one. Saying so plainly is the honest option:
-// the alternative would be to claim a protection that does not exist.
-func permissionNote() string { return permissionNoteFor(runtime.GOOS) }
-
-// permissionNoteFor renders the note for a specific platform. It exists so
-// both branches are testable on one machine.
-func permissionNoteFor(goos string) string {
-	if goos == "windows" {
-		return "Note: on Windows the file inherits the access control list of its directory. " +
-			"POSIX mode bits are not an ACL and do not restrict access here. " +
-			"Restrict the file with icacls if the directory is shared."
-	}
+// Setup only reaches this on a platform whose write policy admits it, so the
+// note describes the POSIX mode. Windows is refused before anything is
+// written, with its own explanation.
+func permissionNote() string {
 	return "The file was created with mode 0600: readable and writable by its owner only."
 }

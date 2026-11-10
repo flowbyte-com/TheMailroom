@@ -45,6 +45,11 @@ func writeConfig(path string, data []byte, force bool) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", errors.New("setup: no destination path was given")
 	}
+	// A platform that cannot guarantee the file's confidentiality is
+	// refused before anything is inspected or created.
+	if err := platformWritePolicy(runtime.GOOS); err != nil {
+		return "", err
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("setup: resolve %s: %w", path, err)
@@ -81,6 +86,15 @@ func writeConfig(path string, data []byte, force bool) (string, error) {
 		return "", fmt.Errorf(
 			"setup: the directory %s is writable by any user and is not sticky; "+
 				"choose a directory only you can write to", dir)
+	}
+	// Replacing an existing file renames over the destination entry. That is
+	// only safe when no other user can change the entry between the
+	// inspection above and the rename, so forced replacement is confined to
+	// a directory that group and other users cannot write to.
+	if force && !isWindows() && dirInfo.Mode().Perm()&0o022 != 0 {
+		return "", fmt.Errorf(
+			"setup: -force is only allowed in a directory that group and other users cannot write to; "+
+				"remove %s yourself or choose another path", abs)
 	}
 
 	tmp, err := os.CreateTemp(dir, ".themailroom-setup-*")

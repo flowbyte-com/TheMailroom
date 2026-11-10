@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flowbyte-com/themailroom/internal/config"
 )
@@ -329,7 +330,11 @@ func TestRunRefusesAnExistingFile(t *testing.T) {
 
 // TestRunForceReplacesAnExistingFile covers the explicit override.
 func TestRunForceReplacesAnExistingFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "themailroom.yaml")
 	if err := os.WriteFile(path, []byte("original\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -367,19 +372,28 @@ func TestRunSendFlow(t *testing.T) {
 	}
 }
 
-// TestPermissionNote covers the platform-specific security statement.
-func TestPermissionNote(t *testing.T) {
-	posix := permissionNoteFor("linux")
-	if !strings.Contains(posix, "0600") {
-		t.Errorf("the POSIX note does not state the mode: %s", posix)
+// TestPlatformWritePolicy covers the platform confidentiality gate.
+//
+// POSIX systems get the 0600 guarantee. Windows has no standard-library way
+// to set an ACL, so the policy is to fail closed before anything is written.
+func TestPlatformWritePolicy(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		if err := platformWritePolicy(goos); err != nil {
+			t.Errorf("platformWritePolicy(%q) = %v, want nil", goos, err)
+		}
 	}
 
-	windows := permissionNoteFor("windows")
-	if !strings.Contains(windows, "ACL") {
-		t.Errorf("the Windows note does not mention ACLs: %s", windows)
+	err := platformWritePolicy("windows")
+	if err == nil {
+		t.Fatal("platformWritePolicy(\"windows\") = nil, want a refusal")
 	}
-	if strings.Contains(windows, "mode 0600") {
-		t.Errorf("the Windows note claims POSIX protection: %s", windows)
+	for _, want := range []string{"access control list", "icacls", "nothing was written"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the Windows refusal does not mention %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "mode 0600") {
+		t.Errorf("the Windows refusal claims POSIX protection: %v", err)
 	}
 }
 
@@ -444,5 +458,57 @@ func TestRunRejectsAnInvalidEmail(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Errorf("the directory is not empty after a rejected configuration: %v", entries)
+	}
+}
+
+// blockingReader blocks until it is released, emulating a terminal with no
+// newline yet.
+type blockingReader struct {
+	release chan struct{}
+}
+
+func (r *blockingReader) Read([]byte) (int, error) {
+	<-r.release
+	return 0, io.EOF
+}
+
+// TestRunCancelledWhileBlockedOnInput covers Ctrl+C at a prompt: the context
+// ends while the read is still blocked, so setup must return promptly,
+// without writing anything.
+func TestRunCancelledWhileBlockedOnInput(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel while the prompter is blocked in the read.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "themailroom.yaml")
+	var out bytes.Buffer
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Options{Path: path, In: &blockingReader{release: release}, Out: &out})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancellation; it is blocked on input")
+	}
+
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("a configuration was written after cancellation")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("cancelled setup left files behind: %v", entries)
 	}
 }
