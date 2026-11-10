@@ -9,10 +9,16 @@ import (
 // changelogPath is the project changelog.
 const changelogPath = "../../CHANGELOG.md"
 
-// flatten collapses whitespace so that a phrase is matched the same way
-// however the source wraps it.
+// flatten collapses whitespace and strips blockquote markers, so that a
+// phrase is matched the same way however the source wraps or quotes it.
 func flatten(text string) string {
-	return strings.Join(strings.Fields(text), " ")
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, ">")
+		lines[i] = strings.TrimSpace(line)
+	}
+	return strings.Join(strings.Fields(strings.Join(lines, " ")), " ")
 }
 
 // readChangelog reads the changelog.
@@ -104,33 +110,81 @@ func TestChangelogRC2StatesTheDiagnosticBoundary(t *testing.T) {
 	}
 }
 
-// TestChangelogRC2DoesNotClaimToBePublished pins the release status.
+// stateBoundPhrases are statements about the current publication state.
 //
-// The version is prepared, but no RC2 release exists yet, so the section
-// must not read as though one had been published.
-func TestChangelogRC2DoesNotClaimToBePublished(t *testing.T) {
-	section := changelogSection(t, readChangelog(t), "## [1.0.0-rc.2]")
-	flat := flatten(section)
+// A document that ships in the repository is read both before a release
+// is tagged and after it is published. A phrase that asserts how things
+// stand at the moment of writing is true once and false later, so these
+// are not allowed anywhere in the release documentation.
+var stateBoundPhrases = []string{
+	"no rc2 release exists yet",
+	"is not published yet",
+	"not published yet",
+	"does not exist yet",
+	"will not resolve until",
+	"does not resolve until",
+	"until the release is published",
+	"the release is published under",
+	"is published under the `v1.0.0-rc.2` tag",
+	"prepared as `1.0.0-rc.2`",
+}
 
-	if !strings.Contains(flat, "No RC2 release exists yet") {
-		t.Error("the RC2 section does not say that no RC2 release exists yet")
-	}
-	if !strings.Contains(flat, "prepared as `1.0.0-rc.2`") {
-		t.Error("the RC2 section does not say that the version is prepared")
-	}
-	if !strings.Contains(flat, "`v1.0.0-rc.2` tag") {
-		t.Error("the RC2 section does not name the future tag")
-	}
-
-	lower := strings.ToLower(flat)
-	for _, forbidden := range []string{
-		"the release is published under",
-		"is published under the `v1.0.0-rc.2` tag",
-	} {
-		if strings.Contains(lower, forbidden) {
-			t.Errorf("the RC2 section claims the release is published (%q)", forbidden)
+// checkNoStateBoundPhrases fails when text states the current publication
+// state rather than describing the mechanics.
+func checkNoStateBoundPhrases(t *testing.T, source, text string) {
+	t.Helper()
+	lower := strings.ToLower(flatten(text))
+	for _, phrase := range stateBoundPhrases {
+		if strings.Contains(lower, phrase) {
+			t.Errorf("%s states the current publication state (%q); the wording must be correct both before and after publication",
+				source, phrase)
 		}
 	}
+}
+
+// TestChangelogRC2StatesReleaseMechanics pins the way the RC2 section
+// describes the release.
+//
+// The section is written before the tag is pushed and stays in the
+// repository afterwards, so it has to be correct in both states. It
+// therefore describes the mechanics rather than the state: the tag makes
+// the tagged source available, and the GitHub Release page appears when
+// the release is published for it.
+func TestChangelogRC2StatesReleaseMechanics(t *testing.T) {
+	section := changelogSection(t, readChangelog(t), "## [1.0.0-rc.2]")
+	flat := flatten(section)
+	lower := strings.ToLower(flat)
+
+	for name, want := range map[string]string{
+		"the version the binaries carry": "report the version `1.0.0-rc.2`",
+		"the tag that identifies it":     "the `v1.0.0-rc.2` tag",
+		"the tag makes source available": "makes the tagged source available",
+		"the source archives":            "source archives",
+		"the version-pinned raw URL":     "version-pinned raw url",
+		"the release page":               "the github release",
+		"the published binaries":         "the published binaries",
+		"the checksum file":              "checksum file",
+		"the prerelease rule":            "publishes a release candidate as a prerelease",
+		"it is not the latest release":   "does not mark it as the latest release",
+	} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("the RC2 section does not state the %s (%q)", name, want)
+		}
+	}
+
+	// A tag is not a release page, and the section has to say so.
+	if !strings.Contains(lower, "they are not the same thing") {
+		t.Error("the RC2 section does not distinguish the tag from the GitHub Release")
+	}
+
+	checkNoStateBoundPhrases(t, "the RC2 section", section)
+}
+
+// TestChangelogStatesNoPublicationState pins the same rule for the whole
+// document, including the link note under the reference links, which is
+// outside any single section.
+func TestChangelogStatesNoPublicationState(t *testing.T) {
+	checkNoStateBoundPhrases(t, "the changelog", readChangelog(t))
 }
 
 // TestChangelogKeepsTheRC1HistoryAndTheInventoryCorrection pins the two

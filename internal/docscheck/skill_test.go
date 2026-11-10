@@ -260,6 +260,20 @@ func TestSkillReferencesAreVersionPinned(t *testing.T) {
 	if found := checkPinnedLinks(t, "the skill", body); found == 0 {
 		t.Error("the skill has no version-pinned documentation references")
 	}
+
+	// The skill is read both before the tag is pushed and after the
+	// release is published, so it must not state how things stand at the
+	// moment of writing.
+	checkNoStateBoundPhrases(t, "the skill", body)
+	lower := strings.ToLower(flatten(body))
+	for _, want := range []string{
+		"become available once that tag exists",
+		"for an untagged development build",
+	} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("the skill does not give the conditional wording %q", want)
+		}
+	}
 }
 
 // TestSkillIsStandalone covers the skill as a file on its own: it must
@@ -500,7 +514,19 @@ func TestSkillInstallationDocumentationIsPinned(t *testing.T) {
 			t.Errorf("docs/INSTALL.md does not mention %q", want)
 		}
 	}
-	lower := strings.ToLower(text)
+	// The procedure is read before the tag exists and after the release
+	// is published, so it must not state the current publication state.
+	checkNoStateBoundPhrases(t, "docs/INSTALL.md", text)
+
+	lower := strings.ToLower(flatten(text))
+	for _, want := range []string{
+		"become available once that tag exists",
+		"for an untagged development build",
+	} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("docs/INSTALL.md does not give the conditional wording %q", want)
+		}
+	}
 	if !strings.Contains(lower, "does not install the executable") {
 		t.Error("docs/INSTALL.md does not say that installing the skill does not install the executable")
 	}

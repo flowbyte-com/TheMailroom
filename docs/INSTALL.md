@@ -176,9 +176,10 @@ can be copied out of a checkout on its own.
 configure credentials.** The two are separate, and the skill is only
 useful once both the binary and a configuration exist.
 
-> The skill is pinned to the `v1.0.0-rc.2` tag. That tag is not published
-> yet, so the URLs below do not resolve until the release is. Until then,
-> take the skill from a source checkout of `main`.
+> The skill is pinned to the `v1.0.0-rc.2` tag, and the documentation
+> links below become available once that tag exists. For an untagged
+> development build, use the documentation from the matching source
+> checkout.
 
 ### 1. Obtain `SKILL.md`
 
