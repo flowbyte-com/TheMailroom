@@ -512,3 +512,205 @@ func TestRunCancelledWhileBlockedOnInput(t *testing.T) {
 		t.Errorf("cancelled setup left files behind: %v", entries)
 	}
 }
+
+// purelymailScript accepts every preset default for a read-only account.
+func purelymailScript(path string) []string {
+	return []string{
+		"work", "work@purelymail.com",
+		"", "", "", "",
+		"pass show mail/work",
+		"n", path, "n",
+	}
+}
+
+// TestRunPurelymailPresetDefaults covers the preset's interview defaults.
+func TestRunPurelymailPresetDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	out, err := runScript(t, Options{Path: path, Preset: Purelymail}, purelymailScript(path)...)
+	if err != nil {
+		t.Fatalf("Run: %v\n%s", err, out)
+	}
+
+	cfg, loadErr := config.Load(path)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	acc := cfg.Accounts[0]
+	if acc.IMAP.Host != "imap.purelymail.com" {
+		t.Errorf("IMAP host = %q", acc.IMAP.Host)
+	}
+	if acc.IMAP.Port != 993 || !acc.IMAP.TLS || acc.IMAP.StartTLS {
+		t.Errorf("IMAP = port %d tls %v starttls %v, want 993 implicit TLS", acc.IMAP.Port, acc.IMAP.TLS, acc.IMAP.StartTLS)
+	}
+	if acc.IMAP.Username != "work@purelymail.com" {
+		t.Errorf("IMAP username = %q, want the full email address", acc.IMAP.Username)
+	}
+	if acc.Provider != "purelymail" {
+		t.Errorf("provider = %q, want purelymail", acc.Provider)
+	}
+	if got := strings.Join(acc.Permissions, ","); got != "read" {
+		t.Errorf("permissions = %q, want read", got)
+	}
+	if acc.SMTP.Host != "" {
+		t.Errorf("SMTP host = %q, want empty when sending is disabled", acc.SMTP.Host)
+	}
+
+	// The prompt offered the preset host as a default.
+	if !strings.Contains(out, "IMAP host [imap.purelymail.com]") {
+		t.Errorf("the IMAP host default was not offered:\n%s", out)
+	}
+}
+
+// TestRunPurelymailCustomDomain covers a custom-domain address: the preset
+// must not require a purelymail.com suffix and must not auto-detect.
+func TestRunPurelymailCustomDomain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	answers := []string{
+		"work", "work@custom-domain.test",
+		"", "", "", "",
+		"pass show mail/work",
+		"n", path, "n",
+	}
+	if _, err := runScript(t, Options{Path: path, Preset: Purelymail}, answers...); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cfg, loadErr := config.Load(path)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if got := cfg.Accounts[0].IMAP.Username; got != "work@custom-domain.test" {
+		t.Errorf("username = %q, want the full custom-domain address", got)
+	}
+	if got := cfg.Accounts[0].Email; got != "work@custom-domain.test" {
+		t.Errorf("email = %q", got)
+	}
+}
+
+// TestRunPurelymailValuesRemainEditable covers overriding every preset
+// value through the existing prompts.
+func TestRunPurelymailValuesRemainEditable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	answers := []string{
+		"work", "work@purelymail.com",
+		"imap.other.example", "2", "143", "custom-user",
+		"pass show mail/work",
+		"n", path, "n",
+	}
+	if _, err := runScript(t, Options{Path: path, Preset: Purelymail}, answers...); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cfg, loadErr := config.Load(path)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	acc := cfg.Accounts[0]
+	if acc.IMAP.Host != "imap.other.example" {
+		t.Errorf("IMAP host = %q", acc.IMAP.Host)
+	}
+	if acc.IMAP.Port != 143 || !acc.IMAP.StartTLS || acc.IMAP.TLS {
+		t.Errorf("IMAP = port %d tls %v starttls %v, want 143 STARTTLS", acc.IMAP.Port, acc.IMAP.TLS, acc.IMAP.StartTLS)
+	}
+	if acc.IMAP.Username != "custom-user" {
+		t.Errorf("IMAP username = %q", acc.IMAP.Username)
+	}
+}
+
+// TestRunPurelymailSendingIsOptIn covers the SMTP defaults and the
+// requirement that the block appears only after an explicit yes.
+func TestRunPurelymailSendingIsOptIn(t *testing.T) {
+	// Declined: no SMTP block.
+	declined := filepath.Join(t.TempDir(), "declined.yaml")
+	if _, err := runScript(t, Options{Path: declined, Preset: Purelymail}, purelymailScript(declined)...); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	data, readErr := os.ReadFile(declined)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "smtp:") {
+		t.Errorf("a declined preset still wrote an SMTP block:\n%s", data)
+	}
+	cfg, _ := config.Load(declined)
+	if len(cfg.Accounts[0].Permissions) != 1 || cfg.Accounts[0].Permissions[0] != "read" {
+		t.Errorf("permissions = %v, want read only", cfg.Accounts[0].Permissions)
+	}
+
+	// Accepted: SMTP defaults from the preset.
+	accepted := filepath.Join(t.TempDir(), "accepted.yaml")
+	answers := []string{
+		"work", "work@purelymail.com",
+		"", "", "", "",
+		"pass show mail/work",
+		"y",
+		"", "", "", "", "pass show mail/work",
+		accepted, "n",
+	}
+	if _, err := runScript(t, Options{Path: accepted, Preset: Purelymail}, answers...); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cfg, loadErr := config.Load(accepted)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	acc := cfg.Accounts[0]
+	if acc.SMTP.Host != "smtp.purelymail.com" {
+		t.Errorf("SMTP host = %q", acc.SMTP.Host)
+	}
+	if acc.SMTP.Port != 465 || !acc.SMTP.TLS || acc.SMTP.StartTLS {
+		t.Errorf("SMTP = port %d tls %v starttls %v, want 465 implicit TLS", acc.SMTP.Port, acc.SMTP.TLS, acc.SMTP.StartTLS)
+	}
+	if got := strings.Join(acc.Permissions, ","); got != "read,send" {
+		t.Errorf("permissions = %q, want read,send", got)
+	}
+	if len(acc.AttachmentSendPaths) != 0 {
+		t.Error("the preset must not grant attachment sending")
+	}
+}
+
+// TestRunGenericPresetIsUnchanged covers the provider-neutral interview:
+// no preset hosts, no provider label, and the host is still required.
+func TestRunGenericPresetIsUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	out, err := runScript(t, Options{Path: path}, readOnlyScript(path, "pass show mail/work")...)
+	if err != nil {
+		t.Fatalf("Run: %v\n%s", err, out)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(data), "provider:") {
+		t.Errorf("the generic interview wrote a provider label:\n%s", data)
+	}
+	cfg, _ := config.Load(path)
+	if cfg.Accounts[0].IMAP.Host != "mail.example.test" {
+		t.Errorf("IMAP host = %q, want the typed value", cfg.Accounts[0].IMAP.Host)
+	}
+
+	// A blank generic host must be refused rather than defaulted.
+	blank := []string{
+		"work", "work@example.test",
+		"", // blank host: must be rejected, so the next line is the host
+		"mail.example.test", "1", "993", "work", "pass show mail/work",
+		"n", path + ".2", "n",
+	}
+	out2, err2 := runScript(t, Options{Path: path + ".2"}, blank...)
+	if err2 != nil {
+		t.Fatalf("Run: %v\n%s", err2, out2)
+	}
+	if !strings.Contains(out2, "a value is required") {
+		t.Errorf("the generic interview accepted a blank host:\n%s", out2)
+	}
+}
+
+// TestRunPresetYAMLPassesTheLoaderAndDoctor covers validation of the
+// generated document through the real loader.
+func TestRunPresetYAMLPassesTheLoaderAndDoctor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "themailroom.yaml")
+	if _, err := runScript(t, Options{Path: path, Preset: Purelymail}, purelymailScript(path)...); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("the generated document does not load: %v", err)
+	}
+}

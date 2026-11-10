@@ -176,6 +176,17 @@ that the file is readable only by its owner. It refuses to write there and
 tells you how to create the file and restrict it with `icacls` instead of
 claiming a protection that does not exist.
 
+A preset can fill in a provider's recommended servers as interview defaults.
+Presets are optional and never selected automatically:
+
+```sh
+themailroom setup -preset purelymail
+```
+
+See [`docs/PROVIDERS.md`](docs/PROVIDERS.md) for the Purelymail defaults, the
+STARTTLS alternative, app passwords and custom domains. Every preset value
+stays editable, and the preset changes nothing outside the interview.
+
 Setup never opens a network connection, never runs a credential command and
 never starts the server. Afterwards, validate the file and then test
 connectivity as a separate, explicit step:

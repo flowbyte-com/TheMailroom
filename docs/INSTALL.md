@@ -109,7 +109,9 @@ themailroom setup -config /etc/themailroom/themailroom.yaml
 ```
 
 The account is created read-only with verified TLS. Sending is opt-in, and
-attachment sending is never granted. An existing file is not replaced unless
+attachment sending is never granted. Add `-preset purelymail` to fill in
+Purelymail's recommended servers as interview defaults; see
+[`PROVIDERS.md`](PROVIDERS.md). An existing file is not replaced unless
 you pass `-force`, a symbolic link is always refused, and the file is
 validated with the server's own configuration loader before it is written.
 

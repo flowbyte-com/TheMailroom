@@ -3,7 +3,7 @@
 // Usage:
 //
 //	themailroom -config /etc/themailroom.yaml
-//	themailroom setup [-config PATH] [-force]
+//	themailroom setup [-config PATH] [-preset purelymail] [-force]
 //	themailroom doctor [-config PATH] [-network] [-timeout DURATION]
 //
 // The server reads configuration, builds the account registry, registers
@@ -83,8 +83,18 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) int {
 	fs := flag.NewFlagSet("themailroom setup", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	cfgPath := fs.String("config", defaultConfigPath(), "where to write the configuration")
+	presetName := fs.String("preset", "", "provider preset for the interview defaults (purelymail)")
 	force := fs.Bool("force", false, "replace an existing regular file")
 	if err := fs.Parse(args); err != nil {
+		return setupExitUsage
+	}
+
+	// An unknown preset is a usage error: a typo must not silently produce a
+	// configuration with the wrong servers.
+	preset, presetErr := setup.LookupPreset(*presetName)
+	if presetErr != nil {
+		fmt.Fprintf(os.Stderr, "themailroom: %v\n\n", presetErr)
+		fs.Usage()
 		return setupExitUsage
 	}
 
@@ -92,11 +102,12 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) int {
 	defer cancel()
 
 	err := setup.Run(ctx, setup.Options{
-		Path:  *cfgPath,
-		Force: *force,
-		In:    stdin,
-		Out:   stdout,
-		Check: setupCheck,
+		Path:   *cfgPath,
+		Force:  *force,
+		Preset: preset,
+		In:     stdin,
+		Out:    stdout,
+		Check:  setupCheck,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "themailroom: %v\n", err)
