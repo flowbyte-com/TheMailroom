@@ -89,7 +89,7 @@ themailroom -version
 ```
 
 The output names the version, the commit the binary was built from and
-the build date:
+the build date. The published `v1.0.0-rc.1` binary reports:
 
 ```
 themailroom 1.0.0-rc.1 (commit cee0994a42191430f2ced7b16278f3e4aab4bf49, built 2026-11-10T08:21:11Z)
@@ -164,6 +164,97 @@ file and the directories it is told to read:
 ```sh
 sudo rm /usr/local/bin/themailroom
 ```
+
+## Install the agent skill
+
+TheMailroom ships a portable Agent Skill, `skills/themailroom/SKILL.md`.
+It is a single self-contained file in the ordinary Agent Skills format: it
+has YAML frontmatter, it depends on no particular agent framework, and it
+can be copied out of a checkout on its own.
+
+**Installing the skill does not install the executable and does not
+configure credentials.** The two are separate, and the skill is only
+useful once both the binary and a configuration exist.
+
+> The skill is pinned to the `v1.0.0-rc.2` tag. That tag is not published
+> yet, so the URLs below do not resolve until the release is. Until then,
+> take the skill from a source checkout of `main`.
+
+### 1. Obtain `SKILL.md`
+
+From the source archive of the intended release:
+
+```sh
+curl -LO https://github.com/flowbyte-com/TheMailroom/archive/refs/tags/v1.0.0-rc.2.tar.gz
+tar xzf v1.0.0-rc.2.tar.gz
+cp TheMailroom-1.0.0-rc.2/skills/themailroom/SKILL.md .
+```
+
+Or fetch the file on its own:
+
+```sh
+curl -LO https://raw.githubusercontent.com/flowbyte-com/TheMailroom/v1.0.0-rc.2/skills/themailroom/SKILL.md
+```
+
+### 2. Install it
+
+Copy it into the skills directory your agent reads, keeping the
+`<skills directory>/themailroom/SKILL.md` layout the format expects. The
+exact path is agent-specific; the convention is a `skills/<name>/SKILL.md`
+directory under the agent's configuration directory or inside a project.
+
+```sh
+mkdir -p ~/.config/your-agent/skills/themailroom
+cp SKILL.md ~/.config/your-agent/skills/themailroom/SKILL.md
+```
+
+### 3. Confirm the installed file
+
+Check that the frontmatter is intact and that the documentation references
+are the version-pinned ones rather than paths that assume a checkout:
+
+```sh
+head -5 ~/.config/your-agent/skills/themailroom/SKILL.md
+grep -o 'https://[^)]*' ~/.config/your-agent/skills/themailroom/SKILL.md
+```
+
+The first command must show the `name`, `description` and `license` fields
+between two `---` markers. The second must show `raw.githubusercontent.com`
+URLs carrying the release tag, for example
+`.../v1.0.0-rc.2/docs/TOOLS.md`. A reference to `../../docs/…` would
+mean the file still depends on a checkout layout, and it would break once
+copied on its own.
+
+### 4. Install and verify the matching binary
+
+The skill expects a binary that reports the same release:
+
+```sh
+themailroom -version
+```
+
+The output must name `1.0.0-rc.2` and the commit you intended. Install the
+binary as described under [Install a released binary](#install-a-released-binary);
+the skill does not install it for you.
+
+### 5. Configure the MCP stdio server
+
+Configure the account first, with `themailroom setup`, then point your MCP
+client at the binary and the configuration file:
+
+```json
+{
+  "mcpServers": {
+    "themailroom": {
+      "command": "/usr/local/bin/themailroom",
+      "args": ["-config", "/etc/themailroom/themailroom.yaml"]
+    }
+  }
+}
+```
+
+The client configuration contains no credentials. TheMailroom reads the
+secret from the credential command recorded in the configuration file.
 
 ## Build from source
 

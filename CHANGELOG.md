@@ -8,6 +8,99 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 The project is licensed under the GNU Affero General Public License,
 version 3. See [`LICENSE`](LICENSE).
 
+## [1.0.0-rc.2] - 2026-11-10
+
+The second release candidate of TheMailroom V1. It is the first candidate
+that carries the whole onboarding path: the diagnostics command, the setup
+command, an optional provider preset, a portable agent skill and an
+automated acceptance procedure. The release workflow publishes it as a
+prerelease and does not mark it as the latest release.
+
+The binaries report the version `1.0.0-rc.2` in their metadata, and the
+release is published under the `v1.0.0-rc.2` tag.
+
+### Added
+
+- **`themailroom doctor`**, a diagnostic command that checks a
+  configuration without starting the server. Local checks run by default:
+  they parse the configuration, report the file mode, and describe each
+  account's endpoint, TLS mode and credential source by kind only.
+- **Opt-in network diagnostics.** `themailroom doctor -network` adds the
+  connectivity checks — name resolution, TCP, TLS and authentication — and
+  is the only path that opens a socket. A requested network check that
+  fails, times out or is cancelled makes the command exit non-zero.
+- **`themailroom setup`**, an interactive interview that writes a
+  configuration file. It records a credential command rather than a
+  password, and it validates the configuration with the production loader
+  before writing it.
+- **Safe configuration publication.** Setup writes through a temporary file
+  and publishes it atomically, refuses to overwrite an existing
+  destination without an explicit force, refuses a symbolic link, creates
+  the file with mode `0600` on POSIX systems, and refuses a destination
+  directory that other users can write to. An interrupted interview writes
+  nothing and leaves no temporary file.
+- **An optional Purelymail preset.** `themailroom setup -preset purelymail`
+  fills in that provider's defaults during the interview. The preset is a
+  set of defaults and nothing more: every value stays editable, a custom
+  domain is used as given, the domain is never inspected to detect a
+  provider, and the provider label is informational and does not change
+  runtime behaviour.
+- **A portable agent skill**, `skills/themailroom/SKILL.md`, in the
+  ordinary Agent Skills format. It is framework-neutral, carries no
+  dependency on HAL, MPM or any particular agent, and its documentation
+  references are version-pinned so that the file works when it is copied
+  out of a checkout on its own.
+- **An automated onboarding acceptance**, which builds the command from the
+  current commit with the release linker flags, runs the generic and preset
+  interviews, validates the result, starts the server over stdio, checks
+  the tool surface, exercises a read-only workflow against deterministic
+  fixtures, and demonstrates the invalid-configuration, permission-denial
+  and interrupted-setup cases. It needs no network and no mail account.
+
+### Changed
+
+- The skill's guidance on reading tool results is corrected. A tool
+  execution failure sets `isError` and carries human-readable text in
+  `content`; the typed business-error codes are retained in the
+  server-side audit log and are not part of the client payload, and a tool
+  error carries no `structuredContent`. A malformed request or an unknown
+  tool name is a JSON-RPC error rather than a tool result. An agent must
+  not assume a machine-readable code is available, and must not scrape the
+  error text for one.
+- The version inventory under 1.0.0 below now lists `read_attachment`
+  among the read tools. It was present in `v1.0.0-rc.1` and was omitted
+  from that list by mistake; it was not introduced after RC1.
+
+### Security
+
+- Setup never asks for a password and never stores one. A credential
+  command is recorded instead, and it is executed only when a secret is
+  actually needed.
+- The local doctor never executes a credential command and never opens a
+  socket. The credential is resolved only at the authentication stage,
+  after name resolution, the TCP connection and the TLS handshake have
+  succeeded.
+- Setup on Windows refuses to write, because the Go standard library
+  cannot set an access control list and a new file inherits the access
+  control list of its directory. It fails closed and explains how to
+  create and restrict the file by hand instead of claiming a protection
+  that does not exist.
+
+### Known limitations
+
+- **Setup refuses to write on Windows.** Automated configuration writes
+  are not supported there. See the note in the 1.0.0 section below.
+- **OAuth2-only providers remain unsupported.** Authentication is by
+  password or by a credential command.
+- **Live acceptance against a second independent IMAP and SMTP provider
+  has not occurred.** The automated acceptance uses the memory backend and
+  the repository's fixtures, so it proves the onboarding path and the tool
+  surface rather than any real provider. A local acceptance is not
+  evidence that a provider is compatible.
+- **This is a release candidate, not production certification.** The
+  release workflow publishes it as a prerelease and does not mark it as
+  the latest release.
+
 ## [1.0.0-rc.1] - 2026-11-10
 
 The first release candidate of TheMailroom V1. It carries the
@@ -34,8 +127,8 @@ workloads and an explicit security posture.
   `APPEND`, and `BODY.PEEK[]` fetches so reading a message never sets
   `\Seen`.
 - **Read tools.** `list_accounts`, `list_mailboxes`, `list_messages`,
-  `read_message` and `search_messages`, all permission-checked
-  server-side.
+  `read_message`, `read_attachment` and `search_messages`, all
+  permission-checked server-side.
 - **Outbound sending.** `send_message`, with an RFC 5322 composer, a
   recipient policy, a confined attachment resolver and authenticated
   SMTP submission. Reply, forward and mailbox mutation are not
@@ -79,7 +172,18 @@ workloads and an explicit security posture.
   than false. `read_message` returns the parsed attachment list, which is
   authoritative.
 - Reply, forward and mailbox mutation are not implemented.
+- `themailroom setup` refuses to write on Windows. The Go standard library
+  cannot set an access control list, and a new file inherits the access
+  control list of its directory, so a configuration written there could be
+  readable by other users. Setup fails closed and explains how to create
+  and restrict the file by hand instead of claiming a protection that does
+  not exist.
 - The Purelymail live smoke test completed on 2026-10-21. It is not
   production certification.
 
+[1.0.0-rc.2]: https://github.com/flowbyte-com/TheMailroom/releases/tag/v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/flowbyte-com/TheMailroom/releases/tag/v1.0.0-rc.1
+
+The `1.0.0-rc.2` link will not resolve until that release is published. It
+is recorded here so that the changelog and the tag agree, not to announce a
+release that exists.

@@ -13,6 +13,10 @@ the operator has already configured, using that account's own credentials.
 **You cannot create, connect or authenticate an account.** You can help the
 operator configure one, then use the tools it exposes.
 
+This file is self-contained and may be copied on its own. Its documentation
+references are version-pinned to `v1.0.0-rc.2` and resolve once that tag is
+published; before publication they point at a tag that does not exist yet.
+
 ## 1. Get a binary that has `setup` and `doctor`
 
 The published `v1.0.0-rc.1` predates the setup and diagnostic commands. Check
@@ -26,7 +30,8 @@ themailroom doctor -h
 
 If `setup` or `doctor` is missing, the binary is older than the current main
 branch. Ask the operator to install a current build. Do not invent flags or
-work around a missing command. See [`docs/INSTALL.md`](../../docs/INSTALL.md).
+work around a missing command. See
+[`docs/INSTALL.md`](https://raw.githubusercontent.com/flowbyte-com/TheMailroom/v1.0.0-rc.2/docs/INSTALL.md).
 
 ## 2. Configure, with the operator
 
@@ -37,7 +42,7 @@ themailroom setup -config /path/to/themailroom.yaml
 For Purelymail the operator may add `-preset purelymail`. A preset only
 supplies interview defaults; every value stays editable, and it is never
 detected from the email domain. See
-[`docs/PROVIDERS.md`](../../docs/PROVIDERS.md).
+[`docs/PROVIDERS.md`](https://raw.githubusercontent.com/flowbyte-com/TheMailroom/v1.0.0-rc.2/docs/PROVIDERS.md).
 
 **Never ask for a password in chat.** Setup records a credential command
 (for example `pass show mail/work`), which TheMailroom runs itself when it
@@ -122,7 +127,7 @@ and `may_have_been_sent=true` in its text. Match that specific marker, and
 still do not retry.
 
 The full contract, including the error channels and the audit-log fields, is
-in [`docs/TOOLS.md`](../../docs/TOOLS.md).
+in [`docs/TOOLS.md`](https://raw.githubusercontent.com/flowbyte-com/TheMailroom/v1.0.0-rc.2/docs/TOOLS.md).
 
 ## 8. Safe workflows
 

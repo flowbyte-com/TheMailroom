@@ -205,8 +205,11 @@ authentication needs it.
 
 For an agent, [`skills/themailroom/SKILL.md`](skills/themailroom/SKILL.md) is
 a portable Agent Skill covering the same workflow and the operating rules.
-[`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) defines the reproducible onboarding
-acceptance and the separate, authorised live-provider check.
+It is a self-contained file that can be copied out of a checkout; see
+[`docs/INSTALL.md`](docs/INSTALL.md#install-the-agent-skill) for the
+installation procedure. [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md) defines the
+reproducible onboarding acceptance and the separate, authorised
+live-provider check.
 
 ## Configure
 
